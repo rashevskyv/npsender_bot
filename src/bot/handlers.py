@@ -297,8 +297,8 @@ def register_handlers(
             "🔍 *Отримання ваших реєстрів з Нової Пошти...*", parse_mode="Markdown"
         )
         try:
-            api_sheets = await user_np_client.get_scan_sheets()
-            saved_sheets = storage_manager.get_user_scansheets(user_id)
+            api_sheets = [s for s in await user_np_client.get_scan_sheets() if s.count_of_documents > 0]
+            saved_sheets = [s for s in storage_manager.get_user_scansheets(user_id) if s.count_of_documents > 0]
 
             if not api_sheets and not saved_sheets:
                 await status_msg.edit_text(
