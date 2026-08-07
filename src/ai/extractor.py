@@ -64,7 +64,6 @@ class AIExtractor:
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": text},
                 ],
-                temperature=0.1,
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content
@@ -87,7 +86,6 @@ class AIExtractor:
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": text},
                     ],
-                    temperature=0.1,
                 )
                 raw_text = response.choices[0].message.content or ""
                 clean_text = raw_text.replace("```json", "").replace("```", "").strip()

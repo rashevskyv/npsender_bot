@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.4.0
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.4.1
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -19,7 +19,7 @@
 
 - [x] **Крок 3: Інтеграція з AI (OpenAI / Gemini / Local Web2API)**
   - [x] Створити модуль `src/ai/schemas.py` (Pydantic модель для розпарсених даних та розмовного інтенту)
-  - [x] Створити модуль `src/ai/extractor.py` для виклику LLM API з підтримкою custom Base URL (`http://localhost:8081/v1`)
+  - [x] Створити модуль `src/ai/extractor.py` для виклику LLM API з підтримкою новітніх моделей OpenAI (`gpt-5.6-luna`, `gpt-4o-mini`, `o1`, `gemini-3.6-flash`)
   - [x] Реалізувати розпізнавання питань про бота, функціонал та необхідні поля для ТТН
 
 - [x] **Крок 4: Telegram Bot Interface (aiogram 3)**
@@ -30,7 +30,7 @@
   - [x] Відображення карток збережених чернеток ТТН з кнопкою видалення
 
 - [x] **Крок 5: Тестування та Документація**
-  - [x] Проведено натурне тестування створення та видалення ТТН через Nova Poshta API
-  - [x] Додати та оновити модульні тести (`tests/test_ai_extractor.py`, `tests/test_nova_poshta.py`, `tests/test_storage.py`) — 9 passed
+  - [x] Проведено повну перевірку Telegram API (`@npsender_bot`), Nova Poshta API та OpenAI API (`gpt-5.6-luna`)
+  - [x] Модульні тести — 9 passed
   - [x] Оновити `README.md` (англійською мовою)
   - [x] Оновити `docs/credentials_guide.md`
