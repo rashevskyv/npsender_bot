@@ -80,3 +80,18 @@ def test_parsed_recipient_info_multipart():
     assert merged_parsed.city_name == "Київ"
     assert merged_parsed.warehouse_number == 26584
     assert merged_parsed.is_postomat is True
+
+
+def test_parsed_recipient_info_null_coercion():
+    data = {
+        "is_recipient_info": True,
+        "is_postomat": None,
+        "warehouse_number": "26584",
+        "declared_value": "1500 грн",
+        "last_name": "Юрченко",
+        "first_name": "Роман",
+    }
+    parsed = ParsedRecipientInfo(**data)
+    assert parsed.is_postomat is False
+    assert parsed.warehouse_number == 26584
+    assert parsed.full_name == "Юрченко Роман"

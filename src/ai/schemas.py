@@ -1,13 +1,13 @@
 """Pydantic schemas for AI entity extraction and conversational intent."""
 
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ParsedRecipientInfo(BaseModel):
     """Structured recipient details or conversational response from AI model."""
 
-    is_recipient_info: bool = Field(
+    is_recipient_info: Optional[bool] = Field(
         default=True,
         description="True if the message contains recipient data for Nova Poshta express waybill creation, False if it's conversational/chat",
     )
@@ -36,7 +36,7 @@ class ParsedRecipientInfo(BaseModel):
     warehouse_number: Optional[int] = Field(
         default=None, description="Branch or postomat number (Номер відділення або поштомату)"
     )
-    is_postomat: bool = Field(
+    is_postomat: Optional[bool] = Field(
         default=False, description="True if the user specified a postomat (поштомат)"
     )
     street_name: Optional[str] = Field(
@@ -54,6 +54,49 @@ class ParsedRecipientInfo(BaseModel):
     declared_value: Optional[float] = Field(
         default=None, description="Declared value in UAH if specified in text"
     )
+
+    @field_validator("is_postomat", mode="before")
+    @classmethod
+    def convert_postomat(cls, v):
+        if v is None:
+            return False
+        return bool(v)
+
+    @field_validator("is_recipient_info", mode="before")
+    @classmethod
+    def convert_recipient(cls, v):
+        if v is None:
+            return True
+        return bool(v)
+
+    @field_validator("warehouse_number", mode="before")
+    @classmethod
+    def convert_wh(cls, v):
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            digits = "".join(filter(str.isdigit, v))
+            return int(digits) if digits else None
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return None
+
+    @field_validator("declared_value", mode="before")
+    @classmethod
+    def convert_val(cls, v):
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            try:
+                digits_clean = v.replace(",", ".").strip()
+                return float(digits_clean)
+            except ValueError:
+                return None
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return None
 
     @property
     def full_name(self) -> str:
