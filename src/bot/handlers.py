@@ -2,6 +2,7 @@
 
 import datetime
 import logging
+import re
 import uuid
 from typing import Dict, Any, Optional
 
@@ -31,6 +32,13 @@ USER_ACTIVE_SESSIONS: Dict[int, str] = {}  # user_id -> active session_id
 VALUE_OPTIONS = [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
 
 
+def clear_user_active_session(user_id: int):
+    """Clear active waybill session for a given user."""
+    session_id = USER_ACTIVE_SESSIONS.pop(user_id, None)
+    if session_id:
+        PENDING_SESSIONS.pop(session_id, None)
+
+
 def register_handlers(
     settings: Settings,
     ai_extractor: AIExtractor,
@@ -42,6 +50,7 @@ def register_handlers(
     @router.message(Command("start"))
     async def cmd_start(message: Message):
         """Welcome message and basic instructions."""
+        clear_user_active_session(message.from_user.id)
         welcome_text = (
             "👋 **Вітаємо у боті автоматичної генерації ТТН Нової Пошти!**\n\n"
             "Надішліть мені реквізити отримувача у довільному форматі (ПІБ, телефон, місто, номер відділення або поштомату), "
@@ -58,6 +67,7 @@ def register_handlers(
     @router.message(F.text == "❓ Допомога")
     async def cmd_help(message: Message):
         """Help instructions."""
+        clear_user_active_session(message.from_user.id)
         help_text = (
             "📖 **Як користуватися ботом:**\n\n"
             "1. **Налаштування ключів (за бажанням):** Натисніть кнопку `⚙️ Налаштування` або скористайтеся командою `/set_np_key ВАШ_КЛЮЧ`, щоб підключити власний акаунт Нової Пошти.\n"
@@ -73,6 +83,7 @@ def register_handlers(
     @router.message(Command("set_np_key"))
     async def cmd_set_np_key(message: Message):
         """Set user's personal Nova Poshta API key."""
+        clear_user_active_session(message.from_user.id)
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             await message.answer(
@@ -116,6 +127,7 @@ def register_handlers(
     @router.message(Command("set_ai_key"))
     async def cmd_set_ai_key(message: Message):
         """Set user's personal AI API key."""
+        clear_user_active_session(message.from_user.id)
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             await message.answer(
@@ -136,6 +148,7 @@ def register_handlers(
     @router.message(Command("reset_settings"))
     async def cmd_reset_settings(message: Message):
         """Reset custom settings to system defaults."""
+        clear_user_active_session(message.from_user.id)
         storage_manager.reset_user_settings(message.from_user.id)
         await message.answer(
             "🔄 *Ваші персональні ключі та налаштування скинуто до системних за замовчуванням.*",
@@ -147,6 +160,7 @@ def register_handlers(
     @router.message(F.text == "⚙️ Налаштування")
     async def cmd_settings(message: Message):
         """Show current effective settings for the user."""
+        clear_user_active_session(message.from_user.id)
         eff = storage_manager.get_effective_settings(message.from_user.id, settings)
         u_custom = storage_manager.get_user_settings(message.from_user.id)
 
@@ -174,6 +188,7 @@ def register_handlers(
     @router.message(F.text == "📝 Мої чернетки (ТТН)")
     async def cmd_drafts(message: Message):
         """View and manage created waybill drafts."""
+        clear_user_active_session(message.from_user.id)
         user_id = message.from_user.id
         drafts = storage_manager.get_user_drafts(user_id)
 
@@ -216,6 +231,7 @@ def register_handlers(
     @router.message(F.text == "📦 Активні посилки")
     async def cmd_parcels(message: Message):
         """Show active outgoing shipments / waybills."""
+        clear_user_active_session(message.from_user.id)
         eff_settings = storage_manager.get_effective_settings(message.from_user.id, settings)
         user_np_client = NovaPoshtaClient(eff_settings)
 
@@ -632,9 +648,14 @@ def register_handlers(
                 )
                 return
 
-            # Extract warehouse number and postomat status from warehouse_description
-            digits = "".join(filter(str.isdigit, target_draft.warehouse_description))
-            wh_num = int(digits) if digits else 1
+            # Extract warehouse number using regex for №...
+            match = re.search(r"(?:№|№\s*|No|#)\s*(\d+)", target_draft.warehouse_description, re.IGNORECASE)
+            if match:
+                wh_num = int(match.group(1))
+            else:
+                match_fb = re.search(r"\b(\d+)\b", target_draft.warehouse_description)
+                wh_num = int(match_fb.group(1)) if match_fb else 1
+
             is_post = "поштомат" in target_draft.warehouse_description.lower()
 
             # Lookup city & warehouse in Nova Poshta database
