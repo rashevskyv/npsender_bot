@@ -1,7 +1,7 @@
 """Unit tests for Nova Poshta models and client structures."""
 
 import pytest
-from src.nova_poshta.models import CityInfo, WarehouseInfo, WaybillCreateResult
+from src.nova_poshta.models import CityInfo, WarehouseInfo, WaybillCreateResult, WaybillItemInfo
 
 
 def test_city_info_model():
@@ -36,3 +36,18 @@ def test_waybill_result_model():
     )
     assert res.int_doc_number == "20450123456789"
     assert res.cost == 110.5
+
+
+def test_waybill_item_info_model():
+    item = WaybillItemInfo(
+        int_doc_number="20451506103956",
+        state_name="Нова пошта очікує посилку",
+        recipient_name="Юрченко Роман",
+        city_recipient="Київ",
+        address_recipient="Поштомат №26584",
+        cost=100.0,
+        description="Посилка",
+    )
+    assert item.int_doc_number == "20451506103956"
+    assert item.cost == 100.0
+    assert item.city_recipient == "Київ"

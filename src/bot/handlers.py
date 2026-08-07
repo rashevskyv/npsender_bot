@@ -19,6 +19,7 @@ router = Router()
 # In-memory storage for active pending waybill verification sessions
 # session_id -> dict of parsed objects & state
 PENDING_SESSIONS: Dict[str, Dict[str, Any]] = {}
+VALUE_OPTIONS = [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
 
 
 def register_handlers(
@@ -34,8 +35,11 @@ def register_handlers(
             "Send me recipient details in free format (Full name, Phone number, City, Branch/Postomat number), "
             "and I will parse it with AI and generate an Express Waybill (ТТН) for Nova Poshta.\n\n"
             "**Example message:**\n"
-            "`Іванов Петро Васильович 0971234567 Львів відділення 12`\n\n"
-            "Type /help for more instructions or /settings to check status."
+            "`Іванов Петро Васильович 0971234567 Київ поштомат 26584`\n\n"
+            "**Available Commands:**\n"
+            "• `/parcels` — View your active outgoing shipments & tracking info\n"
+            "• `/settings` — Check bot settings & credentials status\n"
+            "• `/help` — Help instructions"
         )
         await message.answer(welcome_text, parse_mode="Markdown")
 
@@ -45,10 +49,10 @@ def register_handlers(
         help_text = (
             "📖 **How to use this bot:**\n\n"
             "1. Paste recipient info in any order in a single message.\n"
-            "2. AI will extract Recipient Name, Phone, City, and Branch/Postomat number.\n"
-            "3. The bot searches Nova Poshta database to locate exact City and Warehouse references.\n"
-            "4. Review the details, toggle Payer (Recipient/Sender) if needed, and click **Create Waybill**.\n\n"
-            "For bug reports or configuration updates, contact your administrator."
+            "2. AI will extract Recipient Name, Phone, City, Branch/Postomat number, Cargo Description, and Declared Value.\n"
+            "3. If any required information is missing, the bot will ask you to clarify.\n"
+            "4. Review the details, toggle Payer (Recipient/Sender), Cargo Type, or Declared Value (Min 500 UAH), and click **Create Waybill**.\n"
+            "5. Use `/parcels` anytime to view and track your outgoing shipments."
         )
         await message.answer(help_text, parse_mode="Markdown")
 
@@ -61,9 +65,50 @@ def register_handlers(
             f"• AI Model: `{settings.ai_model}`\n"
             f"• Default Payer: `{settings.default_payer_type}`\n"
             f"• Default Cargo: `{settings.default_cargo_type}`\n"
+            f"• Min Declared Value: `{settings.default_declared_value} UAH`\n"
             f"• Sender Configured: `{'Yes' if settings.sender_counterparty_ref else 'No (Run fetch_sender_info)'}`"
         )
         await message.answer(status_text, parse_mode="Markdown")
+
+    @router.message(Command("parcels"))
+    async def cmd_parcels(message: Message):
+        """Show active outgoing shipments / waybills."""
+        status_msg = await message.answer(
+            "🔍 *Fetching your active shipments from Nova Poshta...*", parse_mode="Markdown"
+        )
+        try:
+            items = await np_client.get_outgoing_waybills(days_back=30, limit=10)
+            if not items:
+                await status_msg.edit_text(
+                    "📦 *No active outgoing shipments found for the last 30 days.*",
+                    parse_mode="Markdown",
+                )
+                return
+
+            response_lines = ["📦 *Your Active Nova Poshta Shipments (Last 30 days):*\n"]
+            for idx, item in enumerate(items, 1):
+                tracking_url = (
+                    f"https://novaposhta.ua/tracking/?cargo_number={item.int_doc_number}"
+                )
+                response_lines.append(
+                    f"*{idx}. ТТН:* [{item.int_doc_number}]({tracking_url})\n"
+                    f"👤 *Recipient:* {item.recipient_name}\n"
+                    f"🏙 *Destination:* {item.city_recipient}, {item.address_recipient}\n"
+                    f"📝 *Description:* {item.description}\n"
+                    f"💰 *Cost:* ~{item.cost} UAH | 📊 *Status:* {item.state_name}\n"
+                    "----------------------------------------"
+                )
+
+            await status_msg.edit_text(
+                "\n".join(response_lines),
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error(f"Error fetching parcels: {e}", exc_info=True)
+            await status_msg.edit_text(
+                f"❌ *Failed to fetch shipments:* {str(e)}", parse_mode="Markdown"
+            )
 
     @router.message(F.text)
     async def process_text_message(message: Message):
@@ -72,21 +117,38 @@ def register_handlers(
         if text.startswith("/"):
             return
 
-        status_msg = await message.answer("⏳ *Parsing recipient details with AI...*", parse_mode="Markdown")
+        status_msg = await message.answer(
+            "⏳ *Parsing recipient details with AI...*", parse_mode="Markdown"
+        )
 
         try:
             # 1. Parse text with AI
             parsed_info = await ai_extractor.parse_text(text)
 
-            if not parsed_info.city_name or not parsed_info.last_name:
+            # Check missing required fields
+            missing_fields = []
+            if not parsed_info.last_name:
+                missing_fields.append("👤 Recipient Last Name / Full Name (Прізвище та Ім'я)")
+            if not parsed_info.phone:
+                missing_fields.append("📞 Recipient Phone Number (Номер телефону)")
+            if not parsed_info.city_name:
+                missing_fields.append("🏙 Destination City (Населений пункт)")
+            if not parsed_info.warehouse_number:
+                missing_fields.append("📦 Branch or Postomat Number (Номер відділення/поштомату)")
+
+            if missing_fields:
+                missing_str = "\n".join([f"• {field}" for field in missing_fields])
                 await status_msg.edit_text(
-                    "⚠️ *Could not extract complete recipient info.*\n"
-                    "Please make sure your message contains at least a Last Name, Phone Number, City, and Branch/Postomat number."
+                    "⚠️ *Missing Required Recipient Details:*\n\n"
+                    f"{missing_str}\n\n"
+                    "Please send the complete recipient details including all required information."
                 )
                 return
 
             # 2. Lookup City in Nova Poshta
-            await status_msg.edit_text("🔍 *Searching Nova Poshta database for City and Branch...*", parse_mode="Markdown")
+            await status_msg.edit_text(
+                "🔍 *Searching Nova Poshta database for City and Branch...*", parse_mode="Markdown"
+            )
             cities = await np_client.search_city(parsed_info.city_name)
             if not cities:
                 await status_msg.edit_text(
@@ -97,20 +159,25 @@ def register_handlers(
             matched_city = cities[0]
 
             # 3. Lookup Warehouse / Postomat
-            warehouse = None
-            if parsed_info.warehouse_number:
-                warehouse = await np_client.get_warehouse(
-                    city_ref=matched_city.ref,
-                    warehouse_number=parsed_info.warehouse_number,
-                    is_postomat=parsed_info.is_postomat,
-                )
+            warehouse = await np_client.get_warehouse(
+                city_ref=matched_city.ref,
+                warehouse_number=parsed_info.warehouse_number,
+                is_postomat=parsed_info.is_postomat,
+            )
 
             if not warehouse:
                 w_type = "Postomat" if parsed_info.is_postomat else "Branch"
                 await status_msg.edit_text(
-                    f"❌ {w_type} *№ {parsed_info.warehouse_number or 'N/A'}* in city *{matched_city.description}* was not found."
+                    f"❌ {w_type} *№ {parsed_info.warehouse_number}* in city *{matched_city.description}* was not found."
                 )
                 return
+
+            # Enforce minimum declared value of 500 UAH
+            declared_val = max(
+                parsed_info.declared_value or settings.default_declared_value,
+                500.0,
+            )
+            cargo_desc = parsed_info.cargo_description or "Посилка"
 
             # Create session for interactive confirmation
             session_id = str(uuid.uuid4())[:8]
@@ -120,15 +187,19 @@ def register_handlers(
                 "warehouse": warehouse,
                 "payer_type": settings.default_payer_type,
                 "cargo_type": settings.default_cargo_type,
+                "declared_value": declared_val,
+                "cargo_description": cargo_desc,
                 "user_id": message.from_user.id,
             }
 
             card_text = (
                 "📋 *Parsed Recipient Details for Verification:*\n\n"
                 f"👤 *Recipient:* {parsed_info.full_name}\n"
-                f"📞 *Phone:* `{parsed_info.phone or 'N/A'}`\n"
+                f"📞 *Phone:* `{parsed_info.phone}`\n"
                 f"🏙 *City:* {matched_city.description}\n"
-                f"📦 *Destination:* {warehouse.description}\n\n"
+                f"📦 *Destination:* {warehouse.description}\n"
+                f"📝 *Description:* {cargo_desc}\n"
+                f"💰 *Declared Value:* {int(declared_val)} UAH (Min 500 грн)\n\n"
                 "Please review the details below and select an action:"
             )
 
@@ -138,6 +209,7 @@ def register_handlers(
                 reply_markup=get_confirmation_keyboard(
                     payer_type=settings.default_payer_type,
                     cargo_type=settings.default_cargo_type,
+                    declared_value=declared_val,
                     session_id=session_id,
                 ),
             )
@@ -146,13 +218,17 @@ def register_handlers(
             await status_msg.edit_text(f"❌ *An error occurred:* {str(e)}", parse_mode="Markdown")
 
     @router.callback_query(WaybillActionCallback.filter())
-    async def process_waybill_callback(callback: CallbackQuery, callback_data: WaybillActionCallback):
+    async def process_waybill_callback(
+        callback: CallbackQuery, callback_data: WaybillActionCallback
+    ):
         """Handle inline keyboard buttons for waybill creation."""
         session_id = callback_data.session_id
         session = PENDING_SESSIONS.get(session_id)
 
         if not session:
-            await callback.answer("Session expired. Please paste recipient details again.", show_alert=True)
+            await callback.answer(
+                "Session expired. Please paste recipient details again.", show_alert=True
+            )
             return
 
         action = callback_data.action
@@ -170,6 +246,7 @@ def register_handlers(
                 reply_markup=get_confirmation_keyboard(
                     payer_type=new_payer,
                     cargo_type=session["cargo_type"],
+                    declared_value=session["declared_value"],
                     session_id=session_id,
                 )
             )
@@ -183,20 +260,66 @@ def register_handlers(
                 reply_markup=get_confirmation_keyboard(
                     payer_type=session["payer_type"],
                     cargo_type=new_cargo,
+                    declared_value=session["declared_value"],
                     session_id=session_id,
                 )
             )
             await callback.answer(f"Cargo type changed to: {new_cargo}")
             return
 
+        if action == "cycle_value":
+            current_val = session["declared_value"]
+            # Find next option in VALUE_OPTIONS
+            try:
+                curr_idx = VALUE_OPTIONS.index(current_val)
+                next_val = VALUE_OPTIONS[(curr_idx + 1) % len(VALUE_OPTIONS)]
+            except ValueError:
+                next_val = VALUE_OPTIONS[0]
+
+            session["declared_value"] = next_val
+
+            # Update card text with new declared value
+            parsed_info = session["parsed_info"]
+            city = session["city"]
+            warehouse = session["warehouse"]
+            cargo_desc = session["cargo_description"]
+
+            card_text = (
+                "📋 *Parsed Recipient Details for Verification:*\n\n"
+                f"👤 *Recipient:* {parsed_info.full_name}\n"
+                f"📞 *Phone:* `{parsed_info.phone}`\n"
+                f"🏙 *City:* {city.description}\n"
+                f"📦 *Destination:* {warehouse.description}\n"
+                f"📝 *Description:* {cargo_desc}\n"
+                f"💰 *Declared Value:* {int(next_val)} UAH (Min 500 грн)\n\n"
+                "Please review the details below and select an action:"
+            )
+
+            await callback.message.edit_text(
+                card_text,
+                parse_mode="Markdown",
+                reply_markup=get_confirmation_keyboard(
+                    payer_type=session["payer_type"],
+                    cargo_type=session["cargo_type"],
+                    declared_value=next_val,
+                    session_id=session_id,
+                ),
+            )
+            await callback.answer(f"Declared Value set to: {int(next_val)} UAH")
+            return
+
         if action == "confirm":
             await callback.answer("Creating Express Waybill (ТТН)...")
-            await callback.message.edit_text("⏳ *Registering Recipient and Generating ТТН...*", parse_mode="Markdown")
+            await callback.message.edit_text(
+                "⏳ *Registering Recipient and Generating ТТН...*", parse_mode="Markdown"
+            )
 
             parsed_info = session["parsed_info"]
             city = session["city"]
             warehouse = session["warehouse"]
             payer_type = session["payer_type"]
+            declared_value = session["declared_value"]
+            cargo_desc = session["cargo_description"]
 
             try:
                 # Create recipient counterparty
@@ -215,15 +338,17 @@ def register_handlers(
                     recipient_city_ref=city.ref,
                     recipient_warehouse_ref=warehouse.ref,
                     payer_type=payer_type,
-                    description=parsed_info.cargo_description or "Посилка",
+                    description=cargo_desc,
                     seats_amount=settings.default_seats_amount,
                     weight=settings.default_weight,
-                    declared_value=parsed_info.declared_value or settings.default_declared_value,
+                    declared_value=declared_value,
                 )
 
                 PENDING_SESSIONS.pop(session_id, None)
 
-                tracking_url = f"https://novaposhta.ua/tracking/?cargo_number={wb_res.int_doc_number}"
+                tracking_url = (
+                    f"https://novaposhta.ua/tracking/?cargo_number={wb_res.int_doc_number}"
+                )
 
                 success_card = (
                     "✅ *Express Waybill Successfully Created!*\n\n"
@@ -232,8 +357,9 @@ def register_handlers(
                     f"📞 *Phone:* `{parsed_info.phone}`\n"
                     f"🏙 *City:* {city.description}\n"
                     f"📦 *Destination:* {warehouse.description}\n"
+                    f"📝 *Description:* {cargo_desc}\n"
                     f"💳 *Payer:* {payer_type}\n"
-                    f"💰 *Cost:* ~{wb_res.cost} UAH\n"
+                    f"💰 *Cost:* ~{wb_res.cost} UAH | *Declared:* {int(declared_value)} UAH\n"
                     f"📅 *Estimated Delivery:* {wb_res.estimated_delivery_date or 'N/A'}\n\n"
                     f"🔗 [Track Waybill on Nova Poshta]({tracking_url})"
                 )

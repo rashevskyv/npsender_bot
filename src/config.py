@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     default_cargo_type: str = Field("Parcel", alias="DEFAULT_CARGO_TYPE")
     default_seats_amount: int = Field(1, alias="DEFAULT_SEATS_AMOUNT")
     default_weight: float = Field(1.0, alias="DEFAULT_WEIGHT")
-    default_declared_value: float = Field(300.0, alias="DEFAULT_DECLARED_VALUE")
+    default_declared_value: float = Field(500.0, alias="DEFAULT_DECLARED_VALUE")
 
 
 # Lazy global instance initialization

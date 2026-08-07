@@ -6,7 +6,10 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
-- **🤖 AI Entity Extraction**: Parses unstructured text messages (Full Name, Phone, City, Branch/Postomat number) in any order using LLM models.
+- **🤖 AI Entity Extraction**: Parses unstructured text messages (Full Name, Phone, City, Branch/Postomat number, Cargo Description, Declared Value) in any order using LLM models.
+- **🔍 Smart Missing Info Prompting**: Automatically validates extracted details and prompts the user if required recipient info (Full Name, Phone, City, or Branch) is missing.
+- **📦 Active Shipments List (`/parcels`)**: Fetches active outgoing shipments from Nova Poshta API for the last 30 days and displays them in clean, human-readable markdown cards with live tracking links.
+- **💰 Configurable Declared Value & Defaults**: Default minimum declared value set to 500 UAH with quick interactive toggle buttons (500, 1000, 2000, 5000, 10000 UAH).
 - **🔌 Multi-Provider AI Support**:
   1. **OpenAI-compatible endpoints** (e.g. `gemini-web2api v1.2.9` listening on `http://localhost:8081/v1` with `gemini-3.6-flash`).
   2. **Official OpenAI API** (`gpt-4o-mini`, etc.).

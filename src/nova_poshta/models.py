@@ -38,3 +38,19 @@ class WaybillCreateResult(BaseModel):
     ref: str
     cost: float
     estimated_delivery_date: Optional[str] = None
+
+
+class WaybillItemInfo(BaseModel):
+    """Detailed information about an existing express waybill."""
+
+    int_doc_number: str
+    state_name: str
+    recipient_name: str
+    recipient_phone: Optional[str] = None
+    city_recipient: str
+    address_recipient: str
+    cost: float
+    description: str
+    estimated_delivery_date: Optional[str] = None
+    date_created: Optional[str] = None
+

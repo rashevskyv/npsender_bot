@@ -218,3 +218,41 @@ class NovaPoshtaClient:
             cost=float(doc_info.get("CostOnSite", doc_info.get("Cost", 0))),
             estimated_delivery_date=doc_info.get("EstimatedDeliveryDate"),
         )
+
+    async def get_outgoing_waybills(
+        self, days_back: int = 30, limit: int = 10
+    ) -> List[WaybillItemInfo]:
+        """Fetch list of outgoing shipments for the past N days."""
+        today = datetime.date.today()
+        from_date = (today - datetime.timedelta(days=days_back)).strftime("%d.%m.%Y")
+        to_date = today.strftime("%d.%m.%Y")
+
+        res = await self._post(
+            model_name="InternetDocument",
+            called_method="getDocumentList",
+            method_properties={
+                "DateTimeFrom": from_date,
+                "DateTimeTo": to_date,
+                "Page": "1",
+                "Limit": str(limit),
+                "GetFullList": "1",
+            },
+        )
+        items = []
+        for doc in res.get("data", []):
+            cost_val = doc.get("CostOnSite") or doc.get("Cost") or "0"
+            items.append(
+                WaybillItemInfo(
+                    int_doc_number=str(doc.get("IntDocNumber", "")),
+                    state_name=str(doc.get("StateName", "Unspecified")),
+                    recipient_name=str(doc.get("RecipientContactPerson", "N/A")),
+                    recipient_phone=doc.get("RecipientsPhone"),
+                    city_recipient=str(doc.get("CityRecipientDescription", "N/A")),
+                    address_recipient=str(doc.get("RecipientAddressDescription", "N/A")),
+                    cost=float(cost_val),
+                    description=str(doc.get("Description", "Посилка")),
+                    estimated_delivery_date=doc.get("EstimatedDeliveryDate"),
+                    date_created=doc.get("DateTime"),
+                )
+            )
+        return items
