@@ -27,3 +27,12 @@ def test_parsed_recipient_info_partial():
     assert info.full_name == "Петренко Петро"
     assert info.middle_name is None
     assert info.is_postomat is False
+
+
+def test_parsed_recipient_info_conversational():
+    info = ParsedRecipientInfo(
+        is_recipient_info=False,
+        conversational_response="Привіт! Я AI бот для створення ТТН Нової Пошти.",
+    )
+    assert info.is_recipient_info is False
+    assert info.conversational_response == "Привіт! Я AI бот для створення ТТН Нової Пошти."

@@ -1,12 +1,20 @@
-"""Pydantic schemas for AI entity extraction."""
+"""Pydantic schemas for AI entity extraction and conversational intent."""
 
 from typing import Optional
 from pydantic import BaseModel, Field
 
 
 class ParsedRecipientInfo(BaseModel):
-    """Structured recipient details extracted from unstructured text."""
+    """Structured recipient details or conversational response from AI model."""
 
+    is_recipient_info: bool = Field(
+        default=True,
+        description="True if the message contains recipient data for Nova Poshta express waybill creation, False if it's conversational/chat",
+    )
+    conversational_response: Optional[str] = Field(
+        default=None,
+        description="Friendly response explaining bot capabilities, required recipient details, or answering general questions when is_recipient_info is False",
+    )
     last_name: Optional[str] = Field(
         default=None, description="Recipient's last name (Прізвище)"
     )

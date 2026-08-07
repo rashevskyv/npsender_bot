@@ -85,3 +85,24 @@ def get_confirmation_keyboard(
         ]
     )
     return kb
+
+
+class DraftActionCallback(CallbackData, prefix="draft"):
+    """Callback data schema for draft management."""
+
+    action: str  # "delete"
+    ref: str  # Nova Poshta Ref GUID
+
+
+def get_draft_keyboard(ref: str) -> InlineKeyboardMarkup:
+    """Build inline keyboard for a specific draft item."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🗑 Delete Waybill (Видалити ТТН)",
+                    callback_data=DraftActionCallback(action="delete", ref=ref).pack(),
+                )
+            ]
+        ]
+    )

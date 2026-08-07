@@ -7,6 +7,7 @@ import sys
 from aiogram import Bot, Dispatcher
 
 from src.config import get_settings
+from src.storage import UserSettingsManager
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
 from src.bot.handlers import router, register_handlers
@@ -24,6 +25,7 @@ async def main():
     """Start Telegram Bot application."""
     logger.info("Initializing Nova Poshta AI Waybill Bot...")
     settings = get_settings()
+    storage_manager = UserSettingsManager()
 
     bot = Bot(token=settings.telegram_bot_token)
     dp = Dispatcher()
@@ -32,7 +34,7 @@ async def main():
     np_client = NovaPoshtaClient(settings)
 
     # Register handlers with dependencies
-    register_handlers(settings, ai_extractor, np_client)
+    register_handlers(settings, ai_extractor, np_client, storage_manager)
     dp.include_router(router)
 
     logger.info("Starting Bot Long Polling...")

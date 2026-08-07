@@ -256,3 +256,73 @@ class NovaPoshtaClient:
                 )
             )
         return items
+
+    async def fetch_sender_profile(self, api_key: str) -> Dict[str, str]:
+        """Fetch sender profile credentials for a custom API key."""
+        payload = {
+            "apiKey": api_key,
+            "modelName": "Counterparty",
+            "calledMethod": "getCounterparties",
+            "methodProperties": {"CounterpartyProperty": "Sender"},
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(self.api_url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            if not data.get("success", False):
+                err = ", ".join(data.get("errors", []))
+                raise RuntimeError(f"Invalid Nova Poshta API Key: {err}")
+
+            cps = data.get("data", [])
+            if not cps:
+                raise RuntimeError("No Sender counterparties found for this API key.")
+
+            cp = cps[0]
+            cp_ref = cp.get("Ref", "")
+            cp_desc = cp.get("Description", "Sender")
+
+            # Fetch Contact Person
+            c_res = await client.post(
+                self.api_url,
+                json={
+                    "apiKey": api_key,
+                    "modelName": "Counterparty",
+                    "calledMethod": "getCounterpartyContactPersons",
+                    "methodProperties": {"Ref": cp_ref},
+                },
+            )
+            contacts = c_res.json().get("data", [])
+            contact_ref = contacts[0].get("Ref", "") if contacts else ""
+            phone = contacts[0].get("Phones", "") if contacts else ""
+
+            # Fetch Address
+            a_res = await client.post(
+                self.api_url,
+                json={
+                    "apiKey": api_key,
+                    "modelName": "Counterparty",
+                    "calledMethod": "getCounterpartyAddressesAddresses",
+                    "methodProperties": {"Ref": cp_ref, "CounterpartyProperty": "Sender"},
+                },
+            )
+            addrs = a_res.json().get("data", [])
+            address_ref = addrs[0].get("Ref", "") if addrs else ""
+            city_ref = addrs[0].get("CityRef", "") if addrs else ""
+
+            return {
+                "sender_counterparty_ref": cp_ref,
+                "sender_contact_ref": contact_ref,
+                "sender_city_ref": city_ref,
+                "sender_address_ref": address_ref,
+                "sender_phone": phone,
+                "sender_name": cp_desc,
+            }
+
+    async def delete_waybill(self, document_ref: str) -> bool:
+        """Delete an Express Waybill / Draft by document Ref GUID."""
+        res = await self._post(
+            model_name="InternetDocument",
+            called_method="delete",
+            method_properties={"DocumentRefs": document_ref},
+        )
+        return bool(res.get("success", False))

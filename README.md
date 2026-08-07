@@ -6,7 +6,10 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
-- **🤖 AI Entity Extraction**: Parses unstructured text messages (Full Name, Phone, City, Branch/Postomat number, Cargo Description, Declared Value) in any order using LLM models.
+- **🤖 AI Entity Extraction & Conversational Chat**: Parses unstructured text messages (Full Name, Phone, City, Branch/Postomat number, Cargo Description, Declared Value) while also intelligently handling general chat messages, greetings, and queries about bot capabilities.
+- **📄 Waybill Drafts Management (`/drafts`)**: View all created waybill drafts (ТТН) with instant action buttons. Easily delete any draft directly from Nova Poshta API using `🗑 Delete Waybill`.
+- **🔐 Multi-Tenant & Per-User API Keys**: Users can easily bind their own personal Nova Poshta API key (`/set_np_key`) and AI key (`/set_ai_key`) directly via Telegram chat. The bot automatically validates the key and fetches sender credentials.
+- **💬 Conversational Assistance**: When asked "хто ти?" (who are you?) or "що тобі треба?" (what data do you need?), the bot responds conversationally explaining its identity, required fields, and instructions.
 - **🔍 Smart Missing Info Prompting**: Automatically validates extracted details and prompts the user if required recipient info (Full Name, Phone, City, or Branch) is missing.
 - **📦 Active Shipments List (`/parcels`)**: Fetches active outgoing shipments from Nova Poshta API for the last 30 days and displays them in clean, human-readable markdown cards with live tracking links.
 - **💰 Configurable Declared Value & Defaults**: Default minimum declared value set to 500 UAH with quick interactive toggle buttons (500, 1000, 2000, 5000, 10000 UAH).

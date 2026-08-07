@@ -1,5 +1,6 @@
 """Telegram bot message handlers and callback handlers."""
 
+import datetime
 import logging
 import uuid
 from typing import Dict, Any
@@ -9,21 +10,29 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 
 from src.config import Settings
+from src.storage import UserSettingsManager, UserCustomSettings, SavedDraft
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
-from src.bot.keyboards import get_confirmation_keyboard, WaybillActionCallback
+from src.bot.keyboards import (
+    get_confirmation_keyboard,
+    WaybillActionCallback,
+    DraftActionCallback,
+    get_draft_keyboard,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 # In-memory storage for active pending waybill verification sessions
-# session_id -> dict of parsed objects & state
 PENDING_SESSIONS: Dict[str, Dict[str, Any]] = {}
 VALUE_OPTIONS = [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
 
 
 def register_handlers(
-    settings: Settings, ai_extractor: AIExtractor, np_client: NovaPoshtaClient
+    settings: Settings,
+    ai_extractor: AIExtractor,
+    np_client: NovaPoshtaClient,
+    storage_manager: UserSettingsManager,
 ):
     """Factory to inject dependencies into router handlers."""
 
@@ -37,8 +46,12 @@ def register_handlers(
             "**Example message:**\n"
             "`Іванов Петро Васильович 0971234567 Київ поштомат 26584`\n\n"
             "**Available Commands:**\n"
-            "• `/parcels` — View your active outgoing shipments & tracking info\n"
-            "• `/settings` — Check bot settings & credentials status\n"
+            "• `/drafts` — View & manage your created waybill drafts (ТТН)\n"
+            "• `/parcels` — View active outgoing shipments\n"
+            "• `/set_np_key <key>` — Set your personal Nova Poshta API Key\n"
+            "• `/set_ai_key <key>` — Set your personal AI API Key\n"
+            "• `/settings` — Check your active credentials & settings\n"
+            "• `/reset_settings` — Reset to default credentials\n"
             "• `/help` — Help instructions"
         )
         await message.answer(welcome_text, parse_mode="Markdown")
@@ -48,36 +61,159 @@ def register_handlers(
         """Help instructions."""
         help_text = (
             "📖 **How to use this bot:**\n\n"
-            "1. Paste recipient info in any order in a single message.\n"
-            "2. AI will extract Recipient Name, Phone, City, Branch/Postomat number, Cargo Description, and Declared Value.\n"
-            "3. If any required information is missing, the bot will ask you to clarify.\n"
-            "4. Review the details, toggle Payer (Recipient/Sender), Cargo Type, or Declared Value (Min 500 UAH), and click **Create Waybill**.\n"
-            "5. Use `/parcels` anytime to view and track your outgoing shipments."
+            "1. **Set your API Keys (Optional):** Use `/set_np_key YOUR_KEY` to connect your own Nova Poshta account.\n"
+            "2. **Send Recipient Info:** Paste recipient details in any format in a single message.\n"
+            "3. **Automatic Verification:** The bot parses details, verifies City/Branch in Nova Poshta database, and prompts if any info is missing.\n"
+            "4. **Interactive Actions:** Adjust Payer (Recipient/Sender), Cargo Type, or Declared Value (Min 500 UAH), and click **Create Waybill**.\n"
+            "5. **Drafts & Shipments Management:** Use `/drafts` to view/delete your generated waybill drafts, or `/parcels` to track active shipments."
         )
         await message.answer(help_text, parse_mode="Markdown")
 
+    @router.message(Command("set_np_key"))
+    async def cmd_set_np_key(message: Message):
+        """Set user's personal Nova Poshta API key."""
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "⚠️ *Usage:* `/set_np_key YOUR_NOVA_POSHTA_API_KEY`", parse_mode="Markdown"
+            )
+            return
+
+        api_key = parts[1].strip()
+        status_msg = await message.answer(
+            "⏳ *Validating Nova Poshta API Key and fetching sender profile...*", parse_mode="Markdown"
+        )
+
+        try:
+            profile = await np_client.fetch_sender_profile(api_key)
+            u_settings = storage_manager.get_user_settings(message.from_user.id)
+
+            u_settings.nova_poshta_api_key = api_key
+            u_settings.sender_counterparty_ref = profile["sender_counterparty_ref"]
+            u_settings.sender_contact_ref = profile["sender_contact_ref"]
+            u_settings.sender_city_ref = profile["sender_city_ref"]
+            u_settings.sender_address_ref = profile["sender_address_ref"]
+            u_settings.sender_phone = profile["sender_phone"]
+            u_settings.sender_name = profile["sender_name"]
+
+            storage_manager.update_user_settings(message.from_user.id, u_settings)
+
+            await status_msg.edit_text(
+                "✅ *Nova Poshta API Key Successfully Saved!*\n\n"
+                f"👤 *Sender Name:* `{profile['sender_name']}`\n"
+                f"📞 *Sender Phone:* `{profile['sender_phone'] or 'N/A'}`\n"
+                f"🔑 *Key:* `{api_key[:6]}...{api_key[-4:]}`\n\n"
+                "All future waybills generated by you will use your personal Nova Poshta account!",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.error(f"Failed to set Nova Poshta API key: {e}")
+            await status_msg.edit_text(
+                f"❌ *Failed to validate Nova Poshta Key:* {str(e)}", parse_mode="Markdown"
+            )
+
+    @router.message(Command("set_ai_key"))
+    async def cmd_set_ai_key(message: Message):
+        """Set user's personal AI API key."""
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "⚠️ *Usage:* `/set_ai_key YOUR_AI_API_KEY`", parse_mode="Markdown"
+            )
+            return
+
+        api_key = parts[1].strip()
+        u_settings = storage_manager.get_user_settings(message.from_user.id)
+        u_settings.ai_api_key = api_key
+        storage_manager.update_user_settings(message.from_user.id, u_settings)
+
+        await message.answer(
+            f"✅ *Personal AI API Key Successfully Saved!* (`{api_key[:6]}...{api_key[-4:]}`)",
+            parse_mode="Markdown",
+        )
+
+    @router.message(Command("reset_settings"))
+    async def cmd_reset_settings(message: Message):
+        """Reset custom settings to system defaults."""
+        storage_manager.reset_user_settings(message.from_user.id)
+        await message.answer(
+            "🔄 *Your personal API keys and settings have been reset to system defaults.*",
+            parse_mode="Markdown",
+        )
+
     @router.message(Command("settings"))
     async def cmd_settings(message: Message):
-        """Show current bot settings status."""
+        """Show current effective settings for the user."""
+        eff = storage_manager.get_effective_settings(message.from_user.id, settings)
+        u_custom = storage_manager.get_user_settings(message.from_user.id)
+
+        has_custom_np = bool(u_custom.nova_poshta_api_key)
+        has_custom_ai = bool(u_custom.ai_api_key)
+
         status_text = (
-            "⚙️ **Bot Configuration Status:**\n\n"
-            f"• AI Provider: `{settings.ai_provider}`\n"
-            f"• AI Model: `{settings.ai_model}`\n"
-            f"• Default Payer: `{settings.default_payer_type}`\n"
-            f"• Default Cargo: `{settings.default_cargo_type}`\n"
-            f"• Min Declared Value: `{settings.default_declared_value} UAH`\n"
-            f"• Sender Configured: `{'Yes' if settings.sender_counterparty_ref else 'No (Run fetch_sender_info)'}`"
+            "⚙️ **Your Active Configuration:**\n\n"
+            f"• **Nova Poshta Key:** `{'Personal (' + eff.nova_poshta_api_key[:6] + '...)' if has_custom_np else 'System Default'}`\n"
+            f"• **Sender Name:** `{u_custom.sender_name or 'Default Account'}`\n"
+            f"• **Sender Phone:** `{eff.sender_phone or 'N/A'}`\n"
+            f"• **AI Provider:** `{eff.ai_provider}`\n"
+            f"• **AI Key:** `{'Personal Key' if has_custom_ai else 'System Default'}`\n"
+            f"• **AI Model:** `{eff.ai_model}`\n"
+            f"• **Min Declared Value:** `{eff.default_declared_value} UAH`\n\n"
+            "Use `/set_np_key` or `/set_ai_key` to update your credentials, or `/reset_settings` to revert."
         )
         await message.answer(status_text, parse_mode="Markdown")
+
+    @router.message(Command("drafts"))
+    async def cmd_drafts(message: Message):
+        """View and manage created waybill drafts."""
+        user_id = message.from_user.id
+        drafts = storage_manager.get_user_drafts(user_id)
+
+        if not drafts:
+            await message.answer(
+                "📝 *No saved waybill drafts found.*\n"
+                "Create a new waybill by sending recipient info to the bot!",
+                parse_mode="Markdown",
+            )
+            return
+
+        await message.answer(
+            f"📄 *Your Saved Waybill Drafts ({len(drafts)}):*", parse_mode="Markdown"
+        )
+
+        for draft in drafts[:10]:
+            tracking_url = (
+                f"https://novaposhta.ua/tracking/?cargo_number={draft.int_doc_number}"
+            )
+            card = (
+                f"🎫 *ТТН:* `{draft.int_doc_number}`\n"
+                f"👤 *Recipient:* {draft.recipient_name}\n"
+                f"📞 *Phone:* `{draft.recipient_phone}`\n"
+                f"🏙 *City:* {draft.city_description}\n"
+                f"📦 *Destination:* {draft.warehouse_description}\n"
+                f"📝 *Description:* {draft.cargo_description}\n"
+                f"💳 *Payer:* {draft.payer_type} | 💰 *Declared:* {int(draft.declared_value)} UAH\n"
+                f"📅 *Created:* {draft.created_at}\n\n"
+                f"🔗 [Track Waybill]({tracking_url})"
+            )
+            await message.answer(
+                card,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+                reply_markup=get_draft_keyboard(ref=draft.ref),
+            )
 
     @router.message(Command("parcels"))
     async def cmd_parcels(message: Message):
         """Show active outgoing shipments / waybills."""
+        eff_settings = storage_manager.get_effective_settings(message.from_user.id, settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+
         status_msg = await message.answer(
             "🔍 *Fetching your active shipments from Nova Poshta...*", parse_mode="Markdown"
         )
         try:
-            items = await np_client.get_outgoing_waybills(days_back=30, limit=10)
+            items = await user_np_client.get_outgoing_waybills(days_back=30, limit=10)
             if not items:
                 await status_msg.edit_text(
                     "📦 *No active outgoing shipments found for the last 30 days.*",
@@ -117,13 +253,26 @@ def register_handlers(
         if text.startswith("/"):
             return
 
+        eff_settings = storage_manager.get_effective_settings(message.from_user.id, settings)
+        user_ai_extractor = AIExtractor(eff_settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+
         status_msg = await message.answer(
             "⏳ *Parsing recipient details with AI...*", parse_mode="Markdown"
         )
 
         try:
             # 1. Parse text with AI
-            parsed_info = await ai_extractor.parse_text(text)
+            parsed_info = await user_ai_extractor.parse_text(text)
+
+            # Handle conversational / chat intent
+            if not parsed_info.is_recipient_info:
+                resp_text = (
+                    parsed_info.conversational_response
+                    or "👋 Привіт! Я ваш AI-асистент Нової Пошти. Надішліть реквізити отримувача (ПІБ, телефон, місто, номер відділення) для створення ТТН!"
+                )
+                await status_msg.edit_text(resp_text, parse_mode="Markdown")
+                return
 
             # Check missing required fields
             missing_fields = []
@@ -149,7 +298,7 @@ def register_handlers(
             await status_msg.edit_text(
                 "🔍 *Searching Nova Poshta database for City and Branch...*", parse_mode="Markdown"
             )
-            cities = await np_client.search_city(parsed_info.city_name)
+            cities = await user_np_client.search_city(parsed_info.city_name)
             if not cities:
                 await status_msg.edit_text(
                     f"❌ City *'{parsed_info.city_name}'* was not found in Nova Poshta database. Please check spelling."
@@ -159,7 +308,7 @@ def register_handlers(
             matched_city = cities[0]
 
             # 3. Lookup Warehouse / Postomat
-            warehouse = await np_client.get_warehouse(
+            warehouse = await user_np_client.get_warehouse(
                 city_ref=matched_city.ref,
                 warehouse_number=parsed_info.warehouse_number,
                 is_postomat=parsed_info.is_postomat,
@@ -174,7 +323,7 @@ def register_handlers(
 
             # Enforce minimum declared value of 500 UAH
             declared_val = max(
-                parsed_info.declared_value or settings.default_declared_value,
+                parsed_info.declared_value or eff_settings.default_declared_value,
                 500.0,
             )
             cargo_desc = parsed_info.cargo_description or "Посилка"
@@ -185,8 +334,8 @@ def register_handlers(
                 "parsed_info": parsed_info,
                 "city": matched_city,
                 "warehouse": warehouse,
-                "payer_type": settings.default_payer_type,
-                "cargo_type": settings.default_cargo_type,
+                "payer_type": eff_settings.default_payer_type,
+                "cargo_type": eff_settings.default_cargo_type,
                 "declared_value": declared_val,
                 "cargo_description": cargo_desc,
                 "user_id": message.from_user.id,
@@ -207,8 +356,8 @@ def register_handlers(
                 card_text,
                 parse_mode="Markdown",
                 reply_markup=get_confirmation_keyboard(
-                    payer_type=settings.default_payer_type,
-                    cargo_type=settings.default_cargo_type,
+                    payer_type=eff_settings.default_payer_type,
+                    cargo_type=eff_settings.default_cargo_type,
                     declared_value=declared_val,
                     session_id=session_id,
                 ),
@@ -269,7 +418,6 @@ def register_handlers(
 
         if action == "cycle_value":
             current_val = session["declared_value"]
-            # Find next option in VALUE_OPTIONS
             try:
                 curr_idx = VALUE_OPTIONS.index(current_val)
                 next_val = VALUE_OPTIONS[(curr_idx + 1) % len(VALUE_OPTIONS)]
@@ -278,7 +426,6 @@ def register_handlers(
 
             session["declared_value"] = next_val
 
-            # Update card text with new declared value
             parsed_info = session["parsed_info"]
             city = session["city"]
             warehouse = session["warehouse"]
@@ -314,6 +461,10 @@ def register_handlers(
                 "⏳ *Registering Recipient and Generating ТТН...*", parse_mode="Markdown"
             )
 
+            user_id = session["user_id"]
+            eff_settings = storage_manager.get_effective_settings(user_id, settings)
+            user_np_client = NovaPoshtaClient(eff_settings)
+
             parsed_info = session["parsed_info"]
             city = session["city"]
             warehouse = session["warehouse"]
@@ -323,7 +474,7 @@ def register_handlers(
 
             try:
                 # Create recipient counterparty
-                recipient_res = await np_client.create_recipient_counterparty(
+                recipient_res = await user_np_client.create_recipient_counterparty(
                     first_name=parsed_info.first_name or "",
                     last_name=parsed_info.last_name or "",
                     middle_name=parsed_info.middle_name or "",
@@ -331,7 +482,7 @@ def register_handlers(
                 )
 
                 # Create Waybill
-                wb_res = await np_client.create_waybill(
+                wb_res = await user_np_client.create_waybill(
                     recipient_cp_ref=recipient_res.counterparty_ref,
                     recipient_contact_ref=recipient_res.contact_person_ref,
                     recipient_phone=parsed_info.phone or "",
@@ -339,12 +490,28 @@ def register_handlers(
                     recipient_warehouse_ref=warehouse.ref,
                     payer_type=payer_type,
                     description=cargo_desc,
-                    seats_amount=settings.default_seats_amount,
-                    weight=settings.default_weight,
+                    seats_amount=eff_settings.default_seats_amount,
+                    weight=eff_settings.default_weight,
                     declared_value=declared_value,
                 )
 
                 PENDING_SESSIONS.pop(session_id, None)
+
+                # Save created draft locally for user
+                draft_item = SavedDraft(
+                    ref=wb_res.ref,
+                    int_doc_number=wb_res.int_doc_number,
+                    recipient_name=parsed_info.full_name,
+                    recipient_phone=parsed_info.phone or "",
+                    city_description=city.description,
+                    warehouse_description=warehouse.description,
+                    payer_type=payer_type,
+                    cargo_description=cargo_desc,
+                    declared_value=declared_value,
+                    cost=wb_res.cost,
+                    created_at=datetime.date.today().strftime("%d.%m.%Y"),
+                )
+                storage_manager.add_user_draft(user_id, draft_item)
 
                 tracking_url = (
                     f"https://novaposhta.ua/tracking/?cargo_number={wb_res.int_doc_number}"
@@ -365,10 +532,45 @@ def register_handlers(
                 )
 
                 await callback.message.edit_text(
-                    success_card, parse_mode="Markdown", disable_web_page_preview=True
+                    success_card,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                    reply_markup=get_draft_keyboard(ref=wb_res.ref),
                 )
             except Exception as err:
                 logger.error(f"Failed to create waybill: {err}", exc_info=True)
                 await callback.message.edit_text(
                     f"❌ *Failed to create Waybill:* {str(err)}", parse_mode="Markdown"
                 )
+
+    @router.callback_query(DraftActionCallback.filter())
+    async def process_draft_callback(
+        callback: CallbackQuery, callback_data: DraftActionCallback
+    ):
+        """Handle inline actions on saved waybill drafts."""
+        user_id = callback.from_user.id
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+
+        action = callback_data.action
+        ref = callback_data.ref
+
+        if action == "delete":
+            await callback.answer("Deleting Waybill from Nova Poshta...")
+            try:
+                success = await user_np_client.delete_waybill(ref)
+                storage_manager.delete_user_draft(user_id, ref)
+
+                if success:
+                    await callback.message.edit_text(
+                        "🗑 *Waybill (ТТН) was successfully deleted from Nova Poshta database!*",
+                        parse_mode="Markdown",
+                    )
+                else:
+                    await callback.message.edit_text(
+                        "⚠️ *Could not delete Waybill from Nova Poshta (it may have already been deleted or processed).*",
+                        parse_mode="Markdown",
+                    )
+            except Exception as e:
+                logger.error(f"Error deleting waybill: {e}", exc_info=True)
+                await callback.answer(f"Failed to delete: {str(e)}", show_alert=True)

@@ -1,4 +1,4 @@
-"""AI Entity Extractor module for parsing unstructured recipient info using OpenAI API or compatible endpoints."""
+"""AI Entity Extractor module for parsing unstructured recipient info or answering conversational questions."""
 
 import json
 import logging
@@ -11,25 +11,35 @@ from src.ai.schemas import ParsedRecipientInfo
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """You are an expert AI assistant specializing in parsing Ukrainian postal recipient information from unstructured text.
-Your task is to extract recipient details for Nova Poshta express waybill creation.
+SYSTEM_PROMPT = """You are an intelligent assistant for creating Nova Poshta Express Waybills (ТТН) and helping users with shipment details.
 
-Extract the following fields in JSON format:
-- last_name: Recipient's last name (Прізвище)
-- first_name: Recipient's first name (Ім'я)
-- middle_name: Recipient's patronymic/middle name (По-батькові), if present
-- phone: Phone number normalized to 10-12 digits starting with 380 or 0 (e.g., 380971234567 or 0971234567)
-- city_name: City/settlement name without prefix (e.g., "Київ", "Одеса", "Дніпро")
-- settlement_type: Settlement type if specified ("місто", "село", "смт")
-- warehouse_number: Integer branch or postomat number (e.g., 5, 12, 114)
-- is_postomat: Boolean (true if text mentions "поштомат" or "поштомат №...", false for standard branch "відділення")
-- street_name: Street name if address delivery is requested
-- building_number: Building number if address delivery is requested
-- flat_number: Apartment number if address delivery is requested
-- cargo_description: Specific item description if mentioned
-- declared_value: Declared value number if mentioned
+Determine the user's intent:
 
-Return ONLY valid JSON matching this schema. Do not include markdown code blocks or additional text."""
+1. CONVERSATIONAL INTENT (is_recipient_info: false):
+   If the user greets you, asks who you are ("хто ти", "що ти робиш"), asks what you need or how to use you ("що тобі треба", "які дані потрібні", "як з тобою працювати"), or asks general questions:
+   - Set `is_recipient_info`: false
+   - Set `conversational_response`: Provide a polite, friendly response in Ukrainian (or the language used) explaining:
+     • Who you are: AI assistant for instant Nova Poshta Express Waybill (ТТН) generation.
+     • What data you need: Recipient Full Name (ПІБ), Phone (телефон), City (місто), Branch or Postomat number (номер відділення або поштомату), Optional cargo description and declared value.
+     • Available commands: `/parcels` (view active shipments), `/settings` (check settings), `/help`.
+
+2. RECIPIENT INFO INTENT (is_recipient_info: true):
+   If the user provides recipient delivery information:
+   - Set `is_recipient_info`: true
+   - Extract the following fields:
+     • last_name: Recipient's last name (Прізвище)
+     • first_name: Recipient's first name (Ім'я)
+     • middle_name: Recipient's patronymic/middle name (По-батькові), if present
+     • phone: Phone number normalized starting with 380 or 0 (e.g. 380971234567 or 0971234567)
+     • city_name: Settlement name without prefix (e.g. "Київ", "Одеса", "Дніпро")
+     • settlement_type: Settlement type if specified ("місто", "село", "смт")
+     • warehouse_number: Integer branch or postomat number (e.g. 5, 12, 26584)
+     • is_postomat: Boolean (true if text mentions "поштомат", false for "відділення")
+     • street_name, building_number, flat_number: if address delivery
+     • cargo_description: Item description if mentioned
+     • declared_value: Declared value number if mentioned
+
+Return ONLY valid JSON matching this schema."""
 
 
 class AIExtractor:
@@ -38,7 +48,7 @@ class AIExtractor:
     def __init__(self, settings: Settings):
         self.settings = settings
         base_url = settings.ai_base_url if settings.ai_provider == "openai_compatible" else None
-        
+
         self.client = AsyncOpenAI(
             api_key=settings.ai_api_key,
             base_url=base_url,
@@ -52,7 +62,7 @@ class AIExtractor:
                 model=self.model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Parse the following recipient info:\n\n{text}"},
+                    {"role": "user", "content": text},
                 ],
                 temperature=0.1,
                 response_format={"type": "json_object"},
@@ -60,15 +70,17 @@ class AIExtractor:
             content = response.choices[0].message.content
             if not content:
                 logger.warning("Empty response from AI model")
-                return ParsedRecipientInfo()
+                return ParsedRecipientInfo(
+                    is_recipient_info=False,
+                    conversational_response="Я не зміг розпізнати повідомлення. Будь ласка, надішліть реквізити отримувача (ПІБ, телефон, місто, номер відділення) або напишіть /help.",
+                )
 
             data = json.loads(content)
             return ParsedRecipientInfo(**data)
         except Exception as e:
             logger.error(f"Error parsing recipient text with AI: {e}")
-            # Fallback attempt if response_format wasn't respected or JSON parsing failed
             try:
-                # Retry without json_object constraint if unsupported
+                # Fallback without json_object constraint if unsupported
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=[
@@ -78,10 +90,12 @@ class AIExtractor:
                     temperature=0.1,
                 )
                 raw_text = response.choices[0].message.content or ""
-                # Strip markdown blocks if any
                 clean_text = raw_text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(clean_text)
                 return ParsedRecipientInfo(**data)
             except Exception as fallback_err:
                 logger.error(f"Fallback AI parsing failed: {fallback_err}")
-                return ParsedRecipientInfo()
+                return ParsedRecipientInfo(
+                    is_recipient_info=False,
+                    conversational_response="Привіт! Я AI-бот для автоматичного створення накладних Нової Пошти (ТТН). Надішліть мені ПІБ отримувача, телефон, місто та номер відділення/поштомату!",
+                )
