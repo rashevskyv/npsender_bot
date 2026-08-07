@@ -1,5 +1,6 @@
 """Async client for interacting with Nova Poshta API 2.0."""
 
+import asyncio
 import datetime
 import logging
 from typing import Optional, List, Dict, Any

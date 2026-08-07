@@ -95,3 +95,30 @@ def test_parsed_recipient_info_null_coercion():
     assert parsed.is_postomat is False
     assert parsed.warehouse_number == 26584
     assert parsed.full_name == "Юрченко Роман"
+
+
+def test_field_update_preserves_location():
+    # Initial full waybill details
+    prev = ParsedRecipientInfo(
+        first_name="Андрій",
+        last_name="Сирбу",
+        phone="380933608646",
+        city_name="Черкаське",
+        warehouse_number=47988,
+        is_postomat=True,
+        cargo_description="Посилка",
+        declared_value=500.0,
+    )
+
+    # User sends follow-up update: "Опис вантажу - планшет"
+    updated = ParsedRecipientInfo(
+        **{
+            **prev.model_dump(exclude_none=True),
+            "cargo_description": "планшет",
+        }
+    )
+
+    assert updated.cargo_description == "планшет"
+    assert updated.city_name == prev.city_name
+    assert updated.warehouse_number == prev.warehouse_number
+    assert updated.is_postomat == prev.is_postomat

@@ -390,86 +390,109 @@ def register_handlers(
                 )
                 return
 
-            # 2. Lookup City & Filter Warehouses in Nova Poshta
-            await status_msg.edit_text(
-                "🔍 *Пошук населеного пункту та перевірка відділення у базі Нової Пошти...*", parse_mode="Markdown"
+            # Check if city and warehouse are already resolved in active session
+            existing_session = PENDING_SESSIONS.get(active_session_id) if active_session_id else None
+            has_resolved_location = (
+                existing_session is not None
+                and existing_session.get("city") is not None
+                and existing_session.get("warehouse") is not None
             )
-            cities = await user_np_client.search_city(parsed_info.city_name)
-            if not cities:
-                await status_msg.edit_text(
-                    f"❌ Населений пункт *'{parsed_info.city_name}'* не знайдено у базі Нової Пошти. Перевірте написання."
-                )
-                return
 
-            # Filter cities by region_name (Oblast) or district_name if specified by user
-            if parsed_info.region_name:
-                reg_lower = parsed_info.region_name.lower()
-                filtered = [
-                    c for c in cities
-                    if (c.area and reg_lower in c.area.lower()) or (reg_lower in c.description.lower())
-                ]
-                if filtered:
-                    cities = filtered
+            city_changed = (
+                not prev_parsed_info
+                or parsed_info.city_name != prev_parsed_info.city_name
+                or parsed_info.region_name != prev_parsed_info.region_name
+            )
+            wh_changed = (
+                not prev_parsed_info
+                or parsed_info.warehouse_number != prev_parsed_info.warehouse_number
+                or parsed_info.is_postomat != prev_parsed_info.is_postomat
+            )
 
-            # Find matching (city, warehouse) pairs across candidate cities
-            matching_candidates = []
-            for c in cities:
-                try:
-                    wh = await user_np_client.get_warehouse(
-                        city_ref=c.ref,
-                        warehouse_number=parsed_info.warehouse_number,
-                        is_postomat=parsed_info.is_postomat,
-                    )
-                    if wh:
-                        matching_candidates.append((c, wh))
-                except Exception as e:
-                    logger.warning(f"Error checking warehouse for city {c.description}: {e}")
-                await asyncio.sleep(0.25)
-
-            w_type = "Поштомат" if parsed_info.is_postomat else "Відділення"
-
-            if not matching_candidates:
-                await status_msg.edit_text(
-                    f"❌ {w_type} *№ {parsed_info.warehouse_number}* у населеному пункті *{parsed_info.city_name}* не знайдено."
-                )
-                return
-
-            # Filter matching_candidates further if street_name is provided
-            if len(matching_candidates) > 1 and parsed_info.street_name:
-                st_lower = parsed_info.street_name.lower()
-                addr_filtered = [
-                    (c, w) for (c, w) in matching_candidates
-                    if st_lower in w.description.lower()
-                ]
-                if addr_filtered:
-                    matching_candidates = addr_filtered
-
-            # Handle single vs multiple candidates
-            if len(matching_candidates) == 1:
-                matched_city, warehouse = matching_candidates[0]
+            if has_resolved_location and not city_changed and not wh_changed:
+                matched_city = existing_session["city"]
+                warehouse = existing_session["warehouse"]
             else:
-                # Save candidates in session and present city disambiguation keyboard
-                PENDING_SESSIONS[session_id] = {
-                    "parsed_info": parsed_info,
-                    "candidates": matching_candidates,
-                    "user_id": user_id,
-                }
-                USER_ACTIVE_SESSIONS[user_id] = session_id
-
-                candidate_text_lines = [
-                    f"⚠️ *Знайдено декілька населених пунктів з назвою '{parsed_info.city_name}', де є {w_type} № {parsed_info.warehouse_number}:*\n"
-                ]
-                for idx, (c, w) in enumerate(matching_candidates, 1):
-                    area_info = f" ({c.area})" if c.area else ""
-                    candidate_text_lines.append(f"*{idx}.* {c.description}{area_info}\n📍 `{w.description}`\n")
-                candidate_text_lines.append("Будь ласка, оберіть потрібний населений пункт нижче:")
-
+                # 2. Lookup City & Filter Warehouses in Nova Poshta
                 await status_msg.edit_text(
-                    "\n".join(candidate_text_lines),
-                    parse_mode="Markdown",
-                    reply_markup=get_city_selection_keyboard(matching_candidates, session_id),
+                    "🔍 *Пошук населеного пункту та перевірка відділення у базі Нової Пошти...*", parse_mode="Markdown"
                 )
-                return
+                cities = await user_np_client.search_city(parsed_info.city_name)
+                if not cities:
+                    await status_msg.edit_text(
+                        f"❌ Населений пункт *'{parsed_info.city_name}'* не знайдено у базі Нової Пошти. Перевірте написання."
+                    )
+                    return
+
+                # Filter cities by region_name (Oblast) or district_name if specified by user
+                if parsed_info.region_name:
+                    reg_lower = parsed_info.region_name.lower()
+                    filtered = [
+                        c for c in cities
+                        if (c.area and reg_lower in c.area.lower()) or (reg_lower in c.description.lower())
+                    ]
+                    if filtered:
+                        cities = filtered
+
+                # Find matching (city, warehouse) pairs across candidate cities
+                matching_candidates = []
+                for c in cities:
+                    try:
+                        wh = await user_np_client.get_warehouse(
+                            city_ref=c.ref,
+                            warehouse_number=parsed_info.warehouse_number,
+                            is_postomat=parsed_info.is_postomat,
+                        )
+                        if wh:
+                            matching_candidates.append((c, wh))
+                    except Exception as e:
+                        logger.warning(f"Error checking warehouse for city {c.description}: {e}")
+                    await asyncio.sleep(0.25)
+
+                w_type = "Поштомат" if parsed_info.is_postomat else "Відділення"
+
+                if not matching_candidates:
+                    await status_msg.edit_text(
+                        f"❌ {w_type} *№ {parsed_info.warehouse_number}* у населеному пункті *{parsed_info.city_name}* не знайдено."
+                    )
+                    return
+
+                # Filter matching_candidates further if street_name is provided
+                if len(matching_candidates) > 1 and parsed_info.street_name:
+                    st_lower = parsed_info.street_name.lower()
+                    addr_filtered = [
+                        (c, w) for (c, w) in matching_candidates
+                        if st_lower in w.description.lower()
+                    ]
+                    if addr_filtered:
+                        matching_candidates = addr_filtered
+
+                # Handle single vs multiple candidates
+                if len(matching_candidates) == 1:
+                    matched_city, warehouse = matching_candidates[0]
+                else:
+                    # Save candidates in session and present city disambiguation keyboard
+                    PENDING_SESSIONS[session_id] = {
+                        "parsed_info": parsed_info,
+                        "candidates": matching_candidates,
+                        "user_id": user_id,
+                    }
+                    USER_ACTIVE_SESSIONS[user_id] = session_id
+
+                    candidate_text_lines = [
+                        f"⚠️ *Знайдено декілька населених пунктів з назвою '{parsed_info.city_name}', де є {w_type} № {parsed_info.warehouse_number}:*\n"
+                    ]
+                    for idx, (c, w) in enumerate(matching_candidates, 1):
+                        area_info = f" ({c.area})" if c.area else ""
+                        candidate_text_lines.append(f"*{idx}.* {c.description}{area_info}\n📍 `{w.description}`\n")
+                    candidate_text_lines.append("Будь ласка, оберіть потрібний населений пункт нижче:")
+
+                    await status_msg.edit_text(
+                        "\n".join(candidate_text_lines),
+                        parse_mode="Markdown",
+                        reply_markup=get_city_selection_keyboard(matching_candidates, session_id),
+                    )
+                    return
 
             # Enforce minimum declared value of 500 UAH
             declared_val = max(
