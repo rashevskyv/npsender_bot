@@ -30,6 +30,12 @@ class ParsedRecipientInfo(BaseModel):
     city_name: Optional[str] = Field(
         default=None, description="City, town, or village name (Назва населеного пункту)"
     )
+    region_name: Optional[str] = Field(
+        default=None, description="Oblast/Region name if specified (Область)"
+    )
+    district_name: Optional[str] = Field(
+        default=None, description="District/Raion name if specified (Район)"
+    )
     settlement_type: Optional[str] = Field(
         default=None, description="Settlement type if specified (місто, село, смт)"
     )

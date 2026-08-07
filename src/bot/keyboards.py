@@ -133,3 +133,31 @@ def get_draft_keyboard(ref: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+class CitySelectCallback(CallbackData, prefix="citysel"):
+    """Callback data schema for selecting city when duplicates exist."""
+
+    city_ref: str
+    session_id: str
+
+
+def get_city_selection_keyboard(
+    candidates: list, session_id: str
+) -> InlineKeyboardMarkup:
+    """Build inline keyboard to let user pick between duplicate cities."""
+    buttons = []
+    for city, warehouse in candidates:
+        area_str = f" ({city.area})" if city.area else ""
+        label = f"🏙 {city.description}{area_str}"
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=CitySelectCallback(
+                        city_ref=city.ref, session_id=session_id
+                    ).pack(),
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

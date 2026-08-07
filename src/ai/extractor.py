@@ -32,7 +32,9 @@ Determine the user's intent:
      • first_name: Recipient's first name (Ім'я)
      • middle_name: Recipient's patronymic/middle name (По-батькові), if present
      • phone: Phone number normalized starting with 380 or 0 (e.g. 380971234567 or 0971234567)
-     • city_name: Settlement name without prefix (e.g. "Київ", "Одеса", "Дніпро", "Рівне")
+     • city_name: Settlement name without prefix (e.g. "Київ", "Одеса", "Дніпро", "Рівне", "Черкаське")
+     • region_name: Oblast name if specified (e.g. "Дніпропетровська", "Донецька", "Київська")
+     • district_name: District/Raion name if specified (e.g. "Новомосковський", "Краматорський")
      • settlement_type: Settlement type if specified ("місто", "село", "смт")
      • warehouse_number: Primary integer branch or postomat number (e.g. 36, 12, 26584). 
        IMPORTANT: If the text includes a branch/postomat number AND a physical street address of the branch (e.g. "Відділення №36 (до 30 кг на одне місце): вул. Княгині Ольги, 8" or "Поштомат №26584 (вул. Миколайчука 15v)"), extract ONLY the branch/postomat integer ID (`36` or `26584`). Ignore weight limits "(до 30 кг)" and street numbers "вул. Княгині Ольги, 8" when determining `warehouse_number`!

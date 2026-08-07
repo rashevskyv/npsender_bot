@@ -1,6 +1,71 @@
 {
   "252419732": [
     {
+      "ref": "019fdced-558f-7f7f-aede-4700547be216",
+      "int_doc_number": "20451506128512",
+      "recipient_name": "Мартинюк Володимир",
+      "recipient_phone": "0973524500",
+      "city_description": "Івано-Франківськ",
+      "warehouse_description": "Відділення №19 (до 30 кг на одне місце): вул. Богдана Хмельницького, 36",
+      "payer_type": "Recipient",
+      "cargo_description": "док-станція",
+      "declared_value": 500.0,
+      "cost": 70.0,
+      "created_at": "07.08.2026"
+    },
+    {
+      "ref": "019fdce9-9609-7b30-9e21-db41444d8436",
+      "int_doc_number": "20451506126470",
+      "recipient_name": "Сергієнко Влад",
+      "recipient_phone": "380634588772",
+      "city_description": "Київ",
+      "warehouse_description": "Відділення №330 (до 30 кг на одне місце): просп. Леся Курбаса, 9г",
+      "payer_type": "Recipient",
+      "cargo_description": "сувенір",
+      "declared_value": 500.0,
+      "cost": 90.0,
+      "created_at": "07.08.2026"
+    },
+    {
+      "ref": "019fdce8-73a2-7bc5-9a34-c9f711b27633",
+      "int_doc_number": "20451506125831",
+      "recipient_name": "Ковальчук Р О",
+      "recipient_phone": "380631344371",
+      "city_description": "Житомир",
+      "warehouse_description": "Відділення №19 (до 10 кг): вул. Чуднівська (ран. Черняховського), 92 (ТЦ\"Океан\")",
+      "payer_type": "Recipient",
+      "cargo_description": "сувенір",
+      "declared_value": 500.0,
+      "cost": 90.0,
+      "created_at": "07.08.2026"
+    },
+    {
+      "ref": "019fdce7-bba2-738b-bd19-4dbe3c81dab0",
+      "int_doc_number": "20451506125433",
+      "recipient_name": "Кравченко Іванна",
+      "recipient_phone": "380662811588",
+      "city_description": "Одеса",
+      "warehouse_description": "Поштомат \"Нова Пошта\" №25159: вул. Середньофонтанська, 53/55 (с/м Точка)",
+      "payer_type": "Recipient",
+      "cargo_description": "сувенір",
+      "declared_value": 500.0,
+      "cost": 100.0,
+      "created_at": "07.08.2026"
+    },
+    {
+      "ref": "019fdce6-8b48-7fed-833e-649375a1fccb",
+      "int_doc_number": "20451506124733",
+      "recipient_name": "Юрченко Роман Сергійович",
+      "recipient_phone": "0995360818",
+      "city_description": "Київ",
+      "warehouse_description": "Поштомат \"Нова Пошта\" №26584: вул. Івана Миколайчука, 15в (маг. \"Продукти\")",
+      "payer_type": "Recipient",
+      "cargo_description": "Сувенір",
+      "declared_value": 500.0,
+      "cost": 100.0,
+      "created_at": "07.08.2026"
+    },
+    {
       "ref": "019fdce1-93d4-7c2a-9cbf-f9f357b15529",
       "int_doc_number": "20451506121770",
       "recipient_name": "Кузло Антон",

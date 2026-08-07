@@ -21,6 +21,8 @@ from src.bot.keyboards import (
     WaybillActionCallback,
     DraftActionCallback,
     get_draft_keyboard,
+    CitySelectCallback,
+    get_city_selection_keyboard,
 )
 
 logger = logging.getLogger(__name__)
@@ -388,30 +390,83 @@ def register_handlers(
                 )
                 return
 
-            # 2. Lookup City in Nova Poshta
+            # 2. Lookup City & Filter Warehouses in Nova Poshta
             await status_msg.edit_text(
-                "🔍 *Пошук міста та відділення у базі Нової Пошти...*", parse_mode="Markdown"
+                "🔍 *Пошук населеного пункту та перевірка відділення у базі Нової Пошти...*", parse_mode="Markdown"
             )
             cities = await user_np_client.search_city(parsed_info.city_name)
             if not cities:
                 await status_msg.edit_text(
-                    f"❌ Місто *'{parsed_info.city_name}'* не знайдено у базі Нової Пошти. Перевірте написання."
+                    f"❌ Населений пункт *'{parsed_info.city_name}'* не знайдено у базі Нової Пошти. Перевірте написання."
                 )
                 return
 
-            matched_city = cities[0]
+            # Filter cities by region_name (Oblast) or district_name if specified by user
+            if parsed_info.region_name:
+                reg_lower = parsed_info.region_name.lower()
+                filtered = [
+                    c for c in cities
+                    if (c.area and reg_lower in c.area.lower()) or (reg_lower in c.description.lower())
+                ]
+                if filtered:
+                    cities = filtered
 
-            # 3. Lookup Warehouse / Postomat
-            warehouse = await user_np_client.get_warehouse(
-                city_ref=matched_city.ref,
-                warehouse_number=parsed_info.warehouse_number,
-                is_postomat=parsed_info.is_postomat,
-            )
+            # Find matching (city, warehouse) pairs across candidate cities
+            matching_candidates = []
+            for c in cities:
+                try:
+                    wh = await user_np_client.get_warehouse(
+                        city_ref=c.ref,
+                        warehouse_number=parsed_info.warehouse_number,
+                        is_postomat=parsed_info.is_postomat,
+                    )
+                    if wh:
+                        matching_candidates.append((c, wh))
+                except Exception as e:
+                    logger.warning(f"Error checking warehouse for city {c.description}: {e}")
 
-            if not warehouse:
-                w_type = "Поштомат" if parsed_info.is_postomat else "Відділення"
+            w_type = "Поштомат" if parsed_info.is_postomat else "Відділення"
+
+            if not matching_candidates:
                 await status_msg.edit_text(
-                    f"❌ {w_type} *№ {parsed_info.warehouse_number}* у місті *{matched_city.description}* не знайдено."
+                    f"❌ {w_type} *№ {parsed_info.warehouse_number}* у населеному пункті *{parsed_info.city_name}* не знайдено."
+                )
+                return
+
+            # Filter matching_candidates further if street_name is provided
+            if len(matching_candidates) > 1 and parsed_info.street_name:
+                st_lower = parsed_info.street_name.lower()
+                addr_filtered = [
+                    (c, w) for (c, w) in matching_candidates
+                    if st_lower in w.description.lower()
+                ]
+                if addr_filtered:
+                    matching_candidates = addr_filtered
+
+            # Handle single vs multiple candidates
+            if len(matching_candidates) == 1:
+                matched_city, warehouse = matching_candidates[0]
+            else:
+                # Save candidates in session and present city disambiguation keyboard
+                PENDING_SESSIONS[session_id] = {
+                    "parsed_info": parsed_info,
+                    "candidates": matching_candidates,
+                    "user_id": user_id,
+                }
+                USER_ACTIVE_SESSIONS[user_id] = session_id
+
+                candidate_text_lines = [
+                    f"⚠️ *Знайдено декілька населених пунктів з назвою '{parsed_info.city_name}', де є {w_type} № {parsed_info.warehouse_number}:*\n"
+                ]
+                for idx, (c, w) in enumerate(matching_candidates, 1):
+                    area_info = f" ({c.area})" if c.area else ""
+                    candidate_text_lines.append(f"*{idx}.* {c.description}{area_info}\n📍 `{w.description}`\n")
+                candidate_text_lines.append("Будь ласка, оберіть потрібний населений пункт нижче:")
+
+                await status_msg.edit_text(
+                    "\n".join(candidate_text_lines),
+                    parse_mode="Markdown",
+                    reply_markup=get_city_selection_keyboard(matching_candidates, session_id),
                 )
                 return
 
@@ -767,3 +822,66 @@ def register_handlers(
             except Exception as e:
                 logger.error(f"Error deleting waybill: {e}", exc_info=True)
                 await callback.answer(f"Помилка видалення: {str(e)}", show_alert=True)
+
+    @router.callback_query(CitySelectCallback.filter())
+    async def process_city_select_callback(
+        callback: CallbackQuery, callback_data: CitySelectCallback
+    ):
+        """Handle user selection of a city when multiple candidates match."""
+        session_id = callback_data.session_id
+        session = PENDING_SESSIONS.get(session_id)
+
+        if not session or "candidates" not in session:
+            await callback.answer("Сесія застаріла. Надішліть реквізити заново.", show_alert=True)
+            return
+
+        user_id = callback.from_user.id
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+
+        candidates = session["candidates"]
+        target_ref = callback_data.city_ref
+
+        selected = next((pair for pair in candidates if pair[0].ref == target_ref), None)
+        if not selected:
+            await callback.answer("Населений пункт не знайдено.", show_alert=True)
+            return
+
+        matched_city, warehouse = selected
+        parsed_info = session["parsed_info"]
+
+        declared_val = max(
+            parsed_info.declared_value or eff_settings.default_declared_value,
+            500.0,
+        )
+        cargo_desc = parsed_info.cargo_description or "Посилка"
+
+        session["city"] = matched_city
+        session["warehouse"] = warehouse
+        session["payer_type"] = eff_settings.default_payer_type
+        session["cargo_type"] = eff_settings.default_cargo_type
+        session["declared_value"] = declared_val
+        session["cargo_description"] = cargo_desc
+        session.pop("candidates", None)
+
+        card_text = (
+            "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+            f"👤 *Отримувач:* {parsed_info.full_name}\n"
+            f"📞 *Телефон:* `{parsed_info.phone}`\n"
+            f"🏙 *Місто:* {matched_city.description}\n"
+            f"📦 *Пункт призначення:* {warehouse.description}\n"
+            f"📝 *Опис вантажу:* {cargo_desc}\n"
+            f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n\n"
+            "Перевірте дані та оберіть дію нижче:"
+        )
+
+        await callback.message.edit_text(
+            card_text,
+            parse_mode="Markdown",
+            reply_markup=get_confirmation_keyboard(
+                payer_type=eff_settings.default_payer_type,
+                cargo_type=eff_settings.default_cargo_type,
+                declared_value=declared_val,
+                session_id=session_id,
+            ),
+        )
+        await callback.answer(f"Обрано: {matched_city.description}")
