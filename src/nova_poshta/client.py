@@ -26,26 +26,39 @@ class NovaPoshtaClient:
         self.settings = settings
 
     async def _post(
-        self, model_name: str, called_method: str, method_properties: Dict[str, Any]
+        self,
+        model_name: str,
+        called_method: str,
+        method_properties: Dict[str, Any],
+        max_retries: int = 2,
     ) -> Dict[str, Any]:
-        """Make raw POST request to Nova Poshta API."""
+        """Make raw POST request to Nova Poshta API with automatic retry on rate limits."""
         payload = {
             "apiKey": self.api_key,
             "modelName": model_name,
             "calledMethod": called_method,
             "methodProperties": method_properties,
         }
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(self.api_url, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            if not data.get("success", False):
-                errors = ", ".join(data.get("errors", []))
-                warnings = ", ".join(data.get("warnings", []))
-                err_msg = f"Nova Poshta API Error [{model_name}/{called_method}]: {errors or warnings}"
-                logger.error(err_msg)
-                raise RuntimeError(err_msg)
-            return data
+        for attempt in range(max_retries + 1):
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(self.api_url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                if not data.get("success", False):
+                    errors = ", ".join(data.get("errors", []))
+                    warnings = ", ".join(data.get("warnings", []))
+                    err_msg = f"Nova Poshta API Error [{model_name}/{called_method}]: {errors or warnings}"
+
+                    if ("many requests" in err_msg.lower() or "too many" in err_msg.lower()) and attempt < max_retries:
+                        logger.warning(
+                            f"Rate limited by Nova Poshta API ({err_msg}). Retrying in 0.6s (attempt {attempt + 1}/{max_retries})..."
+                        )
+                        await asyncio.sleep(0.6 * (attempt + 1))
+                        continue
+
+                    logger.error(err_msg)
+                    raise RuntimeError(err_msg)
+                return data
 
     async def search_city(self, city_name: str) -> List[CityInfo]:
         """Search for a city by name."""

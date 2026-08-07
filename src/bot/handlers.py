@@ -424,6 +424,7 @@ def register_handlers(
                         matching_candidates.append((c, wh))
                 except Exception as e:
                     logger.warning(f"Error checking warehouse for city {c.description}: {e}")
+                await asyncio.sleep(0.25)
 
             w_type = "Поштомат" if parsed_info.is_postomat else "Відділення"
 
