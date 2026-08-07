@@ -24,9 +24,9 @@ Determine the user's intent:
      • Available features: View active shipments, manage waybill drafts, toggle payer & cargo settings.
 
 2. RECIPIENT INFO OR CONTEXTUAL UPDATE INTENT (is_recipient_info: true):
-   If the user provides recipient delivery information OR sends a follow-up word/phrase modifying an active pending shipment (e.g., "сувенір", "оцінка 1500", "платник відправник", "зміни ім'я на..."):
+   If the user provides recipient delivery information OR sends follow-up/reposted/forwarded messages containing missing parts of an active shipment (e.g., first message has name & phone, second forwarded message has city & branch):
    - Set `is_recipient_info`: true
-   - If previous recipient data is provided in the prompt, MERGE the previous data with the new user updates! For example, if previous data had recipient name/city/branch and the user sends "сувенір", retain the recipient name/city/branch and set `cargo_description`: "сувенір".
+   - ALWAYS MERGE previous active recipient data with new updates. Keep all non-null fields from previous data (last_name, first_name, middle_name, phone, city_name, warehouse_number, etc.) unless the new message explicitly overrides them.
    - Extract/merge the following fields:
      • last_name: Recipient's last name (Прізвище)
      • first_name: Recipient's first name (Ім'я)

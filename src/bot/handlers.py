@@ -11,6 +11,7 @@ from aiogram.types import Message, CallbackQuery
 
 from src.config import Settings
 from src.storage import UserSettingsManager, UserCustomSettings, SavedDraft
+from src.ai.schemas import ParsedRecipientInfo
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
 from src.bot.keyboards import (
@@ -292,6 +293,9 @@ def register_handlers(
                 await status_msg.edit_text(resp_text, parse_mode="Markdown")
                 return
 
+            # Get or generate active session ID
+            session_id = active_session_id or str(uuid.uuid4())[:8]
+
             # Check missing required fields
             missing_fields = []
             if not parsed_info.last_name:
@@ -304,11 +308,29 @@ def register_handlers(
                 missing_fields.append("📦 Номер відділення або поштомату")
 
             if missing_fields:
+                # Save partial session so follow-up forwarded messages merge seamlessly
+                PENDING_SESSIONS[session_id] = {
+                    "parsed_info": parsed_info,
+                    "user_id": user_id,
+                }
+                USER_ACTIVE_SESSIONS[user_id] = session_id
+
                 missing_str = "\n".join([f"• {field}" for field in missing_fields])
+                known_name = parsed_info.full_name or "Не вказано"
+                known_phone = parsed_info.phone or "Не вказано"
+                known_city = parsed_info.city_name or "Не вказано"
+                known_wh = f"{'Поштомат' if parsed_info.is_postomat else 'Відділення'} № {parsed_info.warehouse_number}" if parsed_info.warehouse_number else "Не вказано"
+
                 await status_msg.edit_text(
-                    "⚠️ *Необхідно вказати обов'язкові реквізити отримувача:*\n\n"
+                    "⏳ *Отримано часткові реквізити отримувача (Очікую решту даних...)*\n\n"
+                    "📋 *Вже збережено:* \n"
+                    f"• ПІБ: `{known_name}`\n"
+                    f"• Телефон: `{known_phone}`\n"
+                    f"• Місто: `{known_city}`\n"
+                    f"• Пункт: `{known_wh}`\n\n"
+                    "⚠️ *Очікую доповнення:* \n"
                     f"{missing_str}\n\n"
-                    "Будь ласка, надішліть повні дані отримувача для формування накладної."
+                    "💡 *Надішліть або перепостіть наступне повідомлення з рештою даних!*"
                 )
                 return
 
@@ -610,14 +632,18 @@ def register_handlers(
                 )
                 return
 
+            # Extract warehouse number and postomat status from warehouse_description
+            digits = "".join(filter(str.isdigit, target_draft.warehouse_description))
+            wh_num = int(digits) if digits else 1
+            is_post = "поштомат" in target_draft.warehouse_description.lower()
+
             # Lookup city & warehouse in Nova Poshta database
             cities = await user_np_client.search_city(target_draft.city_description)
             city = cities[0] if cities else None
             warehouse = None
             if city:
-                # Find warehouse or postomat
                 warehouse = await user_np_client.get_warehouse(
-                    city_ref=city.ref, warehouse_number=1
+                    city_ref=city.ref, warehouse_number=wh_num, is_postomat=is_post
                 )
 
             # Create parsed info object from draft
@@ -632,7 +658,8 @@ def register_handlers(
                 middle_name=m_name,
                 phone=target_draft.recipient_phone,
                 city_name=target_draft.city_description,
-                warehouse_number=1,
+                warehouse_number=wh_num,
+                is_postomat=is_post,
                 cargo_description=target_draft.cargo_description,
                 declared_value=target_draft.declared_value,
             )

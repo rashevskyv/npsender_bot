@@ -54,3 +54,29 @@ def test_parsed_recipient_info_contextual():
     assert updated.full_name == "Юрченко Роман"
     assert updated.cargo_description == "сувенір"
     assert updated.warehouse_number == 26584
+
+
+def test_parsed_recipient_info_multipart():
+    # Message 1 (reposted): Name & Phone only
+    msg1_parsed = ParsedRecipientInfo(
+        first_name="Роман",
+        last_name="Юрченко",
+        phone="380995360818",
+    )
+    assert msg1_parsed.city_name is None
+    assert msg1_parsed.warehouse_number is None
+
+    # Message 2 (reposted): City & Postomat
+    merged_parsed = ParsedRecipientInfo(
+        **{
+            **msg1_parsed.model_dump(exclude_none=True),
+            "city_name": "Київ",
+            "warehouse_number": 26584,
+            "is_postomat": True,
+        }
+    )
+    assert merged_parsed.full_name == "Юрченко Роман"
+    assert merged_parsed.phone == "380995360818"
+    assert merged_parsed.city_name == "Київ"
+    assert merged_parsed.warehouse_number == 26584
+    assert merged_parsed.is_postomat is True
