@@ -1,9 +1,10 @@
 """Telegram bot message handlers and callback handlers in Ukrainian."""
 
+import asyncio
 import datetime
 import logging
 import uuid
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -29,6 +30,11 @@ router = Router()
 PENDING_SESSIONS: Dict[str, Dict[str, Any]] = {}
 USER_ACTIVE_SESSIONS: Dict[int, str] = {}  # user_id -> active session_id
 VALUE_OPTIONS = [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
+
+# Debouncer buffers for multi-part forwarded messages
+USER_MESSAGE_BUFFERS: Dict[int, List[str]] = {}
+USER_DEBOUNCE_TASKS: Dict[int, asyncio.Task] = {}
+USER_LAST_MESSAGES: Dict[int, Message] = {}
 
 
 def clear_user_active_session(user_id: int):
@@ -271,13 +277,46 @@ def register_handlers(
                 f"❌ *Не вдалося отримати посилки:* {str(e)}", parse_mode="Markdown"
             )
 
+    async def _process_user_accumulated_messages(user_id: int):
+        """Wait for rapid forwarded messages to accumulate before parsing."""
+        try:
+            await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            return
+
+        buffered_texts = USER_MESSAGE_BUFFERS.pop(user_id, [])
+        last_message = USER_LAST_MESSAGES.pop(user_id, None)
+
+        if not buffered_texts or not last_message:
+            return
+
+        combined_text = "\n".join(buffered_texts)
+        await _handle_combined_text_message(last_message, combined_text)
+
     @router.message(F.text)
     async def process_text_message(message: Message):
-        """Handle raw user text with recipient details or follow-up contextual updates."""
+        """Handle raw user text with debouncing for rapid forwarded messages."""
         text = message.text.strip()
         if text.startswith("/"):
             return
 
+        user_id = message.from_user.id
+        if user_id not in USER_MESSAGE_BUFFERS:
+            USER_MESSAGE_BUFFERS[user_id] = []
+
+        USER_MESSAGE_BUFFERS[user_id].append(text)
+        USER_LAST_MESSAGES[user_id] = message
+
+        # Cancel existing pending debounce task if running, restart 1.0s timer
+        if user_id in USER_DEBOUNCE_TASKS and not USER_DEBOUNCE_TASKS[user_id].done():
+            USER_DEBOUNCE_TASKS[user_id].cancel()
+
+        USER_DEBOUNCE_TASKS[user_id] = asyncio.create_task(
+            _process_user_accumulated_messages(user_id)
+        )
+
+    async def _handle_combined_text_message(message: Message, text: str):
+        """Core text processing logic for accumulated recipient messages."""
         user_id = message.from_user.id
         eff_settings = storage_manager.get_effective_settings(user_id, settings)
         user_ai_extractor = AIExtractor(eff_settings)
