@@ -7,10 +7,10 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 ## ✨ Features
 
 - **🤖 AI Entity Extraction & Conversational Chat**: Parses unstructured text messages (Full Name, Phone, City, Branch/Postomat number, Cargo Description, Declared Value) while also intelligently handling general chat messages, greetings, and queries about bot capabilities.
-- **🔄 Active Session Context Memory**: Remembers active recipient context. Follow-up messages (e.g., typing *"сувенір"* or *"оцінка 1500"*) automatically update the active waybill draft instead of creating a duplicate!
+- **🔄 Active Session Context Memory & Live Draft Editing**: Remembers active recipient context. Users can edit any saved draft using live natural language (e.g. typing *"зміни опис на сувенір"* or *"оцінка 2000 грн"*), updating the waybill live in Nova Poshta database via `InternetDocument/update`!
 - **⌨️ Persistent Reply Keyboard Menu**: Convenient Telegram bottom menu (`📦 Активні посилки`, `📝 Мої чернетки (ТТН)`, `⚙️ Налаштування`, `❓ Допомога`) for quick 1-tap navigation without needing slash commands.
 - **🇺🇦 Full Ukrainian UI & Localization**: Clean, friendly Ukrainian user interface across all cards, buttons, status updates, and AI prompts.
-- **📄 Waybill Drafts Management (`/drafts`)**: View all created waybill drafts (ТТН) with instant action buttons. Easily delete any draft directly from Nova Poshta API using `🗑 Видалити ТТН`.
+- **📄 Waybill Drafts Management (`/drafts`)**: View all created waybill drafts (ТТН) with instant action buttons (`✏️ Редагувати ТТН` / `🗑 Видалити ТТН`).
 - **🔐 Multi-Tenant & Per-User API Keys**: Users can easily bind their own personal Nova Poshta API key (`/set_np_key`) and AI key (`/set_ai_key`) directly via Telegram chat. The bot automatically validates the key and fetches sender credentials.
 - **🔍 Smart Missing Info Prompting**: Automatically validates extracted details and prompts the user if required recipient info (Full Name, Phone, City, or Branch) is missing.
 - **📦 Active Shipments List (`/parcels`)**: Fetches active outgoing shipments from Nova Poshta API for the last 30 days and displays them in clean, human-readable markdown cards with live tracking links.

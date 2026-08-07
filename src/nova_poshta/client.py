@@ -11,6 +11,7 @@ from src.nova_poshta.models import (
     WarehouseInfo,
     CounterpartyRecipientResult,
     WaybillCreateResult,
+    WaybillItemInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -326,3 +327,76 @@ class NovaPoshtaClient:
             method_properties={"DocumentRefs": document_ref},
         )
         return bool(res.get("success", False))
+
+    async def update_waybill(
+        self,
+        document_ref: str,
+        recipient_cp_ref: str,
+        recipient_contact_ref: str,
+        recipient_phone: str,
+        recipient_city_ref: str,
+        recipient_warehouse_ref: str,
+        payer_type: str = "Recipient",
+        description: str = "Посилка",
+        seats_amount: int = 1,
+        weight: float = 1.0,
+        declared_value: float = 500.0,
+    ) -> WaybillCreateResult:
+        """Update an existing Nova Poshta Express Waybill (ТТН)."""
+        today_str = datetime.date.today().strftime("%d.%m.%Y")
+
+        phone_clean = "".join(filter(str.isdigit, recipient_phone))
+        if len(phone_clean) == 10 and phone_clean.startswith("0"):
+            phone_clean = f"38{phone_clean}"
+
+        options_seat = [
+            {
+                "volumetricVolume": "0.004",
+                "volumetricWidth": "20",
+                "volumetricLength": "20",
+                "volumetricHeight": "10",
+                "weight": str(weight),
+            }
+            for _ in range(seats_amount)
+        ]
+
+        method_props = {
+            "Ref": document_ref,
+            "Sender": self.settings.sender_counterparty_ref,
+            "ContactSender": self.settings.sender_contact_ref,
+            "SendersPhone": self.settings.sender_phone,
+            "CitySender": self.settings.sender_city_ref,
+            "SenderAddress": self.settings.sender_address_ref,
+            "Recipient": recipient_cp_ref,
+            "ContactRecipient": recipient_contact_ref,
+            "RecipientsPhone": phone_clean,
+            "CityRecipient": recipient_city_ref,
+            "RecipientAddress": recipient_warehouse_ref,
+            "PayerType": payer_type,
+            "PaymentMethod": self.settings.default_payment_method,
+            "ServiceType": self.settings.default_service_type,
+            "SeatsAmount": str(seats_amount),
+            "Weight": str(weight),
+            "Cost": str(declared_value),
+            "CargoType": self.settings.default_cargo_type,
+            "Description": description,
+            "DateTime": today_str,
+            "OptionsSeat": options_seat,
+        }
+
+        res = await self._post(
+            model_name="InternetDocument",
+            called_method="update",
+            method_properties=method_props,
+        )
+        data = res.get("data", [])
+        if not data:
+            raise RuntimeError("InternetDocument/update returned empty data array")
+
+        doc_info = data[0]
+        return WaybillCreateResult(
+            int_doc_number=doc_info.get("IntDocNumber", ""),
+            ref=doc_info.get("Ref", document_ref),
+            cost=float(doc_info.get("CostOnSite", doc_info.get("Cost", 0))),
+            estimated_delivery_date=doc_info.get("EstimatedDeliveryDate"),
+        )

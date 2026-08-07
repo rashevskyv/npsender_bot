@@ -479,9 +479,11 @@ def register_handlers(
             return
 
         if action == "confirm":
-            await callback.answer("Реєстрація отримувача та генерація ТТН...")
+            editing_ref = session.get("editing_draft_ref")
+            action_title = "Оновлення" if editing_ref else "Генерація"
+            await callback.answer(f"{action_title} express-накладної...")
             await callback.message.edit_text(
-                "⏳ *Реєстрація отримувача та створення express-накладної у базі Нової Пошти...*",
+                f"⏳ *Реєстрація отримувача та {action_title.lower()} express-накладної у базі Нової Пошти...*",
                 parse_mode="Markdown",
             )
 
@@ -504,24 +506,40 @@ def register_handlers(
                     phone=parsed_info.phone or "",
                 )
 
-                # Create Waybill
-                wb_res = await user_np_client.create_waybill(
-                    recipient_cp_ref=recipient_res.counterparty_ref,
-                    recipient_contact_ref=recipient_res.contact_person_ref,
-                    recipient_phone=parsed_info.phone or "",
-                    recipient_city_ref=city.ref,
-                    recipient_warehouse_ref=warehouse.ref,
-                    payer_type=payer_type,
-                    description=cargo_desc,
-                    seats_amount=eff_settings.default_seats_amount,
-                    weight=eff_settings.default_weight,
-                    declared_value=declared_value,
-                )
+                # Create or Update Waybill
+                if editing_ref:
+                    wb_res = await user_np_client.update_waybill(
+                        document_ref=editing_ref,
+                        recipient_cp_ref=recipient_res.counterparty_ref,
+                        recipient_contact_ref=recipient_res.contact_person_ref,
+                        recipient_phone=parsed_info.phone or "",
+                        recipient_city_ref=city.ref,
+                        recipient_warehouse_ref=warehouse.ref,
+                        payer_type=payer_type,
+                        description=cargo_desc,
+                        seats_amount=eff_settings.default_seats_amount,
+                        weight=eff_settings.default_weight,
+                        declared_value=declared_value,
+                    )
+                    storage_manager.delete_user_draft(user_id, editing_ref)
+                else:
+                    wb_res = await user_np_client.create_waybill(
+                        recipient_cp_ref=recipient_res.counterparty_ref,
+                        recipient_contact_ref=recipient_res.contact_person_ref,
+                        recipient_phone=parsed_info.phone or "",
+                        recipient_city_ref=city.ref,
+                        recipient_warehouse_ref=warehouse.ref,
+                        payer_type=payer_type,
+                        description=cargo_desc,
+                        seats_amount=eff_settings.default_seats_amount,
+                        weight=eff_settings.default_weight,
+                        declared_value=declared_value,
+                    )
 
                 PENDING_SESSIONS.pop(session_id, None)
                 USER_ACTIVE_SESSIONS.pop(user_id, None)
 
-                # Save created draft locally for user
+                # Save created/updated draft locally for user
                 draft_item = SavedDraft(
                     ref=wb_res.ref,
                     int_doc_number=wb_res.int_doc_number,
@@ -541,9 +559,10 @@ def register_handlers(
                     f"https://novaposhta.ua/tracking/?cargo_number={wb_res.int_doc_number}"
                 )
                 payer_ua = "Отримувач" if payer_type == "Recipient" else "Відправник"
+                success_title = "одно успішно оновлено" if editing_ref else "о успішно створено"
 
                 success_card = (
-                    "✅ *Express-накладну успішно створено!*\n\n"
+                    f"✅ *Express-накладну{success_title}!*\n\n"
                     f"🎫 *Номер ТТН:* `{wb_res.int_doc_number}`\n"
                     f"👤 *Отримувач:* {parsed_info.full_name}\n"
                     f"📞 *Телефон:* `{parsed_info.phone}`\n"
@@ -563,9 +582,9 @@ def register_handlers(
                     reply_markup=get_draft_keyboard(ref=wb_res.ref),
                 )
             except Exception as err:
-                logger.error(f"Failed to create waybill: {err}", exc_info=True)
+                logger.error(f"Failed to create/update waybill: {err}", exc_info=True)
                 await callback.message.edit_text(
-                    f"❌ *Помилка створення ТТН:* {str(err)}", parse_mode="Markdown"
+                    f"❌ *Помилка формування ТТН:* {str(err)}", parse_mode="Markdown"
                 )
 
     @router.callback_query(DraftActionCallback.filter())
@@ -579,6 +598,83 @@ def register_handlers(
 
         action = callback_data.action
         ref = callback_data.ref
+
+        if action == "edit":
+            await callback.answer("Завантаження чернетки для редагування...")
+            drafts = storage_manager.get_user_drafts(user_id)
+            target_draft = next((d for d in drafts if d.ref == ref), None)
+
+            if not target_draft:
+                await callback.message.edit_text(
+                    "⚠️ *Чернетку не знайдено.*", parse_mode="Markdown"
+                )
+                return
+
+            # Lookup city & warehouse in Nova Poshta database
+            cities = await user_np_client.search_city(target_draft.city_description)
+            city = cities[0] if cities else None
+            warehouse = None
+            if city:
+                # Find warehouse or postomat
+                warehouse = await user_np_client.get_warehouse(
+                    city_ref=city.ref, warehouse_number=1
+                )
+
+            # Create parsed info object from draft
+            name_parts = target_draft.recipient_name.split()
+            l_name = name_parts[0] if name_parts else "N/A"
+            f_name = name_parts[1] if len(name_parts) > 1 else ""
+            m_name = " ".join(name_parts[2:]) if len(name_parts) > 2 else ""
+
+            parsed_info = ParsedRecipientInfo(
+                last_name=l_name,
+                first_name=f_name,
+                middle_name=m_name,
+                phone=target_draft.recipient_phone,
+                city_name=target_draft.city_description,
+                warehouse_number=1,
+                cargo_description=target_draft.cargo_description,
+                declared_value=target_draft.declared_value,
+            )
+
+            # Activate editing session
+            session_id = str(uuid.uuid4())[:8]
+            PENDING_SESSIONS[session_id] = {
+                "parsed_info": parsed_info,
+                "city": city,
+                "warehouse": warehouse,
+                "payer_type": target_draft.payer_type,
+                "cargo_type": "Parcel",
+                "declared_value": target_draft.declared_value,
+                "cargo_description": target_draft.cargo_description,
+                "user_id": user_id,
+                "editing_draft_ref": ref,
+            }
+            USER_ACTIVE_SESSIONS[user_id] = session_id
+
+            card_text = (
+                f"✏️ *Редагування ТТН № `{target_draft.int_doc_number}`*\n\n"
+                f"👤 *Отримувач:* {target_draft.recipient_name}\n"
+                f"📞 *Телефон:* `{target_draft.recipient_phone}`\n"
+                f"🏙 *Місто:* {target_draft.city_description}\n"
+                f"📦 *Пункт призначення:* {target_draft.warehouse_description}\n"
+                f"📝 *Опис вантажу:* {target_draft.cargo_description}\n"
+                f"💰 *Оціночна вартість:* {int(target_draft.declared_value)} грн\n\n"
+                "💡 *Надішліть будь-які зміни живим текстом* (наприклад: *'зміни опис на сувенір'*, *'оцінка 2000 грн'*), "
+                "або скористайтеся кнопками нижче:"
+            )
+
+            await callback.message.edit_text(
+                card_text,
+                parse_mode="Markdown",
+                reply_markup=get_confirmation_keyboard(
+                    payer_type=target_draft.payer_type,
+                    cargo_type="Parcel",
+                    declared_value=target_draft.declared_value,
+                    session_id=session_id,
+                ),
+            )
+            return
 
         if action == "delete":
             await callback.answer("Видалення накладної з Нової Пошти...")
