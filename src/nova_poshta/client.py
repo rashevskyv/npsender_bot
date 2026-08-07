@@ -435,22 +435,42 @@ class NovaPoshtaClient:
             CountOfDocuments=int(info.get("CountOfDocuments", len(document_refs))),
         )
 
-    async def get_scan_sheets(self) -> List[ScanSheetInfo]:
+    async def get_scan_sheets(self, days_back: int = 30) -> List[ScanSheetInfo]:
         """Fetch list of user's active registers (ScanSheets)."""
+        today = datetime.date.today()
+        from_date = (today - datetime.timedelta(days=days_back)).strftime("%d.%m.%Y")
+        to_date = today.strftime("%d.%m.%Y")
+
         res = await self._post(
             model_name="ScanSheet",
             called_method="getScanSheetList",
-            method_properties={},
+            method_properties={
+                "DateTimeFrom": from_date,
+                "DateTimeTo": to_date,
+            },
         )
         data = res.get("data", [])
         sheets = []
         for item in data:
+            raw_cnt = (
+                item.get("CountOfDocuments")
+                or item.get("CountPoint")
+                or item.get("Count")
+                or item.get("CountOfTTN")
+                or item.get("CountDocuments")
+                or 0
+            )
+            try:
+                cnt = int(raw_cnt)
+            except (ValueError, TypeError):
+                cnt = 0
+
             sheets.append(
                 ScanSheetInfo(
-                    Ref=item.get("Ref", ""),
-                    Number=item.get("Number", ""),
-                    DateTime=item.get("DateTime", ""),
-                    CountOfDocuments=int(item.get("CountOfDocuments", 0)),
+                    Ref=str(item.get("Ref", "")),
+                    Number=str(item.get("Number", "")),
+                    DateTime=str(item.get("DateTime", "")),
+                    CountOfDocuments=cnt,
                 )
             )
         return sheets
