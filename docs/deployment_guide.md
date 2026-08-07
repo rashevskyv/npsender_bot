@@ -23,12 +23,12 @@ cd /opt
 
 # Clone the repository from GitHub
 sudo git clone https://github.com/rashevskyv/npsender_bot.git
-cd nova_poshhta_bot
+cd npsender_bot
 
 # Create Python virtual environment
 sudo python3 -m venv venv
 
-# Activate venv and install dependencies
+# Install dependencies in venv
 sudo ./venv/bin/pip install --upgrade pip
 sudo ./venv/bin/pip install -r requirements.txt
 ```
@@ -37,10 +37,10 @@ sudo ./venv/bin/pip install -r requirements.txt
 
 ## 3. Create `.env` Configuration File
 
-Create your `.env` file in `/opt/nova_poshhta_bot/.env`:
+Create your `.env` file in `/opt/npsender_bot/.env`:
 
 ```bash
-sudo nano /opt/nova_poshhta_bot/.env
+sudo nano /opt/npsender_bot/.env
 ```
 
 Paste your production credentials into `.env`:
@@ -79,8 +79,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/nova_poshhta_bot
-ExecStart=/opt/nova_poshhta_bot/venv/bin/python -m src.bot.main
+WorkingDirectory=/opt/npsender_bot
+ExecStart=/opt/npsender_bot/venv/bin/python -m src.bot.main
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
@@ -130,7 +130,7 @@ sudo systemctl status npsender_bot.service
 
 - **Update Bot Code from GitHub**:
   ```bash
-  cd /opt/nova_poshhta_bot
+  cd /opt/npsender_bot
   sudo git pull origin main
   sudo ./venv/bin/pip install -r requirements.txt
   sudo systemctl restart npsender_bot.service
