@@ -74,8 +74,10 @@ class NovaPoshtaClient:
             called_method="getWarehouses",
             method_properties={
                 "CityRef": city_ref,
+                "FindByString": str(warehouse_number),
+                "WarehouseId": str(warehouse_number),
                 "Language": "UA",
-                "Limit": "500",
+                "Limit": "100",
             },
         )
         warehouses = res.get("data", [])
@@ -166,6 +168,17 @@ class NovaPoshtaClient:
         if len(phone_clean) == 10 and phone_clean.startswith("0"):
             phone_clean = f"38{phone_clean}"
 
+        options_seat = [
+            {
+                "volumetricVolume": "0.004",
+                "volumetricWidth": "20",
+                "volumetricLength": "20",
+                "volumetricHeight": "10",
+                "weight": str(weight),
+            }
+            for _ in range(seats_amount)
+        ]
+
         method_props = {
             "Sender": self.settings.sender_counterparty_ref,
             "ContactSender": self.settings.sender_contact_ref,
@@ -186,6 +199,7 @@ class NovaPoshtaClient:
             "CargoType": self.settings.default_cargo_type,
             "Description": description,
             "DateTime": today_str,
+            "OptionsSeat": options_seat,
         }
 
         res = await self._post(
