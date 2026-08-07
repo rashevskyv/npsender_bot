@@ -36,3 +36,21 @@ def test_parsed_recipient_info_conversational():
     )
     assert info.is_recipient_info is False
     assert info.conversational_response == "Привіт! Я AI бот для створення ТТН Нової Пошти."
+
+
+def test_parsed_recipient_info_contextual():
+    prev = ParsedRecipientInfo(
+        first_name="Роман",
+        last_name="Юрченко",
+        phone="380995360818",
+        city_name="Київ",
+        warehouse_number=26584,
+        is_postomat=True,
+    )
+    # Simulate update with cargo description
+    updated = ParsedRecipientInfo(
+        **{**prev.model_dump(), "cargo_description": "сувенір"}
+    )
+    assert updated.full_name == "Юрченко Роман"
+    assert updated.cargo_description == "сувенір"
+    assert updated.warehouse_number == 26584

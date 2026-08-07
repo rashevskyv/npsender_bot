@@ -1,9 +1,9 @@
-"""Telegram bot message handlers and callback handlers."""
+"""Telegram bot message handlers and callback handlers in Ukrainian."""
 
 import datetime
 import logging
 import uuid
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -14,6 +14,7 @@ from src.storage import UserSettingsManager, UserCustomSettings, SavedDraft
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
 from src.bot.keyboards import (
+    get_main_reply_keyboard,
     get_confirmation_keyboard,
     WaybillActionCallback,
     DraftActionCallback,
@@ -25,6 +26,7 @@ router = Router()
 
 # In-memory storage for active pending waybill verification sessions
 PENDING_SESSIONS: Dict[str, Dict[str, Any]] = {}
+USER_ACTIVE_SESSIONS: Dict[int, str] = {}  # user_id -> active session_id
 VALUE_OPTIONS = [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
 
 
@@ -40,34 +42,32 @@ def register_handlers(
     async def cmd_start(message: Message):
         """Welcome message and basic instructions."""
         welcome_text = (
-            "👋 **Welcome to Nova Poshta AI Waybill Generator Bot!**\n\n"
-            "Send me recipient details in free format (Full name, Phone number, City, Branch/Postomat number), "
-            "and I will parse it with AI and generate an Express Waybill (ТТН) for Nova Poshta.\n\n"
-            "**Example message:**\n"
-            "`Іванов Петро Васильович 0971234567 Київ поштомат 26584`\n\n"
-            "**Available Commands:**\n"
-            "• `/drafts` — View & manage your created waybill drafts (ТТН)\n"
-            "• `/parcels` — View active outgoing shipments\n"
-            "• `/set_np_key <key>` — Set your personal Nova Poshta API Key\n"
-            "• `/set_ai_key <key>` — Set your personal AI API Key\n"
-            "• `/settings` — Check your active credentials & settings\n"
-            "• `/reset_settings` — Reset to default credentials\n"
-            "• `/help` — Help instructions"
+            "👋 **Вітаємо у боті автоматичної генерації ТТН Нової Пошти!**\n\n"
+            "Надішліть мені реквізити отримувача у довільному форматі (ПІБ, телефон, місто, номер відділення або поштомату), "
+            "і я за допомогою штучного інтелекту розпаршу дані та сформую express-накладну (ТТН).\n\n"
+            "**Приклад повідомлення:**\n"
+            "`Юрченко Роман Сергійович 0995360818 Київ поштомат 26584`\n\n"
+            "**Користуйтеся кнопками меню нижче для швидкого доступу!**"
         )
-        await message.answer(welcome_text, parse_mode="Markdown")
+        await message.answer(
+            welcome_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard()
+        )
 
     @router.message(Command("help"))
+    @router.message(F.text == "❓ Допомога")
     async def cmd_help(message: Message):
         """Help instructions."""
         help_text = (
-            "📖 **How to use this bot:**\n\n"
-            "1. **Set your API Keys (Optional):** Use `/set_np_key YOUR_KEY` to connect your own Nova Poshta account.\n"
-            "2. **Send Recipient Info:** Paste recipient details in any format in a single message.\n"
-            "3. **Automatic Verification:** The bot parses details, verifies City/Branch in Nova Poshta database, and prompts if any info is missing.\n"
-            "4. **Interactive Actions:** Adjust Payer (Recipient/Sender), Cargo Type, or Declared Value (Min 500 UAH), and click **Create Waybill**.\n"
-            "5. **Drafts & Shipments Management:** Use `/drafts` to view/delete your generated waybill drafts, or `/parcels` to track active shipments."
+            "📖 **Як користуватися ботом:**\n\n"
+            "1. **Налаштування ключів (за бажанням):** Натисніть кнопку `⚙️ Налаштування` або скористайтеся командою `/set_np_key ВАШ_КЛЮЧ`, щоб підключити власний акаунт Нової Пошти.\n"
+            "2. **Надішліть реквізити:** Надішліть дані отримувача одним повідомленням у довільному порядку.\n"
+            "3. **Автоматична валідація та контекст:** Бот перевірить місто та відділення у базі НП. Якщо ви захочете уточнити опис (наприклад, написати слово *'сувенір'*) або змінити оцінку, просто надішліть доповнення наступним повідомленням!\n"
+            "4. **Інтерактивні кнопки:** Використовуйте кнопки під карткою для зміни платника (Отримувач/Відправник), типу вантажу чи оціночної вартості (мін. 500 грн).\n"
+            "5. **Чернетки та посилки:** Кнопки `📝 Мої чернетки (ТТН)` та `📦 Активні посилки` дозволяють переглядати та видаляти створені ТТН."
         )
-        await message.answer(help_text, parse_mode="Markdown")
+        await message.answer(
+            help_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard()
+        )
 
     @router.message(Command("set_np_key"))
     async def cmd_set_np_key(message: Message):
@@ -75,13 +75,13 @@ def register_handlers(
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             await message.answer(
-                "⚠️ *Usage:* `/set_np_key YOUR_NOVA_POSHTA_API_KEY`", parse_mode="Markdown"
+                "⚠️ *Використання:* `/set_np_key ВАШ_API_КЛЮЧ_НОВОЇ_ПОШТИ`", parse_mode="Markdown"
             )
             return
 
         api_key = parts[1].strip()
         status_msg = await message.answer(
-            "⏳ *Validating Nova Poshta API Key and fetching sender profile...*", parse_mode="Markdown"
+            "⏳ *Перевірка API-ключа Нової Пошти та підтягування профілю відправника...*", parse_mode="Markdown"
         )
 
         try:
@@ -99,17 +99,17 @@ def register_handlers(
             storage_manager.update_user_settings(message.from_user.id, u_settings)
 
             await status_msg.edit_text(
-                "✅ *Nova Poshta API Key Successfully Saved!*\n\n"
-                f"👤 *Sender Name:* `{profile['sender_name']}`\n"
-                f"📞 *Sender Phone:* `{profile['sender_phone'] or 'N/A'}`\n"
-                f"🔑 *Key:* `{api_key[:6]}...{api_key[-4:]}`\n\n"
-                "All future waybills generated by you will use your personal Nova Poshta account!",
+                "✅ *API-ключ Нової Пошти успішно збережено!*\n\n"
+                f"👤 *Відправник:* `{profile['sender_name']}`\n"
+                f"📞 *Телефон:* `{profile['sender_phone'] or 'Не вказано'}`\n"
+                f"🔑 *Ключ:* `{api_key[:6]}...{api_key[-4:]}`\n\n"
+                "Усі наступні накладні будуть створюватися від імені вашого особистого акаунта!",
                 parse_mode="Markdown",
             )
         except Exception as e:
             logger.error(f"Failed to set Nova Poshta API key: {e}")
             await status_msg.edit_text(
-                f"❌ *Failed to validate Nova Poshta Key:* {str(e)}", parse_mode="Markdown"
+                f"❌ *Помилка перевірки ключа Нової Пошти:* {str(e)}", parse_mode="Markdown"
             )
 
     @router.message(Command("set_ai_key"))
@@ -118,7 +118,7 @@ def register_handlers(
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             await message.answer(
-                "⚠️ *Usage:* `/set_ai_key YOUR_AI_API_KEY`", parse_mode="Markdown"
+                "⚠️ *Використання:* `/set_ai_key ВАШ_AI_API_KEY`", parse_mode="Markdown"
             )
             return
 
@@ -128,7 +128,7 @@ def register_handlers(
         storage_manager.update_user_settings(message.from_user.id, u_settings)
 
         await message.answer(
-            f"✅ *Personal AI API Key Successfully Saved!* (`{api_key[:6]}...{api_key[-4:]}`)",
+            f"✅ *Персональний AI API ключ успішно збережено!* (`{api_key[:6]}...{api_key[-4:]}`)",
             parse_mode="Markdown",
         )
 
@@ -137,11 +137,13 @@ def register_handlers(
         """Reset custom settings to system defaults."""
         storage_manager.reset_user_settings(message.from_user.id)
         await message.answer(
-            "🔄 *Your personal API keys and settings have been reset to system defaults.*",
+            "🔄 *Ваші персональні ключі та налаштування скинуто до системних за замовчуванням.*",
             parse_mode="Markdown",
+            reply_markup=get_main_reply_keyboard(),
         )
 
     @router.message(Command("settings"))
+    @router.message(F.text == "⚙️ Налаштування")
     async def cmd_settings(message: Message):
         """Show current effective settings for the user."""
         eff = storage_manager.get_effective_settings(message.from_user.id, settings)
@@ -151,19 +153,24 @@ def register_handlers(
         has_custom_ai = bool(u_custom.ai_api_key)
 
         status_text = (
-            "⚙️ **Your Active Configuration:**\n\n"
-            f"• **Nova Poshta Key:** `{'Personal (' + eff.nova_poshta_api_key[:6] + '...)' if has_custom_np else 'System Default'}`\n"
-            f"• **Sender Name:** `{u_custom.sender_name or 'Default Account'}`\n"
-            f"• **Sender Phone:** `{eff.sender_phone or 'N/A'}`\n"
-            f"• **AI Provider:** `{eff.ai_provider}`\n"
-            f"• **AI Key:** `{'Personal Key' if has_custom_ai else 'System Default'}`\n"
-            f"• **AI Model:** `{eff.ai_model}`\n"
-            f"• **Min Declared Value:** `{eff.default_declared_value} UAH`\n\n"
-            "Use `/set_np_key` or `/set_ai_key` to update your credentials, or `/reset_settings` to revert."
+            "⚙️ **Ваші активні налаштування:**\n\n"
+            f"• **Ключ Нової Пошти:** `{'Особистий (' + eff.nova_poshta_api_key[:6] + '...)' if has_custom_np else 'Системний'}`\n"
+            f"• **Профіль відправника:** `{u_custom.sender_name or 'Основний акаунт'}`\n"
+            f"• **Телефон відправника:** `{eff.sender_phone or 'Не вказано'}`\n"
+            f"• **AI Провайдер:** `{eff.ai_provider}`\n"
+            f"• **AI Ключ:** `{'Особистий' if has_custom_ai else 'Системний'}`\n"
+            f"• **AI Модель:** `{eff.ai_model}`\n"
+            f"• **Мін. оціночна вартість:** `{eff.default_declared_value} грн`\n\n"
+            "Щоб змінити ключі, використайте команди:\n"
+            "`/set_np_key ВАШ_КЛЮЧ` або `/set_ai_key ВАШ_КЛЮЧ`\n"
+            "Або `/reset_settings` для скидання."
         )
-        await message.answer(status_text, parse_mode="Markdown")
+        await message.answer(
+            status_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard()
+        )
 
     @router.message(Command("drafts"))
+    @router.message(F.text == "📝 Мої чернетки (ТТН)")
     async def cmd_drafts(message: Message):
         """View and manage created waybill drafts."""
         user_id = message.from_user.id
@@ -171,14 +178,15 @@ def register_handlers(
 
         if not drafts:
             await message.answer(
-                "📝 *No saved waybill drafts found.*\n"
-                "Create a new waybill by sending recipient info to the bot!",
+                "📝 *Збережених чернеток ТТН не знайдено.*\n"
+                "Створіть нову накладну, надіславши реквізити отримувача боту!",
                 parse_mode="Markdown",
+                reply_markup=get_main_reply_keyboard(),
             )
             return
 
         await message.answer(
-            f"📄 *Your Saved Waybill Drafts ({len(drafts)}):*", parse_mode="Markdown"
+            f"📄 *Ваші збережені чернетки ТТН ({len(drafts)}):*", parse_mode="Markdown"
         )
 
         for draft in drafts[:10]:
@@ -187,14 +195,14 @@ def register_handlers(
             )
             card = (
                 f"🎫 *ТТН:* `{draft.int_doc_number}`\n"
-                f"👤 *Recipient:* {draft.recipient_name}\n"
-                f"📞 *Phone:* `{draft.recipient_phone}`\n"
-                f"🏙 *City:* {draft.city_description}\n"
-                f"📦 *Destination:* {draft.warehouse_description}\n"
-                f"📝 *Description:* {draft.cargo_description}\n"
-                f"💳 *Payer:* {draft.payer_type} | 💰 *Declared:* {int(draft.declared_value)} UAH\n"
-                f"📅 *Created:* {draft.created_at}\n\n"
-                f"🔗 [Track Waybill]({tracking_url})"
+                f"👤 *Отримувач:* {draft.recipient_name}\n"
+                f"📞 *Телефон:* `{draft.recipient_phone}`\n"
+                f"🏙 *Місто:* {draft.city_description}\n"
+                f"📦 *Пункт призначення:* {draft.warehouse_description}\n"
+                f"📝 *Опис:* {draft.cargo_description}\n"
+                f"💳 *Платник:* {draft.payer_type} | 💰 *Оцінка:* {int(draft.declared_value)} грн\n"
+                f"📅 *Створено:* {draft.created_at}\n\n"
+                f"🔗 [Відстежити ТТН на сайті Нової Пошти]({tracking_url})"
             )
             await message.answer(
                 card,
@@ -204,34 +212,35 @@ def register_handlers(
             )
 
     @router.message(Command("parcels"))
+    @router.message(F.text == "📦 Активні посилки")
     async def cmd_parcels(message: Message):
         """Show active outgoing shipments / waybills."""
         eff_settings = storage_manager.get_effective_settings(message.from_user.id, settings)
         user_np_client = NovaPoshtaClient(eff_settings)
 
         status_msg = await message.answer(
-            "🔍 *Fetching your active shipments from Nova Poshta...*", parse_mode="Markdown"
+            "🔍 *Отримання ваших активних посилок з Нової Пошти...*", parse_mode="Markdown"
         )
         try:
             items = await user_np_client.get_outgoing_waybills(days_back=30, limit=10)
             if not items:
                 await status_msg.edit_text(
-                    "📦 *No active outgoing shipments found for the last 30 days.*",
+                    "📦 *Активних вихідних посилок за останні 30 днів не знайдено.*",
                     parse_mode="Markdown",
                 )
                 return
 
-            response_lines = ["📦 *Your Active Nova Poshta Shipments (Last 30 days):*\n"]
+            response_lines = ["📦 *Ваші активні посилки (останні 30 днів):*\n"]
             for idx, item in enumerate(items, 1):
                 tracking_url = (
                     f"https://novaposhta.ua/tracking/?cargo_number={item.int_doc_number}"
                 )
                 response_lines.append(
                     f"*{idx}. ТТН:* [{item.int_doc_number}]({tracking_url})\n"
-                    f"👤 *Recipient:* {item.recipient_name}\n"
-                    f"🏙 *Destination:* {item.city_recipient}, {item.address_recipient}\n"
-                    f"📝 *Description:* {item.description}\n"
-                    f"💰 *Cost:* ~{item.cost} UAH | 📊 *Status:* {item.state_name}\n"
+                    f"👤 *Отримувач:* {item.recipient_name}\n"
+                    f"🏙 *Пункт призначення:* {item.city_recipient}, {item.address_recipient}\n"
+                    f"📝 *Опис:* {item.description}\n"
+                    f"💰 *Вартість доставки:* ~{item.cost} грн | 📊 *Статус:* {item.state_name}\n"
                     "----------------------------------------"
                 )
 
@@ -243,27 +252,36 @@ def register_handlers(
         except Exception as e:
             logger.error(f"Error fetching parcels: {e}", exc_info=True)
             await status_msg.edit_text(
-                f"❌ *Failed to fetch shipments:* {str(e)}", parse_mode="Markdown"
+                f"❌ *Не вдалося отримати посилки:* {str(e)}", parse_mode="Markdown"
             )
 
     @router.message(F.text)
     async def process_text_message(message: Message):
-        """Handle raw user text with recipient details."""
+        """Handle raw user text with recipient details or follow-up contextual updates."""
         text = message.text.strip()
         if text.startswith("/"):
             return
 
-        eff_settings = storage_manager.get_effective_settings(message.from_user.id, settings)
+        user_id = message.from_user.id
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
         user_ai_extractor = AIExtractor(eff_settings)
         user_np_client = NovaPoshtaClient(eff_settings)
 
+        # Check if there is an active pending verification session for this user
+        prev_parsed_info = None
+        active_session_id = USER_ACTIVE_SESSIONS.get(user_id)
+        if active_session_id and active_session_id in PENDING_SESSIONS:
+            prev_parsed_info = PENDING_SESSIONS[active_session_id].get("parsed_info")
+
         status_msg = await message.answer(
-            "⏳ *Parsing recipient details with AI...*", parse_mode="Markdown"
+            "⏳ *Обробка повідомлення та аналіз реквізитів через AI...*", parse_mode="Markdown"
         )
 
         try:
-            # 1. Parse text with AI
-            parsed_info = await user_ai_extractor.parse_text(text)
+            # 1. Parse text with AI (with optional previous context)
+            parsed_info = await user_ai_extractor.parse_text(
+                text, previous_info=prev_parsed_info
+            )
 
             # Handle conversational / chat intent
             if not parsed_info.is_recipient_info:
@@ -277,31 +295,31 @@ def register_handlers(
             # Check missing required fields
             missing_fields = []
             if not parsed_info.last_name:
-                missing_fields.append("👤 Recipient Last Name / Full Name (Прізвище та Ім'я)")
+                missing_fields.append("👤 Прізвище та Ім'я отримувача")
             if not parsed_info.phone:
-                missing_fields.append("📞 Recipient Phone Number (Номер телефону)")
+                missing_fields.append("📞 Номер телефону отримувача")
             if not parsed_info.city_name:
-                missing_fields.append("🏙 Destination City (Населений пункт)")
+                missing_fields.append("🏙 Місто / Населений пункт")
             if not parsed_info.warehouse_number:
-                missing_fields.append("📦 Branch or Postomat Number (Номер відділення/поштомату)")
+                missing_fields.append("📦 Номер відділення або поштомату")
 
             if missing_fields:
                 missing_str = "\n".join([f"• {field}" for field in missing_fields])
                 await status_msg.edit_text(
-                    "⚠️ *Missing Required Recipient Details:*\n\n"
+                    "⚠️ *Необхідно вказати обов'язкові реквізити отримувача:*\n\n"
                     f"{missing_str}\n\n"
-                    "Please send the complete recipient details including all required information."
+                    "Будь ласка, надішліть повні дані отримувача для формування накладної."
                 )
                 return
 
             # 2. Lookup City in Nova Poshta
             await status_msg.edit_text(
-                "🔍 *Searching Nova Poshta database for City and Branch...*", parse_mode="Markdown"
+                "🔍 *Пошук міста та відділення у базі Нової Пошти...*", parse_mode="Markdown"
             )
             cities = await user_np_client.search_city(parsed_info.city_name)
             if not cities:
                 await status_msg.edit_text(
-                    f"❌ City *'{parsed_info.city_name}'* was not found in Nova Poshta database. Please check spelling."
+                    f"❌ Місто *'{parsed_info.city_name}'* не знайдено у базі Нової Пошти. Перевірте написання."
                 )
                 return
 
@@ -315,9 +333,9 @@ def register_handlers(
             )
 
             if not warehouse:
-                w_type = "Postomat" if parsed_info.is_postomat else "Branch"
+                w_type = "Поштомат" if parsed_info.is_postomat else "Відділення"
                 await status_msg.edit_text(
-                    f"❌ {w_type} *№ {parsed_info.warehouse_number}* in city *{matched_city.description}* was not found."
+                    f"❌ {w_type} *№ {parsed_info.warehouse_number}* у місті *{matched_city.description}* не знайдено."
                 )
                 return
 
@@ -328,8 +346,8 @@ def register_handlers(
             )
             cargo_desc = parsed_info.cargo_description or "Посилка"
 
-            # Create session for interactive confirmation
-            session_id = str(uuid.uuid4())[:8]
+            # Create or update session for interactive confirmation
+            session_id = active_session_id or str(uuid.uuid4())[:8]
             PENDING_SESSIONS[session_id] = {
                 "parsed_info": parsed_info,
                 "city": matched_city,
@@ -338,18 +356,19 @@ def register_handlers(
                 "cargo_type": eff_settings.default_cargo_type,
                 "declared_value": declared_val,
                 "cargo_description": cargo_desc,
-                "user_id": message.from_user.id,
+                "user_id": user_id,
             }
+            USER_ACTIVE_SESSIONS[user_id] = session_id
 
             card_text = (
-                "📋 *Parsed Recipient Details for Verification:*\n\n"
-                f"👤 *Recipient:* {parsed_info.full_name}\n"
-                f"📞 *Phone:* `{parsed_info.phone}`\n"
-                f"🏙 *City:* {matched_city.description}\n"
-                f"📦 *Destination:* {warehouse.description}\n"
-                f"📝 *Description:* {cargo_desc}\n"
-                f"💰 *Declared Value:* {int(declared_val)} UAH (Min 500 грн)\n\n"
-                "Please review the details below and select an action:"
+                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+                f"👤 *Отримувач:* {parsed_info.full_name}\n"
+                f"📞 *Телефон:* `{parsed_info.phone}`\n"
+                f"🏙 *Місто:* {matched_city.description}\n"
+                f"📦 *Пункт призначення:* {warehouse.description}\n"
+                f"📝 *Опис вантажу:* {cargo_desc}\n"
+                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n\n"
+                "Перевірте дані та оберіть дію нижче:"
             )
 
             await status_msg.edit_text(
@@ -364,7 +383,7 @@ def register_handlers(
             )
         except Exception as e:
             logger.error(f"Error processing text message: {e}", exc_info=True)
-            await status_msg.edit_text(f"❌ *An error occurred:* {str(e)}", parse_mode="Markdown")
+            await status_msg.edit_text(f"❌ *Сталася помилка:* {str(e)}", parse_mode="Markdown")
 
     @router.callback_query(WaybillActionCallback.filter())
     async def process_waybill_callback(
@@ -376,15 +395,17 @@ def register_handlers(
 
         if not session:
             await callback.answer(
-                "Session expired. Please paste recipient details again.", show_alert=True
+                "Сесію завершено. Надішліть реквізити отримувача знову.", show_alert=True
             )
             return
 
         action = callback_data.action
+        user_id = session["user_id"]
 
         if action == "cancel":
             PENDING_SESSIONS.pop(session_id, None)
-            await callback.message.edit_text("❌ *Waybill creation cancelled.*", parse_mode="Markdown")
+            USER_ACTIVE_SESSIONS.pop(user_id, None)
+            await callback.message.edit_text("❌ *Створення накладної скасовано.*", parse_mode="Markdown")
             await callback.answer()
             return
 
@@ -399,7 +420,8 @@ def register_handlers(
                     session_id=session_id,
                 )
             )
-            await callback.answer(f"Payer changed to: {new_payer}")
+            payer_ua = "Отримувач" if new_payer == "Recipient" else "Відправник"
+            await callback.answer(f"Платника змінено на: {payer_ua}")
             return
 
         if action == "toggle_cargo":
@@ -413,7 +435,8 @@ def register_handlers(
                     session_id=session_id,
                 )
             )
-            await callback.answer(f"Cargo type changed to: {new_cargo}")
+            cargo_ua = "Посилка" if new_cargo == "Parcel" else "Документи"
+            await callback.answer(f"Тип вантажу змінено на: {cargo_ua}")
             return
 
         if action == "cycle_value":
@@ -432,14 +455,14 @@ def register_handlers(
             cargo_desc = session["cargo_description"]
 
             card_text = (
-                "📋 *Parsed Recipient Details for Verification:*\n\n"
-                f"👤 *Recipient:* {parsed_info.full_name}\n"
-                f"📞 *Phone:* `{parsed_info.phone}`\n"
-                f"🏙 *City:* {city.description}\n"
-                f"📦 *Destination:* {warehouse.description}\n"
-                f"📝 *Description:* {cargo_desc}\n"
-                f"💰 *Declared Value:* {int(next_val)} UAH (Min 500 грн)\n\n"
-                "Please review the details below and select an action:"
+                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+                f"👤 *Отримувач:* {parsed_info.full_name}\n"
+                f"📞 *Телефон:* `{parsed_info.phone}`\n"
+                f"🏙 *Місто:* {city.description}\n"
+                f"📦 *Пункт призначення:* {warehouse.description}\n"
+                f"📝 *Опис вантажу:* {cargo_desc}\n"
+                f"💰 *Оціночна вартість:* {int(next_val)} грн (Мін. 500 грн)\n\n"
+                "Перевірте дані та оберіть дію нижче:"
             )
 
             await callback.message.edit_text(
@@ -452,16 +475,16 @@ def register_handlers(
                     session_id=session_id,
                 ),
             )
-            await callback.answer(f"Declared Value set to: {int(next_val)} UAH")
+            await callback.answer(f"Оціночну вартість встановлено: {int(next_val)} грн")
             return
 
         if action == "confirm":
-            await callback.answer("Creating Express Waybill (ТТН)...")
+            await callback.answer("Реєстрація отримувача та генерація ТТН...")
             await callback.message.edit_text(
-                "⏳ *Registering Recipient and Generating ТТН...*", parse_mode="Markdown"
+                "⏳ *Реєстрація отримувача та створення express-накладної у базі Нової Пошти...*",
+                parse_mode="Markdown",
             )
 
-            user_id = session["user_id"]
             eff_settings = storage_manager.get_effective_settings(user_id, settings)
             user_np_client = NovaPoshtaClient(eff_settings)
 
@@ -496,6 +519,7 @@ def register_handlers(
                 )
 
                 PENDING_SESSIONS.pop(session_id, None)
+                USER_ACTIVE_SESSIONS.pop(user_id, None)
 
                 # Save created draft locally for user
                 draft_item = SavedDraft(
@@ -516,19 +540,20 @@ def register_handlers(
                 tracking_url = (
                     f"https://novaposhta.ua/tracking/?cargo_number={wb_res.int_doc_number}"
                 )
+                payer_ua = "Отримувач" if payer_type == "Recipient" else "Відправник"
 
                 success_card = (
-                    "✅ *Express Waybill Successfully Created!*\n\n"
-                    f"🎫 *ТТН Number:* `{wb_res.int_doc_number}`\n"
-                    f"👤 *Recipient:* {parsed_info.full_name}\n"
-                    f"📞 *Phone:* `{parsed_info.phone}`\n"
-                    f"🏙 *City:* {city.description}\n"
-                    f"📦 *Destination:* {warehouse.description}\n"
-                    f"📝 *Description:* {cargo_desc}\n"
-                    f"💳 *Payer:* {payer_type}\n"
-                    f"💰 *Cost:* ~{wb_res.cost} UAH | *Declared:* {int(declared_value)} UAH\n"
-                    f"📅 *Estimated Delivery:* {wb_res.estimated_delivery_date or 'N/A'}\n\n"
-                    f"🔗 [Track Waybill on Nova Poshta]({tracking_url})"
+                    "✅ *Express-накладну успішно створено!*\n\n"
+                    f"🎫 *Номер ТТН:* `{wb_res.int_doc_number}`\n"
+                    f"👤 *Отримувач:* {parsed_info.full_name}\n"
+                    f"📞 *Телефон:* `{parsed_info.phone}`\n"
+                    f"🏙 *Місто:* {city.description}\n"
+                    f"📦 *Пункт призначення:* {warehouse.description}\n"
+                    f"📝 *Опис вантажу:* {cargo_desc}\n"
+                    f"💳 *Платник:* {payer_ua}\n"
+                    f"💰 *Вартість доставки:* ~{wb_res.cost} грн | *Оцінка:* {int(declared_value)} грн\n"
+                    f"📅 *Очікувана дата доставки:* {wb_res.estimated_delivery_date or 'Не вказано'}\n\n"
+                    f"🔗 [Відстежити ТТН на сайті Нової Пошти]({tracking_url})"
                 )
 
                 await callback.message.edit_text(
@@ -540,7 +565,7 @@ def register_handlers(
             except Exception as err:
                 logger.error(f"Failed to create waybill: {err}", exc_info=True)
                 await callback.message.edit_text(
-                    f"❌ *Failed to create Waybill:* {str(err)}", parse_mode="Markdown"
+                    f"❌ *Помилка створення ТТН:* {str(err)}", parse_mode="Markdown"
                 )
 
     @router.callback_query(DraftActionCallback.filter())
@@ -556,21 +581,21 @@ def register_handlers(
         ref = callback_data.ref
 
         if action == "delete":
-            await callback.answer("Deleting Waybill from Nova Poshta...")
+            await callback.answer("Видалення накладної з Нової Пошти...")
             try:
                 success = await user_np_client.delete_waybill(ref)
                 storage_manager.delete_user_draft(user_id, ref)
 
                 if success:
                     await callback.message.edit_text(
-                        "🗑 *Waybill (ТТН) was successfully deleted from Nova Poshta database!*",
+                        "🗑 *Express-накладну (ТТН) успішно видалено з бази Нової Пошти!*",
                         parse_mode="Markdown",
                     )
                 else:
                     await callback.message.edit_text(
-                        "⚠️ *Could not delete Waybill from Nova Poshta (it may have already been deleted or processed).*",
+                        "⚠️ *Не вдалося видалити ТТН з Нової Пошти (можливо, її вже скасовано або оброблено).*",
                         parse_mode="Markdown",
                     )
             except Exception as e:
                 logger.error(f"Error deleting waybill: {e}", exc_info=True)
-                await callback.answer(f"Failed to delete: {str(e)}", show_alert=True)
+                await callback.answer(f"Помилка видалення: {str(e)}", show_alert=True)

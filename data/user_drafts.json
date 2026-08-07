@@ -1,0 +1,17 @@
+{
+  "252419732": [
+    {
+      "ref": "019fdcd2-0a7f-7641-8e92-926643802a6d",
+      "int_doc_number": "20451506111720",
+      "recipient_name": "Кузло Антон",
+      "recipient_phone": "380986026819",
+      "city_description": "Рівне",
+      "warehouse_description": "Відділення №36 (до 30 кг на одне місце): вул. Княгині Ольги, 8",
+      "payer_type": "Recipient",
+      "cargo_description": "Посилка",
+      "declared_value": 500.0,
+      "cost": 90.0,
+      "created_at": "07.08.2026"
+    }
+  ]
+}

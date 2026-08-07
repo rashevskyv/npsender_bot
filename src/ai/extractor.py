@@ -1,4 +1,4 @@
-"""AI Entity Extractor module for parsing unstructured recipient info or answering conversational questions."""
+"""AI Entity Extractor module for parsing unstructured recipient info, contextual updates, or answering conversational questions."""
 
 import json
 import logging
@@ -18,15 +18,16 @@ Determine the user's intent:
 1. CONVERSATIONAL INTENT (is_recipient_info: false):
    If the user greets you, asks who you are ("хто ти", "що ти робиш"), asks what you need or how to use you ("що тобі треба", "які дані потрібні", "як з тобою працювати"), or asks general questions:
    - Set `is_recipient_info`: false
-   - Set `conversational_response`: Provide a polite, friendly response in Ukrainian (or the language used) explaining:
+   - Set `conversational_response`: Provide a polite, friendly response in Ukrainian explaining:
      • Who you are: AI assistant for instant Nova Poshta Express Waybill (ТТН) generation.
      • What data you need: Recipient Full Name (ПІБ), Phone (телефон), City (місто), Branch or Postomat number (номер відділення або поштомату), Optional cargo description and declared value.
-     • Available commands: `/parcels` (view active shipments), `/settings` (check settings), `/help`.
+     • Available features: View active shipments, manage waybill drafts, toggle payer & cargo settings.
 
-2. RECIPIENT INFO INTENT (is_recipient_info: true):
-   If the user provides recipient delivery information:
+2. RECIPIENT INFO OR CONTEXTUAL UPDATE INTENT (is_recipient_info: true):
+   If the user provides recipient delivery information OR sends a follow-up word/phrase modifying an active pending shipment (e.g., "сувенір", "оцінка 1500", "платник відправник", "зміни ім'я на..."):
    - Set `is_recipient_info`: true
-   - Extract the following fields:
+   - If previous recipient data is provided in the prompt, MERGE the previous data with the new user updates! For example, if previous data had recipient name/city/branch and the user sends "сувенір", retain the recipient name/city/branch and set `cargo_description`: "сувенір".
+   - Extract/merge the following fields:
      • last_name: Recipient's last name (Прізвище)
      • first_name: Recipient's first name (Ім'я)
      • middle_name: Recipient's patronymic/middle name (По-батькові), if present
@@ -36,8 +37,8 @@ Determine the user's intent:
      • warehouse_number: Integer branch or postomat number (e.g. 5, 12, 26584)
      • is_postomat: Boolean (true if text mentions "поштомат", false for "відділення")
      • street_name, building_number, flat_number: if address delivery
-     • cargo_description: Item description if mentioned
-     • declared_value: Declared value number if mentioned
+     • cargo_description: Item description if mentioned or updated
+     • declared_value: Declared value number if mentioned or updated
 
 Return ONLY valid JSON matching this schema."""
 
@@ -55,14 +56,25 @@ class AIExtractor:
         )
         self.model = settings.ai_model
 
-    async def parse_text(self, text: str) -> ParsedRecipientInfo:
-        """Parse unstructured text and return structured ParsedRecipientInfo."""
+    async def parse_text(
+        self, text: str, previous_info: Optional[ParsedRecipientInfo] = None
+    ) -> ParsedRecipientInfo:
+        """Parse unstructured text with optional previous context for merging updates."""
+        user_prompt = text
+        if previous_info and previous_info.is_recipient_info:
+            prev_json = previous_info.model_dump_json(exclude_none=True)
+            user_prompt = (
+                f"Existing Active Recipient Data:\n{prev_json}\n\n"
+                f"User Follow-up Message:\n{text}\n\n"
+                "Please update the active recipient data with any new details from the follow-up message."
+            )
+
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": text},
+                    {"role": "user", "content": user_prompt},
                 ],
                 response_format={"type": "json_object"},
             )
@@ -71,7 +83,7 @@ class AIExtractor:
                 logger.warning("Empty response from AI model")
                 return ParsedRecipientInfo(
                     is_recipient_info=False,
-                    conversational_response="Я не зміг розпізнати повідомлення. Будь ласка, надішліть реквізити отримувача (ПІБ, телефон, місто, номер відділення) або напишіть /help.",
+                    conversational_response="Я не зміг розпізнати повідомлення. Будь ласка, надішліть реквізити отримувача (ПІБ, телефон, місто, номер відділення) або скористайтеся кнопками нижче.",
                 )
 
             data = json.loads(content)
@@ -84,7 +96,7 @@ class AIExtractor:
                     model=self.model,
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": text},
+                        {"role": "user", "content": user_prompt},
                     ],
                 )
                 raw_text = response.choices[0].message.content or ""

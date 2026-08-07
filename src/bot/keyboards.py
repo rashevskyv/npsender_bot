@@ -1,7 +1,30 @@
-"""Inline keyboards for Telegram bot."""
+"""Inline and Reply keyboards for Telegram bot (Ukrainian UI)."""
 
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
 from aiogram.filters.callback_data import CallbackData
+
+
+def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Build persistent main reply keyboard with buttons."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="📦 Активні посилки"),
+                KeyboardButton(text="📝 Мої чернетки (ТТН)"),
+            ],
+            [
+                KeyboardButton(text="⚙️ Налаштування"),
+                KeyboardButton(text="❓ Допомога"),
+            ],
+        ],
+        resize_keyboard=True,
+        persistent=True,
+    )
 
 
 class WaybillActionCallback(CallbackData, prefix="wb"):
@@ -20,9 +43,9 @@ def get_confirmation_keyboard(
     declared_value: float = 500.0,
     session_id: str = "default",
 ) -> InlineKeyboardMarkup:
-    """Build interactive confirmation keyboard with toggle buttons."""
-    payer_label = "👤 Payer: Recipient" if payer_type == "Recipient" else "📦 Payer: Sender"
-    cargo_label = "📦 Cargo: Parcel" if cargo_type == "Parcel" else "📄 Cargo: Documents"
+    """Build interactive confirmation keyboard with toggle buttons in Ukrainian."""
+    payer_label = "👤 Платник: Отримувач" if payer_type == "Recipient" else "📦 Платник: Відправник"
+    cargo_label = "📦 Вантаж: Посилка" if cargo_type == "Parcel" else "📄 Вантаж: Документи"
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -50,7 +73,7 @@ def get_confirmation_keyboard(
             ],
             [
                 InlineKeyboardButton(
-                    text=f"💰 Value: {int(declared_value)} UAH 🔄",
+                    text=f"💰 Оцінка: {int(declared_value)} грн 🔄",
                     callback_data=WaybillActionCallback(
                         action="cycle_value",
                         payer_type=payer_type,
@@ -62,7 +85,7 @@ def get_confirmation_keyboard(
             ],
             [
                 InlineKeyboardButton(
-                    text="✅ Create Waybill (ТТН)",
+                    text="✅ Створити ТТН",
                     callback_data=WaybillActionCallback(
                         action="confirm",
                         payer_type=payer_type,
@@ -72,7 +95,7 @@ def get_confirmation_keyboard(
                     ).pack(),
                 ),
                 InlineKeyboardButton(
-                    text="❌ Cancel",
+                    text="❌ Скасувати",
                     callback_data=WaybillActionCallback(
                         action="cancel",
                         payer_type=payer_type,
@@ -100,7 +123,7 @@ def get_draft_keyboard(ref: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🗑 Delete Waybill (Видалити ТТН)",
+                    text="🗑 Видалити ТТН",
                     callback_data=DraftActionCallback(action="delete", ref=ref).pack(),
                 )
             ]
