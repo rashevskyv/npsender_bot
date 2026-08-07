@@ -8,13 +8,14 @@ from typing import Dict, Any, Optional, List
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
 
 from src.config import Settings
-from src.storage import UserSettingsManager, UserCustomSettings, SavedDraft
+from src.storage import UserSettingsManager, UserCustomSettings, SavedDraft, SavedScanSheet
 from src.ai.schemas import ParsedRecipientInfo
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
+from src.utils.barcode_gen import generate_code128_barcode
 from src.bot.keyboards import (
     get_main_reply_keyboard,
     get_confirmation_keyboard,
@@ -23,6 +24,10 @@ from src.bot.keyboards import (
     get_draft_keyboard,
     CitySelectCallback,
     get_city_selection_keyboard,
+    RegisterActionCallback,
+    get_register_keyboard,
+    AddressConfirmCallback,
+    get_address_confirmation_keyboard,
 )
 
 logger = logging.getLogger(__name__)
@@ -279,6 +284,70 @@ def register_handlers(
                 f"❌ *Не вдалося отримати посилки:* {str(e)}", parse_mode="Markdown"
             )
 
+    @router.message(Command("registers"))
+    @router.message(F.text == "📋 Реєстри (ScanSheet)")
+    async def cmd_registers(message: Message):
+        """Show list of created registers (ScanSheets)."""
+        clear_user_active_session(message.from_user.id)
+        user_id = message.from_user.id
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+
+        status_msg = await message.answer(
+            "🔍 *Отримання ваших реєстрів з Нової Пошти...*", parse_mode="Markdown"
+        )
+        try:
+            api_sheets = await user_np_client.get_scan_sheets()
+            saved_sheets = storage_manager.get_user_scansheets(user_id)
+
+            if not api_sheets and not saved_sheets:
+                await status_msg.edit_text(
+                    "📋 *У вас поки немає створених реєстрів (ScanSheet).* \n\n"
+                    "💡 *Ви можете попросити мене створити реєстр, наприклад:* \n"
+                    "• *'Створи реєстр з усіх накладних за сьогодні'*\n"
+                    "• *'Створи реєстр з накладних з описом сувенір'*",
+                    parse_mode="Markdown",
+                )
+                return
+
+            await status_msg.delete()
+            await message.answer("📋 *Ваші створені реєстри (ScanSheet):*", parse_mode="Markdown")
+
+            all_refs = set()
+            for sheet in saved_sheets:
+                all_refs.add(sheet.ref)
+                card = (
+                    f"📋 *Реєстр №* `{sheet.number}`\n"
+                    f"📅 *Дата:* {sheet.date_created}\n"
+                    f"📦 *Кількість накладних:* {sheet.count_of_documents}\n"
+                )
+                if sheet.document_numbers:
+                    card += f"📄 *ТТН у реєстрі:* {', '.join(sheet.document_numbers)}\n"
+
+                await message.answer(
+                    card,
+                    parse_mode="Markdown",
+                    reply_markup=get_register_keyboard(ref=sheet.ref),
+                )
+
+            for a_sheet in api_sheets:
+                if a_sheet.ref not in all_refs:
+                    card = (
+                        f"📋 *Реєстр №* `{a_sheet.number}`\n"
+                        f"📅 *Дата:* {a_sheet.date_created}\n"
+                        f"📦 *Кількість накладних:* {a_sheet.count_of_documents}\n"
+                    )
+                    await message.answer(
+                        card,
+                        parse_mode="Markdown",
+                        reply_markup=get_register_keyboard(ref=a_sheet.ref),
+                    )
+        except Exception as e:
+            logger.error(f"Error fetching scan sheets: {e}", exc_info=True)
+            await status_msg.edit_text(
+                f"❌ *Не вдалося отримати список реєстрів:* {str(e)}", parse_mode="Markdown"
+            )
+
     async def _process_user_accumulated_messages(user_id: int):
         """Wait for rapid forwarded messages to accumulate before parsing."""
         try:
@@ -317,6 +386,59 @@ def register_handlers(
             _process_user_accumulated_messages(user_id)
         )
 
+def _parse_draft_date(date_str: str) -> Optional[datetime.datetime]:
+    """Parse draft date_created string safely into datetime object."""
+    if not date_str:
+        return None
+    try:
+        return datetime.datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        try:
+            return datetime.datetime.strptime(date_str.split(".")[0], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+
+
+def filter_user_drafts(
+    drafts: List[SavedDraft],
+    time_period: Optional[str] = None,
+    cargo_query: Optional[str] = None,
+) -> List[SavedDraft]:
+    """Filter list of SavedDraft items by time period or cargo description."""
+    filtered = list(drafts)
+    now = datetime.datetime.now()
+
+    if time_period == "today":
+        today_date = now.date()
+        filtered = [
+            d for d in filtered
+            if _parse_draft_date(d.created_at) and _parse_draft_date(d.created_at).date() == today_date
+        ]
+    elif time_period == "yesterday":
+        yesterday_date = (now - datetime.timedelta(days=1)).date()
+        filtered = [
+            d for d in filtered
+            if _parse_draft_date(d.created_at) and _parse_draft_date(d.created_at).date() == yesterday_date
+        ]
+    elif time_period == "yesterday_before_noon":
+        yesterday_date = (now - datetime.timedelta(days=1)).date()
+        filtered = [
+            d for d in filtered
+            if _parse_draft_date(d.created_at)
+            and _parse_draft_date(d.created_at).date() == yesterday_date
+            and _parse_draft_date(d.created_at).hour < 12
+        ]
+
+    if cargo_query:
+        q_lower = cargo_query.lower()
+        filtered = [
+            d for d in filtered
+            if q_lower in d.cargo_description.lower() or q_lower in d.recipient_name.lower()
+        ]
+
+    return filtered
+
+
     async def _handle_combined_text_message(message: Message, text: str):
         """Core text processing logic for accumulated recipient messages."""
         user_id = message.from_user.id
@@ -340,6 +462,96 @@ def register_handlers(
                 text, previous_info=prev_parsed_info
             )
 
+            # Handle Register & Waybill Filtering Intent
+            if parsed_info.is_register_intent:
+                action = parsed_info.register_action or "filter_drafts"
+
+                if action == "list":
+                    await cmd_registers(message)
+                    return
+
+                all_drafts = storage_manager.get_user_drafts(user_id)
+                filtered_drafts = filter_user_drafts(
+                    all_drafts,
+                    time_period=parsed_info.filter_time_period,
+                    cargo_query=parsed_info.filter_cargo_description,
+                )
+
+                period_labels = {
+                    "today": "за сьогодні",
+                    "yesterday": "за вчора",
+                    "yesterday_before_noon": "за вчора до 12:00",
+                    "all": "усі",
+                }
+                period_str = period_labels.get(parsed_info.filter_time_period or "all", "")
+                cargo_str = f"з описом '{parsed_info.filter_cargo_description}'" if parsed_info.filter_cargo_description else ""
+                filter_title = f"{period_str} {cargo_str}".strip() or "за вказаним фільтром"
+
+                if not filtered_drafts:
+                    await status_msg.edit_text(
+                        f"🔍 *Накладних {filter_title} не знайдено серед ваших чернеток.*",
+                        parse_mode="Markdown",
+                    )
+                    return
+
+                if action == "create":
+                    await status_msg.edit_text(
+                        f"⏳ *Формування реєстру (ScanSheet) для {len(filtered_drafts)} накладних {filter_title}...*",
+                        parse_mode="Markdown",
+                    )
+                    doc_refs = [d.ref for d in filtered_drafts]
+                    doc_nums = [d.int_doc_number for d in filtered_drafts]
+
+                    scansheet_info = await user_np_client.create_scan_sheet(doc_refs)
+
+                    saved_scansheet = SavedScanSheet(
+                        ref=scansheet_info.ref,
+                        number=scansheet_info.number,
+                        date_created=scansheet_info.date_created,
+                        count_of_documents=scansheet_info.count_of_documents,
+                        document_numbers=doc_nums,
+                    )
+                    storage_manager.add_user_scansheet(user_id, saved_scansheet)
+
+                    barcode_bytes = generate_code128_barcode(scansheet_info.number)
+                    photo_file = BufferedInputFile(barcode_bytes, filename=f"scansheet_{scansheet_info.number}.png")
+
+                    await status_msg.delete()
+                    caption_text = (
+                        f"✅ *Реєстр (ScanSheet) успішно створено!*\n\n"
+                        f"📋 *Номер реєстру:* `{scansheet_info.number}`\n"
+                        f"📅 *Дата створення:* {scansheet_info.date_created}\n"
+                        f"📦 *Кількість накладних:* {scansheet_info.count_of_documents}\n"
+                        f"📄 *ТТН у реєстрі:* {', '.join(doc_nums)}\n\n"
+                        "📱 *Покажіть цей штрихкод оператору Нової Пошти для сканування!*"
+                    )
+                    await message.answer_photo(
+                        photo=photo_file,
+                        caption=caption_text,
+                        parse_mode="Markdown",
+                        reply_markup=get_register_keyboard(ref=scansheet_info.ref),
+                    )
+                    return
+
+                # Default action: show filtered drafts list
+                await status_msg.edit_text(
+                    f"📋 *Знайдено {len(filtered_drafts)} накладних {filter_title}:*",
+                    parse_mode="Markdown",
+                )
+                for idx, draft in enumerate(filtered_drafts, 1):
+                    card = (
+                        f"*{idx}. ТТН:* `{draft.int_doc_number}` | {draft.recipient_name}\n"
+                        f"🏙 *Місто:* {draft.city_description}, {draft.warehouse_description}\n"
+                        f"📝 *Опис:* {draft.cargo_description} | 💰 {int(draft.declared_value)} грн\n"
+                        f"📅 *Створено:* {draft.created_at}"
+                    )
+                    await message.answer(
+                        card,
+                        parse_mode="Markdown",
+                        reply_markup=get_draft_keyboard(ref=draft.ref),
+                    )
+                return
+
             # Handle conversational / chat intent
             if not parsed_info.is_recipient_info:
                 resp_text = (
@@ -351,6 +563,29 @@ def register_handlers(
 
             # Get or generate active session ID
             session_id = active_session_id or str(uuid.uuid4())[:8]
+
+            # Check for address delivery suspicion prompt
+            existing_session = PENDING_SESSIONS.get(session_id) if session_id in PENDING_SESSIONS else None
+            address_choice_made = existing_session.get("address_choice_made", False) if existing_session else False
+
+            if parsed_info.has_address_suspicion and not address_choice_made:
+                PENDING_SESSIONS[session_id] = {
+                    "parsed_info": parsed_info,
+                    "user_id": user_id,
+                }
+                USER_ACTIVE_SESSIONS[user_id] = session_id
+
+                addr_parts = [p for p in [parsed_info.street_name, parsed_info.building_number, parsed_info.flat_number] if p]
+                addr_text = " ".join(addr_parts) if addr_parts else "Вказано в описі"
+
+                await status_msg.edit_text(
+                    "🏡 *Виявлено можливу кур'єрську доставку на адресу (додому/в офіс):*\n\n"
+                    f"📍 *Адреса:* `{addr_text}`\n\n"
+                    "Бажаєте оформити кур'єрську доставку додому чи у відділення / поштомат?",
+                    parse_mode="Markdown",
+                    reply_markup=get_address_confirmation_keyboard(session_id),
+                )
+                return
 
             # Check missing required fields
             missing_fields = []
@@ -909,3 +1144,79 @@ def register_handlers(
             ),
         )
         await callback.answer(f"Обрано: {matched_city.description}")
+
+    @router.callback_query(RegisterActionCallback.filter())
+    async def process_register_callback(
+        callback: CallbackQuery, callback_data: RegisterActionCallback
+    ):
+        """Handle inline actions on ScanSheet registers."""
+        user_id = callback.from_user.id
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+
+        action = callback_data.action
+        ref = callback_data.ref
+
+        if action == "barcode":
+            saved_sheets = storage_manager.get_user_scansheets(user_id)
+            target = next((s for s in saved_sheets if s.ref == ref), None)
+            reg_num = target.number if target else ref
+
+            await callback.answer("Генерація штрихкоду...")
+            try:
+                barcode_bytes = generate_code128_barcode(reg_num)
+                photo_file = BufferedInputFile(barcode_bytes, filename=f"barcode_{reg_num}.png")
+                await callback.message.answer_photo(
+                    photo=photo_file,
+                    caption=f"📱 *Штрихкод реєстру № `{reg_num}`*",
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.error(f"Error generating barcode photo: {e}", exc_info=True)
+                await callback.answer(f"Не вдалося згенерувати штрихкод: {e}", show_alert=True)
+            return
+
+        if action == "delete":
+            await callback.answer("Видалення реєстру...")
+            try:
+                await user_np_client.delete_scan_sheet(ref)
+                storage_manager.delete_user_scansheet(user_id, ref)
+                await callback.message.edit_text(
+                    "🗑 *Реєстр (ScanSheet) успішно видалено / розформовано!*",
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.error(f"Error deleting scan sheet: {e}", exc_info=True)
+                storage_manager.delete_user_scansheet(user_id, ref)
+                await callback.message.edit_text(
+                    "🗑 *Реєстр видалено з локальної бази.*",
+                    parse_mode="Markdown",
+                )
+
+    @router.callback_query(AddressConfirmCallback.filter())
+    async def process_address_confirm_callback(
+        callback: CallbackQuery, callback_data: AddressConfirmCallback
+    ):
+        """Handle user choice between courier address delivery and warehouse."""
+        session_id = callback_data.session_id
+        session = PENDING_SESSIONS.get(session_id)
+
+        if not session or "parsed_info" not in session:
+            await callback.answer("Сесія застаріла. Надішліть реквізити заново.", show_alert=True)
+            return
+
+        choice = callback_data.choice
+        parsed_info: ParsedRecipientInfo = session["parsed_info"]
+        session["address_choice_made"] = True
+
+        if choice == "courier":
+            parsed_info.is_address_delivery = True
+            parsed_info.has_address_suspicion = False
+            await callback.answer("Обрано адресну доставку кур'єром!")
+        else:
+            parsed_info.is_address_delivery = False
+            parsed_info.has_address_suspicion = False
+            await callback.answer("Обрано доставку у відділення / поштомат!")
+
+        await callback.message.edit_text("⏳ *Оновлення способу доставки...*", parse_mode="Markdown")
+        await _handle_combined_text_message(callback.message, "")

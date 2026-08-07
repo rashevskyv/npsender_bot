@@ -45,6 +45,12 @@ class ParsedRecipientInfo(BaseModel):
     is_postomat: Optional[bool] = Field(
         default=False, description="True if the user specified a postomat (поштомат)"
     )
+    is_address_delivery: Optional[bool] = Field(
+        default=False, description="True if courier address delivery to home/office is requested or confirmed"
+    )
+    has_address_suspicion: Optional[bool] = Field(
+        default=False, description="True if text mentions a street address, apartment, or keywords 'додому', 'кур'єром', 'на адресу'"
+    )
     street_name: Optional[str] = Field(
         default=None, description="Street name for address delivery (Вулиця)"
     )
@@ -60,8 +66,24 @@ class ParsedRecipientInfo(BaseModel):
     declared_value: Optional[float] = Field(
         default=None, description="Declared value in UAH if specified in text"
     )
+    is_register_intent: Optional[bool] = Field(
+        default=False,
+        description="True if the user is asking about ScanSheet registers or requesting to filter/create a register of express waybills",
+    )
+    register_action: Optional[str] = Field(
+        default=None,
+        description="Action type for register intent: 'create' (create a register), 'list' (view active registers), 'filter_drafts' (show/discuss filtered waybills)",
+    )
+    filter_cargo_description: Optional[str] = Field(
+        default=None,
+        description="Cargo description filter query if user requested to filter waybills by item (e.g. 'сувенір', 'планшет')",
+    )
+    filter_time_period: Optional[str] = Field(
+        default=None,
+        description="Time period filter if requested by user: 'today', 'yesterday', 'yesterday_before_noon', 'all'",
+    )
 
-    @field_validator("is_postomat", mode="before")
+    @field_validator("is_postomat", "is_address_delivery", "has_address_suspicion", mode="before")
     @classmethod
     def convert_postomat(cls, v):
         if v is None:

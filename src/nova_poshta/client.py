@@ -13,6 +13,7 @@ from src.nova_poshta.models import (
     CounterpartyRecipientResult,
     WaybillCreateResult,
     WaybillItemInfo,
+    ScanSheetInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -414,3 +415,51 @@ class NovaPoshtaClient:
             cost=float(doc_info.get("CostOnSite", doc_info.get("Cost", 0))),
             estimated_delivery_date=doc_info.get("EstimatedDeliveryDate"),
         )
+
+    async def create_scan_sheet(self, document_refs: List[str]) -> ScanSheetInfo:
+        """Create a Nova Poshta ScanSheet (Register) from a list of waybill Ref GUIDs."""
+        res = await self._post(
+            model_name="ScanSheet",
+            called_method="save",
+            method_properties={"DocumentRefs": document_refs},
+        )
+        data = res.get("data", [])
+        if not data:
+            raise RuntimeError("ScanSheet/save returned empty data array")
+
+        info = data[0]
+        return ScanSheetInfo(
+            Ref=info.get("Ref", ""),
+            Number=info.get("Number", ""),
+            DateTime=info.get("DateTime", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            CountOfDocuments=int(info.get("CountOfDocuments", len(document_refs))),
+        )
+
+    async def get_scan_sheets(self) -> List[ScanSheetInfo]:
+        """Fetch list of user's active registers (ScanSheets)."""
+        res = await self._post(
+            model_name="ScanSheet",
+            called_method="getScanSheetList",
+            method_properties={},
+        )
+        data = res.get("data", [])
+        sheets = []
+        for item in data:
+            sheets.append(
+                ScanSheetInfo(
+                    Ref=item.get("Ref", ""),
+                    Number=item.get("Number", ""),
+                    DateTime=item.get("DateTime", ""),
+                    CountOfDocuments=int(item.get("CountOfDocuments", 0)),
+                )
+            )
+        return sheets
+
+    async def delete_scan_sheet(self, scan_sheet_ref: str) -> bool:
+        """Delete / unbind a ScanSheet register by Ref GUID."""
+        res = await self._post(
+            model_name="ScanSheet",
+            called_method="deleteScanSheet",
+            method_properties={"ScanSheetRef": scan_sheet_ref},
+        )
+        return res.get("success", False)

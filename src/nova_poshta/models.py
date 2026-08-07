@@ -54,3 +54,11 @@ class WaybillItemInfo(BaseModel):
     estimated_delivery_date: Optional[str] = None
     date_created: Optional[str] = None
 
+
+class ScanSheetInfo(BaseModel):
+    """Nova Poshta ScanSheet (Register) entity."""
+
+    ref: str = Field(..., alias="Ref")
+    number: str = Field(..., alias="Number")
+    date_created: str = Field(default="", alias="DateTime")
+    count_of_documents: int = Field(default=0, alias="CountOfDocuments")

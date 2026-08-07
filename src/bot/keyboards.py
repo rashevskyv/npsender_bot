@@ -18,7 +18,10 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📝 Мої чернетки (ТТН)"),
             ],
             [
+                KeyboardButton(text="📋 Реєстри (ScanSheet)"),
                 KeyboardButton(text="⚙️ Налаштування"),
+            ],
+            [
                 KeyboardButton(text="❓ Допомога"),
             ],
         ],
@@ -161,3 +164,55 @@ def get_city_selection_keyboard(
             ]
         )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+class RegisterActionCallback(CallbackData, prefix="reg"):
+    """Callback data schema for register management."""
+
+    action: str  # "delete", "barcode"
+    ref: str  # Nova Poshta ScanSheet Ref GUID
+
+
+def get_register_keyboard(ref: str) -> InlineKeyboardMarkup:
+    """Build inline keyboard for a specific register (ScanSheet) item."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📱 Показати штрихкод",
+                    callback_data=RegisterActionCallback(action="barcode", ref=ref).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Видалити реєстр",
+                    callback_data=RegisterActionCallback(action="delete", ref=ref).pack(),
+                ),
+            ]
+        ]
+    )
+
+
+class AddressConfirmCallback(CallbackData, prefix="addr"):
+    """Callback data schema for confirming courier address delivery vs warehouse."""
+
+    choice: str  # "courier", "warehouse"
+    session_id: str
+
+
+def get_address_confirmation_keyboard(session_id: str) -> InlineKeyboardMarkup:
+    """Build inline keyboard to ask user if they want courier home delivery or warehouse."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚚 Доставка кур'єром додому",
+                    callback_data=AddressConfirmCallback(choice="courier", session_id=session_id).pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📦 Доставка у відділення / поштомат",
+                    callback_data=AddressConfirmCallback(choice="warehouse", session_id=session_id).pack(),
+                ),
+            ],
+        ]
+    )

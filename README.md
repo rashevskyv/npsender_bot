@@ -6,6 +6,7 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **📋 ScanSheet Registers & Code128 Barcode Generation (`/registers`)**: Create Nova Poshta ScanSheet registers from waybills filtered by date, time of day, or cargo description via natural language (e.g. *"створи реєстр з усіх накладних з описом сувенір"* or *"надай всі накладні за сьогодні"*). Automatically generates and sends high-resolution Code128 PNG barcode images in Telegram for instant scanning at Nova Poshta branches!
 - **🤖 AI Entity Extraction & Conversational Chat**: Parses unstructured text messages (Full Name, Phone, City, Branch/Postomat number, Cargo Description, Declared Value) while also intelligently handling general chat messages, greetings, and queries about bot capabilities.
 - **📩 Multi-Part & Reposted Message Accumulation**: When users forward/repost multiple messages in sequence (e.g., 1st message with Name/Phone, 2nd message with City/Branch), the bot saves partial context and seamlessly merges all incoming messages into a single complete waybill draft!
 - **🔄 Active Session Context Memory & Live Draft Editing**: Remembers active recipient context. Users can edit any saved draft using live natural language (e.g. typing *"зміни опис на сувенір"* or *"оцінка 2000 грн"*), updating the waybill live in Nova Poshta database via `InternetDocument/update`!

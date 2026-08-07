@@ -39,9 +39,22 @@ Determine the user's intent:
      • warehouse_number: Primary integer branch or postomat number (e.g. 36, 12, 26584). 
        IMPORTANT: If the text includes a branch/postomat number AND a physical street address of the branch (e.g. "Відділення №36 (до 30 кг на одне місце): вул. Княгині Ольги, 8" or "Поштомат №26584 (вул. Миколайчука 15v)"), extract ONLY the branch/postomat integer ID (`36` or `26584`). Ignore weight limits "(до 30 кг)" and street numbers "вул. Княгині Ольги, 8" when determining `warehouse_number`!
      • is_postomat: Boolean (true if text mentions "поштомат", false for "відділення")
-     • street_name, building_number, flat_number: extract ONLY if explicit courier address delivery to recipient's home/office is requested. Ignore branch/postomat physical addresses.
+     • street_name, building_number, flat_number: extract personal home/office street name, building/house number, flat/apartment number.
+     • has_address_suspicion: Boolean (true if text mentions personal home/office street address, apartment, or keywords "додому", "кур'єром", "на адресу", "вул.", "буд.", "кв.")
+     • is_address_delivery: Boolean (true if user explicitly confirmed or requested courier door delivery)
      • cargo_description: Item description if mentioned or updated
      • declared_value: Declared value number if mentioned or updated
+
+3. REGISTER & WAYBILL FILTERING INTENT (is_register_intent: true):
+   If the user asks to list/filter waybills by date, time, or cargo description, or asks to create a ScanSheet register (e.g. "надай мені всі накладні, які були створені за сьогодні", "створи реєстр з усіх накладних з описом сувенір", "створи реєстр з накладних створених вчора до обіду", "покажи мої реєстри"):
+   - Set `is_register_intent`: true
+   - Set `register_action`:
+     • "create": if user requests to build/create a register (ScanSheet)
+     • "list": if user asks to view existing registers
+     • "filter_drafts": if user asks to list, view, or discuss waybill drafts matching a filter
+   - Set filter criteria:
+     • filter_cargo_description: item name if user filtered by cargo description (e.g. "сувенір", "планшет")
+     • filter_time_period: "today" (за сьогодні), "yesterday" (за вчора), "yesterday_before_noon" (вчора до обіду), or "all" (усі)
 
 Return ONLY valid JSON matching this schema."""
 

@@ -1,6 +1,19 @@
 {
   "252419732": [
     {
+      "ref": "019fdcfa-b70d-7e6f-82a4-a134be597212",
+      "int_doc_number": "20451506135233",
+      "recipient_name": "Сирбу Андрій Максимович",
+      "recipient_phone": "380933608646",
+      "city_description": "Черкаське (Донецька обл.)",
+      "warehouse_description": "Поштомат \"Нова Пошта\" №47988: вул. Ясна, 1 (біля магазину)",
+      "payer_type": "Recipient",
+      "cargo_description": "планшет",
+      "declared_value": 500.0,
+      "cost": 130.0,
+      "created_at": "07.08.2026"
+    },
+    {
       "ref": "019fdced-558f-7f7f-aede-4700547be216",
       "int_doc_number": "20451506128512",
       "recipient_name": "Мартинюк Володимир",
