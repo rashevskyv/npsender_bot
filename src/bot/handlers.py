@@ -2,7 +2,6 @@
 
 import datetime
 import logging
-import re
 import uuid
 from typing import Dict, Any, Optional
 
@@ -648,42 +647,28 @@ def register_handlers(
                 )
                 return
 
-            # Extract warehouse number using regex for №...
-            match = re.search(r"(?:№|№\s*|No|#)\s*(\d+)", target_draft.warehouse_description, re.IGNORECASE)
-            if match:
-                wh_num = int(match.group(1))
-            else:
-                match_fb = re.search(r"\b(\d+)\b", target_draft.warehouse_description)
-                wh_num = int(match_fb.group(1)) if match_fb else 1
-
-            is_post = "поштомат" in target_draft.warehouse_description.lower()
-
-            # Lookup city & warehouse in Nova Poshta database
-            cities = await user_np_client.search_city(target_draft.city_description)
-            city = cities[0] if cities else None
-            warehouse = None
-            if city:
-                warehouse = await user_np_client.get_warehouse(
-                    city_ref=city.ref, warehouse_number=wh_num, is_postomat=is_post
-                )
-
-            # Create parsed info object from draft
-            name_parts = target_draft.recipient_name.split()
-            l_name = name_parts[0] if name_parts else "N/A"
-            f_name = name_parts[1] if len(name_parts) > 1 else ""
-            m_name = " ".join(name_parts[2:]) if len(name_parts) > 2 else ""
-
-            parsed_info = ParsedRecipientInfo(
-                last_name=l_name,
-                first_name=f_name,
-                middle_name=m_name,
-                phone=target_draft.recipient_phone,
-                city_name=target_draft.city_description,
-                warehouse_number=wh_num,
-                is_postomat=is_post,
-                cargo_description=target_draft.cargo_description,
-                declared_value=target_draft.declared_value,
+            user_ai_extractor = AIExtractor(eff_settings)
+            draft_prompt = (
+                f"{target_draft.recipient_name} {target_draft.recipient_phone} "
+                f"{target_draft.city_description} {target_draft.warehouse_description}. "
+                f"Опис вантажу: {target_draft.cargo_description}. Оціночна вартість: {target_draft.declared_value}"
             )
+
+            # Use AI to parse the stored draft text into structured ParsedRecipientInfo
+            parsed_info = await user_ai_extractor.parse_text(draft_prompt)
+
+            city = None
+            warehouse = None
+            if parsed_info.city_name:
+                cities = await user_np_client.search_city(parsed_info.city_name)
+                if cities:
+                    city = cities[0]
+                    if parsed_info.warehouse_number:
+                        warehouse = await user_np_client.get_warehouse(
+                            city_ref=city.ref,
+                            warehouse_number=parsed_info.warehouse_number,
+                            is_postomat=parsed_info.is_postomat,
+                        )
 
             # Activate editing session
             session_id = str(uuid.uuid4())[:8]
