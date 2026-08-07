@@ -44,6 +44,13 @@ USER_DEBOUNCE_TASKS: Dict[int, asyncio.Task] = {}
 USER_LAST_MESSAGES: Dict[int, Message] = {}
 
 
+def clear_user_active_session(user_id: int):
+    """Clear active waybill session for a given user."""
+    session_id = USER_ACTIVE_SESSIONS.pop(user_id, None)
+    if session_id:
+        PENDING_SESSIONS.pop(session_id, None)
+
+
 def _parse_draft_date(date_str: str) -> Optional[datetime.datetime]:
     """Parse draft date_created string safely into datetime object."""
     if not date_str:

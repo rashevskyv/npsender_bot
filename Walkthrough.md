@@ -1,10 +1,12 @@
 # Walkthrough (Журнал змін)
 
+## [v0.12.3] - 2026-08-07
+- **Виправлення NameError `clear_user_active_session`**:
+  - Відновлено допоміжну функцію `clear_user_active_session(user_id: int)` на рівні модуля `src/bot/handlers.py`.
+- **Тестування**: Усі 16 модульних тестів виконано успішно (`16 passed in 2.11s`).
+
 ## [v0.12.2] - 2026-08-07
-- **Виправлення NameError `storage_manager` при асинхронній обробці накопичених повідомлень**:
-  - Повернуто обробники `_handle_combined_text_message`, `_process_user_accumulated_messages` та `process_text_message` всередину фабричної функції `register_handlers` для надання доступу до `storage_manager`, `settings`, `ai_extractor` та `np_client`.
-  - Допоміжні функції `_parse_draft_date` та `filter_user_drafts` розміщено на рівні модуля для доступності у модульних тестах.
-- **Тестування**: Усі 16 модульних тестів виконано успішно (`16 passed in 2.09s`).
+- **Виправлення NameError `storage_manager` при асинхронній обробці накопичених повідомлень**.
 
 ## [v0.12.1] - 2026-08-07
 - **Виправлення обробки команди створення реєстру з усіх чернеток (`is_register_intent`)**.
