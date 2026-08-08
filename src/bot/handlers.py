@@ -1154,14 +1154,15 @@ def register_handlers(
                     )
                     return
 
-            # Enforce minimum declared value of 500 UAH
+            # Enforce minimum declared value of 500 UAH AND declared_value >= cod_amount
+            cod_val = parsed_info.cod_amount or 0.0
+            cod_type = parsed_info.cod_payment_type or "cash"
             declared_val = max(
                 parsed_info.declared_value or eff_settings.default_declared_value,
                 500.0,
+                cod_val,
             )
             cargo_desc = parsed_info.cargo_description or "Посилка"
-            cod_val = parsed_info.cod_amount or 0.0
-            cod_type = parsed_info.cod_payment_type or "cash"
 
             # Create or update session for interactive confirmation
             session_id = active_session_id or str(uuid.uuid4())[:8]
@@ -1279,6 +1280,8 @@ def register_handlers(
                     payer_type=new_payer,
                     cargo_type=session["cargo_type"],
                     declared_value=session["declared_value"],
+                    cod_amount=session.get("cod_amount", 0.0),
+                    cod_payment_type=session.get("cod_payment_type", "cash"),
                     session_id=session_id,
                 )
             )
@@ -1303,11 +1306,15 @@ def register_handlers(
 
         if action == "cycle_value":
             current_val = session["declared_value"]
+            cod_val = session.get("cod_amount", 0.0)
             try:
                 curr_idx = VALUE_OPTIONS.index(current_val)
                 next_val = VALUE_OPTIONS[(curr_idx + 1) % len(VALUE_OPTIONS)]
             except ValueError:
                 next_val = VALUE_OPTIONS[0]
+
+            if next_val < cod_val:
+                next_val = cod_val
 
             session["declared_value"] = next_val
 
@@ -1315,7 +1322,6 @@ def register_handlers(
             city = session["city"]
             warehouse = session["warehouse"]
             cargo_desc = session["cargo_description"]
-            cod_val = session.get("cod_amount", 0.0)
             cod_type = session.get("cod_payment_type", "cash")
             cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
@@ -1356,6 +1362,8 @@ def register_handlers(
                 next_cod = COD_OPTIONS[1]
 
             session["cod_amount"] = next_cod
+            if next_cod > session["declared_value"]:
+                session["declared_value"] = next_cod
 
             parsed_info = session["parsed_info"]
             city = session["city"]

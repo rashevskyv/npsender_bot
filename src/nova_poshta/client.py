@@ -349,6 +349,8 @@ class NovaPoshtaClient:
         }
 
         if cod_amount and cod_amount > 0:
+            declared_value = max(declared_value, cod_amount)
+            method_props["Cost"] = str(declared_value)
             method_props["BackwardDeliveryData"] = [
                 {
                     "PayerType": cod_payer_type,
