@@ -45,8 +45,11 @@ class WaybillItemInfo(BaseModel):
 
     int_doc_number: str
     state_name: str
+    state_id: Optional[str] = None
     recipient_name: str
     recipient_phone: Optional[str] = None
+    sender_name: Optional[str] = None
+    sender_phone: Optional[str] = None
     city_recipient: str
     address_recipient: str
     cost: float

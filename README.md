@@ -15,7 +15,8 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 - **📄 Waybill Drafts Management (`/drafts`)**: View active waybill drafts with live status tracking (`TrackingDocument/getStatusDocuments`). Automatically filters out and purges shipments that have already been handed over/sent to Nova Poshta so only genuine un-shipped drafts are shown, with instant action buttons (`✏️ Редагувати ТТН` / `🗑 Видалити ТТН`).
 - **🔐 Multi-Tenant & Per-User API Keys**: Users can easily bind their own personal Nova Poshta API key (`/set_np_key`) and AI key (`/set_ai_key`) directly via Telegram chat. The bot automatically validates the key and fetches sender credentials.
 - **🔍 Smart Missing Info Prompting**: Automatically validates extracted details and prompts the user if required recipient info (Full Name, Phone, City, or Branch) is missing.
-- **📦 Active Shipments List (`/parcels`)**: Fetches active outgoing shipments from Nova Poshta API for the last 30 days and displays them in clean, human-readable markdown cards with live tracking links.
+- **📤 Outgoing Active Shipments (`/outgoing` / `📤 Вихідні (що їдуть)`)**: Lists all active outgoing packages created/sent by the user that have not yet been picked up by the recipient.
+- **📥 Incoming Active Shipments (`/incoming` / `📥 Вхідні (що їдуть)`)**: Lists all incoming packages traveling to the user with smart relative delivery date formatting (*"Сьогодні о 18:00"*, *"Завтра о 15:30"*, *"Післязавтра"*, or *"DD.MM.YYYY"*). Filtered to show only uncollected shipments.
 - **💰 Configurable Declared Value & Defaults**: Default minimum declared value set to 500 UAH with quick interactive toggle buttons (500, 1000, 2000, 5000, 10000 UAH).
 - **🔌 Multi-Provider AI Support**:
   1. **OpenAI-compatible endpoints** (e.g. `gemini-web2api v1.2.9` listening on `http://localhost:8081/v1` with `gemini-3.6-flash`).

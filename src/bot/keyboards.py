@@ -14,14 +14,15 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="📦 Активні посилки"),
+                KeyboardButton(text="📤 Вихідні (що їдуть)"),
+                KeyboardButton(text="📥 Вхідні (що їдуть)"),
+            ],
+            [
                 KeyboardButton(text="📝 Мої чернетки (ТТН)"),
-            ],
-            [
                 KeyboardButton(text="📋 Реєстри (ScanSheet)"),
-                KeyboardButton(text="⚙️ Налаштування"),
             ],
             [
+                KeyboardButton(text="⚙️ Налаштування"),
                 KeyboardButton(text="❓ Допомога"),
             ],
         ],

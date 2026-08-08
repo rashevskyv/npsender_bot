@@ -236,9 +236,9 @@ class NovaPoshtaClient:
         )
 
     async def get_outgoing_waybills(
-        self, days_back: int = 30, limit: int = 10
+        self, days_back: int = 30, limit: int = 20
     ) -> List[WaybillItemInfo]:
-        """Fetch list of outgoing shipments for the past N days."""
+        """Fetch list of active outgoing shipments (not yet received by recipient) for the past N days."""
         today = datetime.date.today()
         from_date = (today - datetime.timedelta(days=days_back)).strftime("%d.%m.%Y")
         to_date = today.strftime("%d.%m.%Y")
@@ -256,13 +256,75 @@ class NovaPoshtaClient:
         )
         items = []
         for doc in res.get("data", []):
+            state_id = str(doc.get("StateId", doc.get("StatusCode", "")))
+            state_name = str(doc.get("StateName", doc.get("Status", "Unspecified")))
+
+            # Skip items already received/picked up by recipient
+            if state_id in ("9", "10", "11", "106") or any(
+                kw in state_name.lower() for kw in ["отримано", "забрано", "видано"]
+            ):
+                continue
+
             cost_val = doc.get("CostOnSite") or doc.get("Cost") or "0"
             items.append(
                 WaybillItemInfo(
                     int_doc_number=str(doc.get("IntDocNumber", "")),
-                    state_name=str(doc.get("StateName", "Unspecified")),
-                    recipient_name=str(doc.get("RecipientContactPerson", "N/A")),
+                    state_name=state_name,
+                    state_id=state_id,
+                    recipient_name=str(doc.get("RecipientContactPerson", doc.get("RecipientDescription", "N/A"))),
                     recipient_phone=doc.get("RecipientsPhone"),
+                    sender_name=str(doc.get("SenderContactPerson", doc.get("SenderDescription", "N/A"))),
+                    sender_phone=doc.get("SendersPhone"),
+                    city_recipient=str(doc.get("CityRecipientDescription", "N/A")),
+                    address_recipient=str(doc.get("RecipientAddressDescription", "N/A")),
+                    cost=float(cost_val),
+                    description=str(doc.get("Description", "Посилка")),
+                    estimated_delivery_date=doc.get("EstimatedDeliveryDate"),
+                    date_created=doc.get("DateTime"),
+                )
+            )
+        return items
+
+    async def get_incoming_waybills(
+        self, days_back: int = 30, limit: int = 20
+    ) -> List[WaybillItemInfo]:
+        """Fetch list of active incoming shipments (traveling to user, not yet received) for the past N days."""
+        today = datetime.date.today()
+        from_date = (today - datetime.timedelta(days=days_back)).strftime("%d.%m.%Y")
+        to_date = today.strftime("%d.%m.%Y")
+
+        res = await self._post(
+            model_name="InternetDocument",
+            called_method="getDocumentList",
+            method_properties={
+                "DateTimeFrom": from_date,
+                "DateTimeTo": to_date,
+                "Page": "1",
+                "Limit": str(limit),
+                "GetFullList": "1",
+            },
+        )
+        items = []
+        for doc in res.get("data", []):
+            state_id = str(doc.get("StateId", doc.get("StatusCode", "")))
+            state_name = str(doc.get("StateName", doc.get("Status", "Unspecified")))
+
+            # Skip items already received/picked up
+            if state_id in ("9", "10", "11", "106") or any(
+                kw in state_name.lower() for kw in ["отримано", "забрано", "видано"]
+            ):
+                continue
+
+            cost_val = doc.get("CostOnSite") or doc.get("Cost") or "0"
+            items.append(
+                WaybillItemInfo(
+                    int_doc_number=str(doc.get("IntDocNumber", "")),
+                    state_name=state_name,
+                    state_id=state_id,
+                    recipient_name=str(doc.get("RecipientContactPerson", doc.get("RecipientDescription", "N/A"))),
+                    recipient_phone=doc.get("RecipientsPhone"),
+                    sender_name=str(doc.get("SenderContactPerson", doc.get("SenderDescription", "N/A"))),
+                    sender_phone=doc.get("SendersPhone"),
                     city_recipient=str(doc.get("CityRecipientDescription", "N/A")),
                     address_recipient=str(doc.get("RecipientAddressDescription", "N/A")),
                     cost=float(cost_val),

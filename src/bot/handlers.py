@@ -83,6 +83,57 @@ def _is_recent_scansheet(date_str: str, max_days: int = 2) -> bool:
     return diff_days <= max_days
 
 
+def format_relative_delivery_date(raw_date_str: Optional[str]) -> str:
+    """Format estimated delivery date string into relative Ukrainian text:
+    - Today -> 'Сьогодні' (or 'Сьогодні о HH:MM')
+    - Tomorrow -> 'Завтра' (or 'Завтра о HH:MM')
+    - Day after tomorrow -> 'Післязавтра' (or 'Післязавтра о HH:MM')
+    - > 2 days -> 'DD.MM.YYYY' (or 'DD.MM.YYYY о HH:MM')
+    """
+    if not raw_date_str or not raw_date_str.strip():
+        return "Не вказано"
+
+    clean_str = raw_date_str.strip()
+    parsed_dt = None
+    time_str = ""
+
+    # Check for time part in string
+    if " " in clean_str:
+        parts = clean_str.split(" ", 1)
+        date_part = parts[0].strip()
+        time_part = parts[1].strip()
+        if ":" in time_part:
+            time_components = time_part.split(":")
+            time_str = f"{time_components[0].zfill(2)}:{time_components[1].zfill(2)}"
+        clean_str = date_part
+
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            parsed_dt = datetime.datetime.strptime(clean_str, fmt).date()
+            break
+        except Exception:
+            pass
+
+    if not parsed_dt:
+        return raw_date_str
+
+    now_date = datetime.date.today()
+    diff_days = (parsed_dt - now_date).days
+
+    if diff_days == 0:
+        day_label = "Сьогодні"
+    elif diff_days == 1:
+        day_label = "Завтра"
+    elif diff_days == 2:
+        day_label = "Післязавтра"
+    else:
+        day_label = parsed_dt.strftime("%d.%m.%Y")
+
+    if time_str:
+        return f"{day_label} о {time_str}"
+    return day_label
+
+
 def filter_user_drafts(
     drafts: List[SavedDraft],
     time_period: Optional[str] = None,
@@ -337,22 +388,25 @@ def register_handlers(
                 reply_markup=get_draft_keyboard(ref=draft.ref),
             )
 
+    @router.message(Command("outgoing"))
     @router.message(Command("parcels"))
+    @router.message(F.text == "📤 Вихідні (що їдуть)")
     @router.message(F.text == "📦 Активні посилки")
-    async def cmd_parcels(message: Message):
-        """Show active outgoing shipments / waybills."""
+    async def cmd_outgoing_parcels(message: Message):
+        """Show active outgoing shipments sent by user (not yet received)."""
         clear_user_active_session(message.from_user.id)
         eff_settings = storage_manager.get_effective_settings(message.from_user.id, settings)
         user_np_client = NovaPoshtaClient(eff_settings)
 
         status_msg = await message.answer(
-            "🔍 *Отримання ваших активних посилок з Нової Пошти...*", parse_mode="Markdown"
+            "🔍 *Отримання ваших вихідних посилок у дорозі...*", parse_mode="Markdown"
         )
         try:
-            items = await user_np_client.get_outgoing_waybills(days_back=30, limit=10)
+            items = await user_np_client.get_outgoing_waybills(days_back=30, limit=20)
             if not items:
                 await status_msg.edit_text(
-                    "📦 *Активних вихідних посилок за останні 30 днів не знайдено.*",
+                    "📤 *Активних вихідних посилок у дорозі не знайдено.*\n"
+                    "Усі ваші відправлені посилки вже забрано або вони недійсні.",
                     parse_mode="Markdown",
                 )
                 return
@@ -363,7 +417,7 @@ def register_handlers(
                 pass
 
             await message.answer(
-                f"📦 *Ваші активні посилки (останні 30 днів) [{len(items)}]:*",
+                f"📤 *Ваші активні вихідні посилки ({len(items)}):*",
                 parse_mode="Markdown",
             )
 
@@ -371,11 +425,13 @@ def register_handlers(
                 tracking_url = (
                     f"https://novaposhta.ua/tracking/?cargo_number={item.int_doc_number}"
                 )
+                est_date = format_relative_delivery_date(item.estimated_delivery_date)
                 card = (
-                    f"📦 *Посилка №{idx}:* `{item.int_doc_number}`\n"
+                    f"📤 *Вихідна ТТН №{idx}:* `{item.int_doc_number}`\n"
                     f"👤 *Отримувач:* {item.recipient_name}\n"
                     f"🏙 *Пункт призначення:* {item.city_recipient}, {item.address_recipient}\n"
                     f"📝 *Опис:* {item.description}\n"
+                    f"📅 *Очікуване прибуття:* {est_date}\n"
                     f"💰 *Вартість доставки:* ~{item.cost} грн | 📊 *Статус:* {item.state_name}\n\n"
                     f"🔗 [Відстежити на сайті Нової Пошти]({tracking_url})"
                 )
@@ -385,9 +441,66 @@ def register_handlers(
                     disable_web_page_preview=True,
                 )
         except Exception as e:
-            logger.error(f"Error fetching parcels: {e}", exc_info=True)
+            logger.error(f"Error fetching outgoing parcels: {e}", exc_info=True)
             await message.answer(
-                f"❌ *Не вдалося отримати посилки:* {str(e)}", parse_mode="Markdown"
+                f"❌ *Не вдалося отримати вихідні посилки:* {str(e)}", parse_mode="Markdown"
+            )
+
+    @router.message(Command("incoming"))
+    @router.message(F.text == "📥 Вхідні (що їдуть)")
+    async def cmd_incoming_parcels(message: Message):
+        """Show active incoming shipments traveling to user (not yet received)."""
+        clear_user_active_session(message.from_user.id)
+        eff_settings = storage_manager.get_effective_settings(message.from_user.id, settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+
+        status_msg = await message.answer(
+            "🔍 *Отримання ваших вхідних посилок у дорозі...*", parse_mode="Markdown"
+        )
+        try:
+            items = await user_np_client.get_incoming_waybills(days_back=30, limit=20)
+            if not items:
+                await status_msg.edit_text(
+                    "📥 *Активних вхідних посилок у дорозі не знайдено.*\n"
+                    "Немає очікуваних посилок, що прямують до вас.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
+            await message.answer(
+                f"📥 *Посилки, що їдуть до вас ({len(items)}):*",
+                parse_mode="Markdown",
+            )
+
+            for idx, item in enumerate(items, 1):
+                tracking_url = (
+                    f"https://novaposhta.ua/tracking/?cargo_number={item.int_doc_number}"
+                )
+                est_date = format_relative_delivery_date(item.estimated_delivery_date)
+                sender_info = item.sender_name or "Нова Пошта"
+                card = (
+                    f"📥 *Вхідна ТТН №{idx}:* `{item.int_doc_number}`\n"
+                    f"🚚 *Відправник:* {sender_info}\n"
+                    f"📅 *Очікуване прибуття:* **{est_date}**\n"
+                    f"🏙 *Пункт призначення:* {item.city_recipient}, {item.address_recipient}\n"
+                    f"📝 *Опис:* {item.description}\n"
+                    f"💰 *До сплати/доставка:* ~{item.cost} грн | 📊 *Статус:* {item.state_name}\n\n"
+                    f"🔗 [Відстежити на сайті Нової Пошти]({tracking_url})"
+                )
+                await message.answer(
+                    card,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                )
+        except Exception as e:
+            logger.error(f"Error fetching incoming parcels: {e}", exc_info=True)
+            await message.answer(
+                f"❌ *Не вдалося отримати вхідні посилки:* {str(e)}", parse_mode="Markdown"
             )
 
     @router.message(Command("registers"))

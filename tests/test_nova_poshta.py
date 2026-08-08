@@ -84,3 +84,64 @@ async def test_get_documents_status_parsing():
     assert res["204501"]["is_shipped"] is False
     assert res["204502"]["is_shipped"] is True
 
+
+def test_format_relative_delivery_date():
+    import datetime
+    from src.bot.handlers import format_relative_delivery_date
+
+    now = datetime.date.today()
+    today_str = now.strftime("%d.%m.%Y 18:00:00")
+    tomorrow_str = (now + datetime.timedelta(days=1)).strftime("%d.%m.%Y 15:30")
+    after_tomorrow_str = (now + datetime.timedelta(days=2)).strftime("%d.%m.%Y")
+    future_str = (now + datetime.timedelta(days=5)).strftime("%d.%m.%Y 14:00")
+
+    assert format_relative_delivery_date(today_str) == "Сьогодні о 18:00"
+    assert format_relative_delivery_date(tomorrow_str) == "Завтра о 15:30"
+    assert format_relative_delivery_date(after_tomorrow_str) == "Післязавтра"
+    assert "14:00" in format_relative_delivery_date(future_str)
+
+
+@pytest.mark.asyncio
+async def test_get_incoming_waybills_filtering():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="dummy"))
+
+    async def mock_post(model_name, called_method, method_properties):
+        return {
+            "success": True,
+            "data": [
+                {
+                    "IntDocNumber": "20450991",
+                    "StateId": "4",
+                    "StateName": "В дорозі",
+                    "SenderContactPerson": "ТОВ Розетка",
+                    "RecipientContactPerson": "Петренко Петро",
+                    "CityRecipientDescription": "Київ",
+                    "RecipientAddressDescription": "Відділення №10",
+                    "Cost": "90",
+                    "Description": "Телефон",
+                    "EstimatedDeliveryDate": "09.08.2026 15:00",
+                },
+                {
+                    "IntDocNumber": "20450992",
+                    "StateId": "9",
+                    "StateName": "Відправлення отримано",
+                    "SenderContactPerson": "ТОВ Епіцентр",
+                    "RecipientContactPerson": "Петренко Петро",
+                    "CityRecipientDescription": "Київ",
+                    "RecipientAddressDescription": "Відділення №5",
+                    "Cost": "120",
+                    "Description": "Інструменти",
+                },
+            ],
+        }
+
+    client._post = mock_post
+    items = await client.get_incoming_waybills()
+    assert len(items) == 1
+    assert items[0].int_doc_number == "20450991"
+    assert items[0].sender_name == "ТОВ Розетка"
+
+
