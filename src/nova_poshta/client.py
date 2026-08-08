@@ -530,17 +530,28 @@ class NovaPoshtaClient:
             return {}
 
         results = {}
-        shipped_codes = {"4", "41", "5", "6", "7", "8", "9", "10", "11", "106"}
+        shipped_codes = {"4", "41", "5", "6", "7", "8", "9", "10", "11", "12", "14", "104", "105", "106"}
         for item in res.get("data", []):
             doc_num = str(item.get("Number", item.get("DocumentNumber", "")))
             status_code = str(item.get("StatusCode", ""))
             status_name = str(item.get("Status", item.get("StateName", "")))
 
-            # Status codes 1 (Draft/Expecting sender), 2/3 (Registered/Created online), 101-103 (Electronic TTN) are NOT shipped.
-            # Only status codes in shipped_codes (4+ physical handling, in branch, in transit, delivered) indicate parcel is physically shipped.
             is_shipped = False
             if status_code in shipped_codes:
                 is_shipped = True
+            else:
+                try:
+                    code_int = int(status_code)
+                    if code_int >= 4 and code_int not in (101, 102, 103, 108):
+                        is_shipped = True
+                except ValueError:
+                    pass
+
+            lower_name = status_name.lower()
+            if any(w in lower_name for w in ["прямує", "прибув", "отримано", "відправлено", "у відділенні", "доставлено", "видано"]):
+                is_shipped = True
+            elif any(w in lower_name for w in ["очікує посилку", "створено", "чернетка"]):
+                is_shipped = False
 
             results[doc_num] = {
                 "status_code": status_code,

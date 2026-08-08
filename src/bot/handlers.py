@@ -534,45 +534,60 @@ def register_handlers(
         )
 
         try:
-            # 1. Fetch live un-shipped drafts from Nova Poshta API
+            # 1. Fetch drafts from Nova Poshta API & local storage
             np_live_drafts = await user_np_client.get_internet_document_list(days_back=30)
             local_drafts = storage_manager.get_user_drafts(user_id)
 
-            # Purge locally stored drafts that have been physically shipped (status >= 4)
-            if local_drafts:
-                doc_numbers = [d.int_doc_number for d in local_drafts if d.int_doc_number]
-                try:
-                    statuses = await user_np_client.get_documents_status(doc_numbers)
-                    sent_ids = [
-                        doc_num for doc_num, info in statuses.items()
-                        if info.get("is_shipped")
-                    ]
-                    if sent_ids:
-                        storage_manager.purge_sent_drafts(user_id, sent_ids)
-                        local_drafts = storage_manager.get_user_drafts(user_id)
-                except Exception as e:
-                    logger.error(f"Error checking draft statuses for user {user_id}: {e}")
+            # Collect all candidate document numbers
+            all_doc_numbers = list({
+                d.int_doc_number for d in local_drafts if d.int_doc_number
+            } | {
+                item.int_doc_number for item in np_live_drafts if item.int_doc_number
+            })
 
-            # Merge live NP API drafts and local drafts by int_doc_number
+            # Check tracking statuses in batch
+            statuses = {}
+            if all_doc_numbers:
+                try:
+                    statuses = await user_np_client.get_documents_status(all_doc_numbers)
+                except Exception as e:
+                    logger.error(f"Error checking tracking statuses: {e}")
+
+            # Purge local drafts that are physically shipped
+            sent_local_ids = [
+                d_num for d_num in all_doc_numbers
+                if statuses.get(d_num, {}).get("is_shipped")
+            ]
+            if sent_local_ids:
+                storage_manager.purge_sent_drafts(user_id, sent_local_ids)
+                local_drafts = storage_manager.get_user_drafts(user_id)
+
+            # Build combined strictly un-shipped drafts list
             combined_drafts_map = {}
             for d in local_drafts:
-                combined_drafts_map[d.int_doc_number] = {
-                    "ref": d.ref,
-                    "int_doc_number": d.int_doc_number,
-                    "recipient_name": d.recipient_name,
-                    "recipient_phone": d.recipient_phone,
-                    "city_description": d.city_description,
-                    "warehouse_description": d.warehouse_description,
-                    "cargo_description": d.cargo_description,
-                    "payer_type": d.payer_type,
-                    "declared_value": d.declared_value,
-                    "cost": d.cost,
-                    "created_at": d.created_at,
-                }
+                if not statuses.get(d.int_doc_number, {}).get("is_shipped"):
+                    combined_drafts_map[d.int_doc_number] = {
+                        "ref": d.ref,
+                        "int_doc_number": d.int_doc_number,
+                        "recipient_name": d.recipient_name,
+                        "recipient_phone": d.recipient_phone,
+                        "city_description": d.city_description,
+                        "warehouse_description": d.warehouse_description,
+                        "cargo_description": d.cargo_description,
+                        "payer_type": d.payer_type,
+                        "declared_value": d.declared_value,
+                        "cost": d.cost,
+                        "created_at": d.created_at,
+                    }
 
             for live_item in np_live_drafts:
-                if live_item.int_doc_number not in combined_drafts_map:
-                    combined_drafts_map[live_item.int_doc_number] = {
+                doc_num = live_item.int_doc_number
+                # If already shipped/in transit/delivered, SKIP IT!
+                if statuses.get(doc_num, {}).get("is_shipped"):
+                    continue
+
+                if doc_num not in combined_drafts_map:
+                    combined_drafts_map[doc_num] = {
                         "ref": live_item.int_doc_number,
                         "int_doc_number": live_item.int_doc_number,
                         "recipient_name": live_item.recipient_name,
