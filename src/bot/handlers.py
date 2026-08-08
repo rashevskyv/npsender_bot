@@ -357,28 +357,36 @@ def register_handlers(
                 )
                 return
 
-            response_lines = ["📦 *Ваші активні посилки (останні 30 днів):*\n"]
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
+            await message.answer(
+                f"📦 *Ваші активні посилки (останні 30 днів) [{len(items)}]:*",
+                parse_mode="Markdown",
+            )
+
             for idx, item in enumerate(items, 1):
                 tracking_url = (
                     f"https://novaposhta.ua/tracking/?cargo_number={item.int_doc_number}"
                 )
-                response_lines.append(
-                    f"*{idx}. ТТН:* [{item.int_doc_number}]({tracking_url})\n"
+                card = (
+                    f"📦 *Посилка №{idx}:* `{item.int_doc_number}`\n"
                     f"👤 *Отримувач:* {item.recipient_name}\n"
                     f"🏙 *Пункт призначення:* {item.city_recipient}, {item.address_recipient}\n"
                     f"📝 *Опис:* {item.description}\n"
-                    f"💰 *Вартість доставки:* ~{item.cost} грн | 📊 *Статус:* {item.state_name}\n"
-                    "----------------------------------------"
+                    f"💰 *Вартість доставки:* ~{item.cost} грн | 📊 *Статус:* {item.state_name}\n\n"
+                    f"🔗 [Відстежити на сайті Нової Пошти]({tracking_url})"
                 )
-
-            await status_msg.edit_text(
-                "\n".join(response_lines),
-                parse_mode="Markdown",
-                disable_web_page_preview=True,
-            )
+                await message.answer(
+                    card,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                )
         except Exception as e:
             logger.error(f"Error fetching parcels: {e}", exc_info=True)
-            await status_msg.edit_text(
+            await message.answer(
                 f"❌ *Не вдалося отримати посилки:* {str(e)}", parse_mode="Markdown"
             )
 
