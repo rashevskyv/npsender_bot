@@ -595,8 +595,10 @@ def register_handlers(
                         "city_description": live_item.city_recipient or "Не вказано",
                         "warehouse_description": live_item.address_recipient or "Накладна на сайті",
                         "cargo_description": live_item.description or "Посилка",
-                        "payer_type": "Отримувач",
-                        "declared_value": 500.0,
+                        "payer_type": live_item.payer_type or "Recipient",
+                        "declared_value": live_item.declared_value,
+                        "cod_amount": live_item.cod_amount,
+                        "cod_payment_type": live_item.cod_payment_type,
                         "cost": live_item.cost,
                         "created_at": live_item.date_created or "Нещодавно",
                     }
@@ -624,6 +626,17 @@ def register_handlers(
             for item in all_drafts[:15]:
                 doc_num = item["int_doc_number"]
                 tracking_url = f"https://novaposhta.ua/tracking/?cargo_number={doc_num}"
+                payer_ua = "Отримувач" if item.get("payer_type") == "Recipient" else "Відправник"
+                declared_val = item.get("declared_value", 500.0)
+                cod_val = item.get("cod_amount", 0.0) or 0.0
+                cod_type = item.get("cod_payment_type", "cash")
+
+                if cod_val > 0:
+                    payout_ua = "Картка" if cod_type == "card" else "Готівка"
+                    cod_line = f"💵 *Накладений платіж:* {int(cod_val)} грн ({payout_ua})\n"
+                else:
+                    cod_line = ""
+
                 card = (
                     f"🎫 *ТТН:* `{doc_num}`\n"
                     f"👤 *Отримувач:* {item['recipient_name']}\n"
@@ -631,7 +644,8 @@ def register_handlers(
                     f"🏙 *Місто:* {item['city_description']}\n"
                     f"📦 *Пункт призначення:* {item['warehouse_description']}\n"
                     f"📝 *Опис:* {item['cargo_description']}\n"
-                    f"💳 *Платник:* {item['payer_type']} | 💰 *Оцінка:* {int(item['declared_value'])} грн\n"
+                    f"💳 *Платник:* {payer_ua} | 💰 *Оцінка:* {int(declared_val)} грн\n"
+                    f"{cod_line}"
                     f"📅 *Створено:* {item['created_at']}\n\n"
                     f"🔗 [Відстежити ТТН на сайті Нової Пошти]({tracking_url})"
                 )

@@ -53,6 +53,10 @@ class WaybillItemInfo(BaseModel):
     city_recipient: str
     address_recipient: str
     cost: float
+    declared_value: float = 500.0
+    cod_amount: float = 0.0
+    cod_payment_type: str = "cash"
+    payer_type: str = "Recipient"
     description: str
     estimated_delivery_date: Optional[str] = None
     date_created: Optional[str] = None

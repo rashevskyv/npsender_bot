@@ -592,7 +592,44 @@ class NovaPoshtaClient:
             if not doc_num:
                 continue
 
-            cost_val = float(doc.get("CostOnSite", doc.get("Cost", 0)))
+            delivery_cost = float(doc.get("CostOnSite", 0) or 0)
+            declared_val = float(doc.get("Cost", doc.get("DeclaredCost", 0)) or 0)
+            payer_type = str(doc.get("PayerType", "Recipient"))
+
+            # Extract COD (Накладений платіж) details from BackwardDeliveryData or direct fields
+            cod_val = 0.0
+            cod_type = "cash"
+
+            bw_data = doc.get("BackwardDeliveryData") or []
+            if isinstance(bw_data, list):
+                for bw in bw_data:
+                    if isinstance(bw, dict):
+                        c_type = bw.get("CargoType", "")
+                        if c_type in ("Money", "Цінні папери", "Грошовий переказ", "TrMax", "Afterpayment"):
+                            try:
+                                cod_val = float(bw.get("RedeliveryString", 0) or 0)
+                            except (ValueError, TypeError):
+                                pass
+                            if bw.get("RedeliveryPaymentCard") or bw.get("PaymentMethod") == "Card":
+                                cod_type = "card"
+
+            if not cod_val:
+                for k in ["AfterpaymentOnGoodsCost", "RedeliveryString", "BackwardDeliveryMoney", "BackwardDeliveryCost", "RedeliverySum"]:
+                    val = doc.get(k)
+                    if val:
+                        try:
+                            cod_val = float(val)
+                            if cod_val > 0:
+                                break
+                        except (ValueError, TypeError):
+                            pass
+
+            if doc.get("RedeliveryPaymentCard") or doc.get("PaymentCard") or doc.get("BackwardDeliveryPaymentType") == "Card":
+                cod_type = "card"
+
+            # Auto-enforce rule: declared_value must be at least cod_amount and at least 500
+            declared_val = max(declared_val, cod_val, 500.0)
+
             rec_name = (
                 doc.get("RecipientContactPerson")
                 or doc.get("RecipientDescription")
@@ -609,7 +646,11 @@ class NovaPoshtaClient:
                     sender_phone=str(doc.get("SendersPhone", "")),
                     city_recipient=str(doc.get("CityRecipientDescription", "")),
                     address_recipient=str(doc.get("RecipientAddressDescription", "")),
-                    cost=cost_val,
+                    cost=delivery_cost,
+                    declared_value=declared_val,
+                    cod_amount=cod_val,
+                    cod_payment_type=cod_type,
+                    payer_type=payer_type,
                     description=str(doc.get("Description", "Посилка")),
                     estimated_delivery_date=doc.get("EstimatedDeliveryDate"),
                     date_created=doc.get("DateTime"),
