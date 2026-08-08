@@ -15,40 +15,46 @@ def test_user_settings_manager(tmp_path):
     assert manager.is_user_configured(12345) is False
     u1 = manager.get_user_settings(12345)
     assert u1.nova_poshta_api_key is None
+    assert u1.ai_api_key is None
 
     global_s = Settings(
         TELEGRAM_BOT_TOKEN="dummy",
         NOVA_POSHTA_API_KEY="global_admin_np_key",
+        AI_API_KEY="global_admin_ai_key",
     )
 
-    # Unconfigured user must NOT leak global admin's NP API key
+    # Unconfigured user must NOT leak global admin's NP API key or AI API key
     eff_uncfg = manager.get_effective_settings(12345, global_s)
     assert eff_uncfg.nova_poshta_api_key == ""
     assert eff_uncfg.sender_phone == ""
+    assert eff_uncfg.ai_api_key == ""
+    assert eff_uncfg.ai_base_url == ""
 
-    # Update user custom settings
-    custom = UserCustomSettings(
+    # Update user custom settings with NP key only -> still unconfigured until AI key added
+    custom_np = UserCustomSettings(
         nova_poshta_api_key="custom_np_key_123",
         sender_phone="380991112233",
         sender_name="Custom Sender",
     )
-    manager.update_user_settings(12345, custom)
+    manager.update_user_settings(12345, custom_np)
+    assert manager.is_user_configured(12345) is False
 
-    # Re-read and check configured status
+    # Add AI API key -> now fully configured
+    manager.update_user_settings(12345, ai_api_key="custom_ai_key_999", ai_model="gpt-4o-mini")
     assert manager.is_user_configured(12345) is True
-    u1_updated = manager.get_user_settings(12345)
-    assert u1_updated.nova_poshta_api_key == "custom_np_key_123"
-    assert u1_updated.sender_phone == "380991112233"
 
     eff = manager.get_effective_settings(12345, global_s)
     assert eff.nova_poshta_api_key == "custom_np_key_123"
     assert eff.sender_phone == "380991112233"
+    assert eff.ai_api_key == "custom_ai_key_999"
+    assert eff.ai_model == "gpt-4o-mini"
 
     # Reset settings
     manager.reset_user_settings(12345)
     assert manager.is_user_configured(12345) is False
     eff_reset = manager.get_effective_settings(12345, global_s)
     assert eff_reset.nova_poshta_api_key == ""
+    assert eff_reset.ai_api_key == ""
 
 
 def test_drafts_management(tmp_path):

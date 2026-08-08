@@ -21,6 +21,7 @@ class UserCustomSettings(BaseModel):
     nova_poshta_api_key: Optional[str] = None
     ai_api_key: Optional[str] = None
     ai_base_url: Optional[str] = None
+    ai_model: Optional[str] = None
     sender_counterparty_ref: Optional[str] = None
     sender_contact_ref: Optional[str] = None
     sender_city_ref: Optional[str] = None
@@ -182,18 +183,20 @@ class UserSettingsManager:
             self.save_settings()
 
     def is_user_configured(self, user_id: int) -> bool:
-        """Return True if user has provided their own personal Nova Poshta API key."""
+        """Return True if user has provided both their personal Nova Poshta API key and AI API key."""
         u_id = str(user_id)
         if u_id not in self.data:
             return False
         user_cfg = self.data[u_id]
-        return bool(user_cfg.nova_poshta_api_key and user_cfg.nova_poshta_api_key.strip())
+        has_np = bool(user_cfg.nova_poshta_api_key and user_cfg.nova_poshta_api_key.strip())
+        has_ai = bool(user_cfg.ai_api_key and user_cfg.ai_api_key.strip())
+        return has_np and has_ai
 
     def get_effective_settings(
         self, user_id: int, global_settings: Settings
     ) -> Settings:
         """Return a merged Settings object taking user overrides into account.
-        If user is not configured with an API key, blank out Nova Poshta credentials to prevent fallback leakage.
+        If user is not configured with credentials, blank out NP and AI credentials to prevent fallback leakage.
         """
         user_custom = self.get_user_settings(user_id)
         effective_dict = global_settings.model_dump()
@@ -214,10 +217,15 @@ class UserSettingsManager:
             effective_dict["sender_address_ref"] = ""
             effective_dict["sender_phone"] = ""
 
-        if user_custom.ai_api_key:
+        if user_custom.ai_api_key and user_custom.ai_api_key.strip():
             effective_dict["ai_api_key"] = user_custom.ai_api_key
-        if user_custom.ai_base_url:
-            effective_dict["ai_base_url"] = user_custom.ai_base_url
+            effective_dict["ai_base_url"] = user_custom.ai_base_url or "https://api.openai.com/v1"
+            if user_custom.ai_model:
+                effective_dict["ai_model"] = user_custom.ai_model
+        else:
+            # Blank out AI API key and base URL to prevent inheriting global admin credentials
+            effective_dict["ai_api_key"] = ""
+            effective_dict["ai_base_url"] = ""
 
         return Settings(**effective_dict)
 

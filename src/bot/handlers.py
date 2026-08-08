@@ -216,17 +216,29 @@ def register_handlers(
         )
 
     async def ensure_user_configured(message: Message) -> bool:
-        """Check if user has configured their personal Nova Poshta API key. If not, send onboarding card."""
-        if not storage_manager.is_user_configured(message.from_user.id):
+        """Check if user has configured personal NP API key and AI API key."""
+        u_settings = storage_manager.get_user_settings(message.from_user.id)
+        has_np = bool(u_settings.nova_poshta_api_key and u_settings.nova_poshta_api_key.strip())
+        has_ai = bool(u_settings.ai_api_key and u_settings.ai_api_key.strip())
+
+        if not has_np or not has_ai:
+            missing_items = []
+            if not has_np:
+                missing_items.append("❌ *API-ключ Нової Пошти:* не налаштовано (`/set_np_key ВАШ_КЛЮЧ`)")
+            if not has_ai:
+                missing_items.append("❌ *Персональний AI API-ключ:* не налаштовано (`/set_ai_key ВАШ_AI_КЛЮЧ`)")
+
+            missing_str = "\n".join(missing_items)
             card = (
-                "⚠️ *Налаштування вашого профілю Нової Пошти:*\n\n"
-                "Для перегляду ваших посилок та створення накладних необхідно один раз прив'язати ваш особистий API-ключ Нової Пошти.\n\n"
-                "🔑 *Крок 1:* Надішліть свій API-ключ командою:\n"
-                "`/set_np_key ВАШ_API_КЛЮЧ`\n\n"
-                "🏙 *Крок 2:* Вкажіть ваше місто відправки:\n"
-                "`/set_city Київ`\n\n"
-                "📦 *Крок 3:* Вкажіть номер вашого відділення/поштомату відправки:\n"
-                "`/set_warehouse 5`\n\n"
+                "⚠️ *Налаштування вашого персонального профілю:*\n\n"
+                f"{missing_str}\n\n"
+                "💡 *Команди для налаштування:*\n"
+                "• `/set_np_key ВАШ_КЛЮЧ` — прив'язати API-ключ Нової Пошти\n"
+                "• `/set_ai_key ВАШ_КЛЮЧ` — прив'язати персональний AI API-ключ\n"
+                "• `/set_ai_url URL` — вказати власну адресу AI (напр. OpenAI, Gemini Web2API)\n"
+                "• `/set_ai_model MODEL` — обрати модель (напр. `gpt-4o-mini`, `gemini-2.5-flash`)\n"
+                "• `/set_city НазваМіста` — обрати місто відправки\n"
+                "• `/set_warehouse Номер` — обрати відділення відправки\n\n"
                 "⚙️ Перевірити статус вашого профілю можна командою `/settings` або `/profile`."
             )
             await message.answer(card, parse_mode="Markdown")
@@ -242,26 +254,41 @@ def register_handlers(
         u_settings = storage_manager.get_user_settings(message.from_user.id)
         is_cfg = storage_manager.is_user_configured(message.from_user.id)
 
-        status_icon = "✅ Підключено" if is_cfg else "⚠️ Не налаштовано"
-        masked_key = (
+        status_icon = "✅ Підключено" if is_cfg else "⚠️ Потрібне налаштування"
+        masked_np_key = (
             f"`{u_settings.nova_poshta_api_key[:6]}...{u_settings.nova_poshta_api_key[-4:]}`"
-            if is_cfg and u_settings.nova_poshta_api_key
+            if u_settings.nova_poshta_api_key
             else "_Не вказано_"
         )
+        masked_ai_key = (
+            f"`{u_settings.ai_api_key[:6]}...{u_settings.ai_api_key[-4:]}`"
+            if u_settings.ai_api_key
+            else "_Не вказано_"
+        )
+        ai_url_display = u_settings.ai_base_url or "https://api.openai.com/v1"
+        ai_model_display = u_settings.ai_model or settings.ai_model
 
         card = (
             f"⚙️ *Персональний профіль користувача:* [{message.from_user.full_name}]\n\n"
-            f"📊 *Статус профілю:* {status_icon}\n"
-            f"🔑 *API-ключ НП:* {masked_key}\n"
-            f"👤 *ПІБ відправника:* `{u_settings.sender_name or 'Не підтягнуто'}`\n"
-            f"📞 *Телефон:* `{u_settings.sender_phone or 'Не підтягнуто'}`\n"
-            f"🏙 *Місто відправника:* `{u_settings.sender_city_name or 'Не вказано'}`\n"
-            f"📦 *Відділення відправника:* `{u_settings.sender_warehouse_name or 'Не вказано'}`\n\n"
-            "💡 *Команди для керування налаштуваннями:*\n"
-            "• `/set_np_key ВАШ_КЛЮЧ` — прив'язати API-ключ\n"
+            f"📊 *Загальний статус:* {status_icon}\n\n"
+            "📮 *Дані Нової Пошти:*\n"
+            f"• 🔑 *API-ключ НП:* {masked_np_key}\n"
+            f"• 👤 *ПІБ відправника:* `{u_settings.sender_name or 'Не підтягнуто'}`\n"
+            f"• 📞 *Телефон:* `{u_settings.sender_phone or 'Не підтягнуто'}`\n"
+            f"• 🏙 *Місто відправки:* `{u_settings.sender_city_name or 'Не вказано'}`\n"
+            f"• 📦 *Відділення відправки:* `{u_settings.sender_warehouse_name or 'Не вказано'}`\n\n"
+            "🧠 *Дані AI-провайдера:*\n"
+            f"• 🔑 *AI API-ключ:* {masked_ai_key}\n"
+            f"• 🌐 *URL API:* `{ai_url_display}`\n"
+            f"• 🤖 *Модель AI:* `{ai_model_display}`\n\n"
+            "💡 *Команди для керування:*\n"
+            "• `/set_np_key ВАШ_КЛЮЧ` — прив'язати API-ключ НП\n"
+            "• `/set_ai_key ВАШ_КЛЮЧ` — прив'язати AI API-ключ\n"
+            "• `/set_ai_url URL` — змінити URL AI-провайдера\n"
+            "• `/set_ai_model MODEL` — змінити модель AI\n"
             "• `/set_name ПІБ` — змінити ПІБ відправника\n"
-            "• `/set_city НазваМіста` — обрати місто відправки\n"
-            "• `/set_warehouse Номер` — обрати відділення відправки"
+            "• `/set_city НазваМіста` — змінити місто відправки\n"
+            "• `/set_warehouse Номер` — змінити відділення відправки"
         )
         await message.answer(card, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
@@ -412,12 +439,51 @@ def register_handlers(
             return
 
         api_key = parts[1].strip()
-        u_settings = storage_manager.get_user_settings(message.from_user.id)
-        u_settings.ai_api_key = api_key
-        storage_manager.update_user_settings(message.from_user.id, u_settings)
+        storage_manager.update_user_settings(message.from_user.id, ai_api_key=api_key)
 
         await message.answer(
-            f"✅ *Персональний AI API ключ успішно збережено!* (`{api_key[:6]}...{api_key[-4:]}`)",
+            f"✅ *Персональний AI API-ключ збережено!* (`{api_key[:6]}...{api_key[-4:]}`)\n\n"
+            "За бажанням вкажіть власний URL: `/set_ai_url URL` або модель: `/set_ai_model НАЗВА`",
+            parse_mode="Markdown",
+        )
+
+    @router.message(Command("set_ai_url"))
+    async def cmd_set_ai_url(message: Message):
+        """Set user's custom AI base URL."""
+        clear_user_active_session(message.from_user.id)
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "⚠️ *Використання:* `/set_ai_url http://localhost:8081/v1` (або `https://api.openai.com/v1`)",
+                parse_mode="Markdown",
+            )
+            return
+
+        url = parts[1].strip()
+        storage_manager.update_user_settings(message.from_user.id, ai_base_url=url)
+
+        await message.answer(
+            f"✅ *URL AI-провайдера успішно збережено:* `{url}`",
+            parse_mode="Markdown",
+        )
+
+    @router.message(Command("set_ai_model"))
+    async def cmd_set_ai_model(message: Message):
+        """Set user's custom AI model name."""
+        clear_user_active_session(message.from_user.id)
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "⚠️ *Використання:* `/set_ai_model gpt-4o-mini` (або `gemini-2.5-flash`)",
+                parse_mode="Markdown",
+            )
+            return
+
+        model_name = parts[1].strip()
+        storage_manager.update_user_settings(message.from_user.id, ai_model=model_name)
+
+        await message.answer(
+            f"✅ *Модель AI успішно збережено:* `{model_name}`",
             parse_mode="Markdown",
         )
 
