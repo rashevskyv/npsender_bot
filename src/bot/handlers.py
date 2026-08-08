@@ -517,105 +517,119 @@ def register_handlers(
             reply_markup=get_main_reply_keyboard(),
         )
 
-    @router.message(Command("settings"))
-    @router.message(F.text == "⚙️ Налаштування")
-    async def cmd_settings(message: Message):
-        """Show current effective settings for the user."""
-        clear_user_active_session(message.from_user.id)
-        eff = storage_manager.get_effective_settings(message.from_user.id, settings)
-        u_custom = storage_manager.get_user_settings(message.from_user.id)
-
-        has_custom_np = bool(u_custom.nova_poshta_api_key)
-        has_custom_ai = bool(u_custom.ai_api_key)
-
-        status_text = (
-            "⚙️ **Ваші активні налаштування:**\n\n"
-            f"• **Ключ Нової Пошти:** `{'Особистий (' + eff.nova_poshta_api_key[:6] + '...)' if has_custom_np else 'Системний'}`\n"
-            f"• **Профіль відправника:** `{u_custom.sender_name or 'Основний акаунт'}`\n"
-            f"• **Телефон відправника:** `{eff.sender_phone or 'Не вказано'}`\n"
-            f"• **AI Провайдер:** `{eff.ai_provider}`\n"
-            f"• **AI Ключ:** `{'Особистий' if has_custom_ai else 'Системний'}`\n"
-            f"• **AI Модель:** `{eff.ai_model}`\n"
-            f"• **Мін. оціночна вартість:** `{eff.default_declared_value} грн`\n\n"
-            "Щоб змінити ключі, використайте команди:\n"
-            "`/set_np_key ВАШ_КЛЮЧ` або `/set_ai_key ВАШ_КЛЮЧ`\n"
-            "Або `/reset_settings` для скидання."
-        )
-        await message.answer(
-            status_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard()
-        )
-
     @router.message(Command("drafts"))
     @router.message(F.text == "📝 Мої чернетки (ТТН)")
     async def cmd_drafts(message: Message):
-        """Show list of active created express waybill drafts."""
+        """Show list of active created express waybill drafts (fetching both local and live NP server drafts)."""
         clear_user_active_session(message.from_user.id)
         if not await ensure_user_configured(message):
             return
 
         user_id = message.from_user.id
-        drafts = storage_manager.get_user_drafts(user_id)
-
-        if not drafts:
-            await message.answer(
-                "📝 *Збережених чернеток ТТН не знайдено.*\n"
-                "Створіть нову накладну, надіславши реквізити отримувача боту!",
-                parse_mode="Markdown",
-                reply_markup=get_main_reply_keyboard(),
-            )
-            return
-
         eff_settings = storage_manager.get_effective_settings(user_id, settings)
-        if eff_settings.nova_poshta_api_key:
-            user_np_client = NovaPoshtaClient(eff_settings)
-            doc_numbers = [d.int_doc_number for d in drafts if d.int_doc_number]
-            try:
-                statuses = await user_np_client.get_documents_status(doc_numbers)
-                sent_ids = [
-                    doc_num for doc_num, info in statuses.items()
-                    if info.get("is_shipped")
-                ]
-                if sent_ids:
-                    storage_manager.purge_sent_drafts(user_id, sent_ids)
-                    drafts = storage_manager.get_user_drafts(user_id)
-            except Exception as e:
-                logger.error(f"Error checking draft statuses for user {user_id}: {e}")
+        user_np_client = NovaPoshtaClient(eff_settings)
 
-        if not drafts:
-            await message.answer(
-                "📝 *Активних чернеток ТТН (невідправлених) не знайдено.*\n"
-                "Усі ваші створені накладні вже відправлені або знаходяться в дорозі. "
-                "Ви можете переглянути їх у розділі 📦 *Активні посилки*!",
-                parse_mode="Markdown",
-                reply_markup=get_main_reply_keyboard(),
-            )
-            return
-
-        await message.answer(
-            f"📄 *Ваші збережені чернетки ТТН ({len(drafts)}):*", parse_mode="Markdown"
+        status_msg = await message.answer(
+            "🔍 *Отримання ваших невідправлених чернеток з баз Нової Пошти...*", parse_mode="Markdown"
         )
 
-        for draft in drafts[:10]:
-            tracking_url = (
-                f"https://novaposhta.ua/tracking/?cargo_number={draft.int_doc_number}"
-            )
-            card = (
-                f"🎫 *ТТН:* `{draft.int_doc_number}`\n"
-                f"👤 *Отримувач:* {draft.recipient_name}\n"
-                f"📞 *Телефон:* `{draft.recipient_phone}`\n"
-                f"🏙 *Місто:* {draft.city_description}\n"
-                f"📦 *Пункт призначення:* {draft.warehouse_description}\n"
-                f"📝 *Опис:* {draft.cargo_description}\n"
-                f"💳 *Платник:* {draft.payer_type} | 💰 *Оцінка:* {int(draft.declared_value)} грн\n"
-                f"📅 *Створено:* {draft.created_at}\n\n"
-                f"🔗 [Відстежити ТТН на сайті Нової Пошти]({tracking_url})"
-            )
+        try:
+            # 1. Fetch live un-shipped drafts from Nova Poshta API
+            np_live_drafts = await user_np_client.get_internet_document_list(days_back=30)
+            local_drafts = storage_manager.get_user_drafts(user_id)
+
+            # Purge locally stored drafts that have been physically shipped (status >= 4)
+            if local_drafts:
+                doc_numbers = [d.int_doc_number for d in local_drafts if d.int_doc_number]
+                try:
+                    statuses = await user_np_client.get_documents_status(doc_numbers)
+                    sent_ids = [
+                        doc_num for doc_num, info in statuses.items()
+                        if info.get("is_shipped")
+                    ]
+                    if sent_ids:
+                        storage_manager.purge_sent_drafts(user_id, sent_ids)
+                        local_drafts = storage_manager.get_user_drafts(user_id)
+                except Exception as e:
+                    logger.error(f"Error checking draft statuses for user {user_id}: {e}")
+
+            # Merge live NP API drafts and local drafts by int_doc_number
+            combined_drafts_map = {}
+            for d in local_drafts:
+                combined_drafts_map[d.int_doc_number] = {
+                    "ref": d.ref,
+                    "int_doc_number": d.int_doc_number,
+                    "recipient_name": d.recipient_name,
+                    "recipient_phone": d.recipient_phone,
+                    "city_description": d.city_description,
+                    "warehouse_description": d.warehouse_description,
+                    "cargo_description": d.cargo_description,
+                    "payer_type": d.payer_type,
+                    "declared_value": d.declared_value,
+                    "cost": d.cost,
+                    "created_at": d.created_at,
+                }
+
+            for live_item in np_live_drafts:
+                if live_item.int_doc_number not in combined_drafts_map:
+                    combined_drafts_map[live_item.int_doc_number] = {
+                        "ref": live_item.int_doc_number,
+                        "int_doc_number": live_item.int_doc_number,
+                        "recipient_name": live_item.recipient_name,
+                        "recipient_phone": live_item.recipient_phone or "Не вказано",
+                        "city_description": live_item.city_recipient or "Не вказано",
+                        "warehouse_description": live_item.address_recipient or "Накладна на сайті",
+                        "cargo_description": live_item.description or "Посилка",
+                        "payer_type": "Отримувач",
+                        "declared_value": 500.0,
+                        "cost": live_item.cost,
+                        "created_at": live_item.date_created or "Нещодавно",
+                    }
+
+            all_drafts = list(combined_drafts_map.values())
+
+            if not all_drafts:
+                await status_msg.edit_text(
+                    "📝 *Активних чернеток ТТН (невідправлених) не знайдено.*\n"
+                    "Усі ваші створені накладні вже відправлені або знаходяться в дорозі. "
+                    "Ви можете переглянути їх у розділі 📦 *Активні посилки*!",
+                    parse_mode="Markdown",
+                )
+                return
+
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
             await message.answer(
-                card,
-                parse_mode="Markdown",
-                disable_web_page_preview=True,
-                reply_markup=get_draft_keyboard(ref=draft.ref),
+                f"📄 *Ваші чернетки ТТН у системі Нової Пошти ({len(all_drafts)}):*", parse_mode="Markdown"
             )
+
+            for item in all_drafts[:15]:
+                doc_num = item["int_doc_number"]
+                tracking_url = f"https://novaposhta.ua/tracking/?cargo_number={doc_num}"
+                card = (
+                    f"🎫 *ТТН:* `{doc_num}`\n"
+                    f"👤 *Отримувач:* {item['recipient_name']}\n"
+                    f"📞 *Телефон:* `{item['recipient_phone']}`\n"
+                    f"🏙 *Місто:* {item['city_description']}\n"
+                    f"📦 *Пункт призначення:* {item['warehouse_description']}\n"
+                    f"📝 *Опис:* {item['cargo_description']}\n"
+                    f"💳 *Платник:* {item['payer_type']} | 💰 *Оцінка:* {int(item['declared_value'])} грн\n"
+                    f"📅 *Створено:* {item['created_at']}\n\n"
+                    f"🔗 [Відстежити ТТН на сайті Нової Пошти]({tracking_url})"
+                )
+                await message.answer(
+                    card,
+                    parse_mode="Markdown",
+                    reply_markup=get_draft_keyboard(ref=item["ref"]),
+                    disable_web_page_preview=True,
+                )
+        except Exception as e:
+            logger.error(f"Error in cmd_drafts: {e}", exc_info=True)
+            clean_err = str(e).replace("*", "").replace("_", "").replace("`", "").replace("'", "")
+            await status_msg.edit_text(f"❌ *Помилка отримання чернеток:* {clean_err}", parse_mode="Markdown")
 
     @router.message(Command("outgoing"))
     @router.message(Command("parcels"))
@@ -1234,6 +1248,18 @@ def register_handlers(
             return
 
         user_id = message.from_user.id
+
+        # Check if user sent a standalone 16-digit bank card number
+        clean_card_digits = "".join(filter(str.isdigit, text))
+        if len(clean_card_digits) == 16 and not clean_card_digits.startswith("380"):
+            masked_card = f"{clean_card_digits[:6]}******{clean_card_digits[-4:]}"
+            storage_manager.update_user_settings(user_id, sender_card_mask=masked_card)
+            await message.answer(
+                f"💳 *Банківську картку для виплати наложки успішно збережено:* `{masked_card}`",
+                parse_mode="Markdown",
+            )
+            return
+
         if user_id not in USER_MESSAGE_BUFFERS:
             USER_MESSAGE_BUFFERS[user_id] = []
 
@@ -1365,6 +1391,8 @@ def register_handlers(
             if next_cod > session["declared_value"]:
                 session["declared_value"] = next_cod
 
+            u_custom = storage_manager.get_user_settings(user_id)
+            card_mask = u_custom.sender_card_mask
             parsed_info = session["parsed_info"]
             city = session["city"]
             warehouse = session["warehouse"]
@@ -1394,11 +1422,62 @@ def register_handlers(
                     declared_value=declared_val,
                     cod_amount=next_cod,
                     cod_payment_type=cod_type,
+                    sender_card_mask=card_mask,
                     session_id=session_id,
                 ),
             )
             msg_str = "Скасовано" if next_cod <= 0 else f"{int(next_cod)} грн"
             await callback.answer(f"Накладений платіж: {msg_str}")
+            return
+
+        if action == "toggle_cod_type":
+            new_type = "card" if callback_data.cod_payment_type == "cash" else "cash"
+            session["cod_payment_type"] = new_type
+
+            u_custom = storage_manager.get_user_settings(user_id)
+            card_mask = u_custom.sender_card_mask
+
+            if new_type == "card" and not card_mask:
+                await callback.answer(
+                    "⚠️ Для виплати на картку збережіть її номер командою: /set_card НомерКартки",
+                    show_alert=True,
+                )
+
+            parsed_info = session["parsed_info"]
+            city = session["city"]
+            warehouse = session["warehouse"]
+            cargo_desc = session["cargo_description"]
+            declared_val = session["declared_value"]
+            cod_val = session.get("cod_amount", 0.0)
+            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if new_type == 'card' else 'Готівка'})"
+
+            card_text = (
+                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+                f"👤 *Отримувач:* {parsed_info.full_name}\n"
+                f"📞 *Телефон:* `{parsed_info.phone}`\n"
+                f"🏙 *Місто:* {city.description}\n"
+                f"📦 *Пункт призначення:* {warehouse.description}\n"
+                f"📝 *Опис вантажу:* {cargo_desc}\n"
+                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
+                f"💵 *Накладений платіж:* {cod_str}\n\n"
+                "Перевірте дані та оберіть дію нижче:"
+            )
+
+            await callback.message.edit_text(
+                card_text,
+                parse_mode="Markdown",
+                reply_markup=get_confirmation_keyboard(
+                    payer_type=session["payer_type"],
+                    cargo_type=session["cargo_type"],
+                    declared_value=declared_val,
+                    cod_amount=cod_val,
+                    cod_payment_type=new_type,
+                    sender_card_mask=card_mask,
+                    session_id=session_id,
+                ),
+            )
+            type_ua = "На картку" if new_type == "card" else "Готівкою у відділенні"
+            await callback.answer(f"Виплату змінено на: {type_ua}")
             return
 
         if action == "confirm":

@@ -49,6 +49,7 @@ def get_confirmation_keyboard(
     declared_value: float = 500.0,
     cod_amount: float = 0.0,
     cod_payment_type: str = "cash",
+    sender_card_mask: Optional[str] = None,
     session_id: str = "default",
 ) -> InlineKeyboardMarkup:
     """Build interactive confirmation keyboard with toggle buttons in Ukrainian."""
@@ -58,16 +59,77 @@ def get_confirmation_keyboard(
     if not cod_amount or cod_amount <= 0:
         cod_label = "💸 Наложка: ❌ Немає"
     else:
-        payout_str = "💳 Картка" if cod_payment_type == "card" else "💵 Готівка"
-        cod_label = f"💰 Наложка: {int(cod_amount)} грн ({payout_str})"
+        cod_label = f"💰 Наложка: {int(cod_amount)} грн 🔄"
 
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
+    keyboard_rows = [
+        [
+            InlineKeyboardButton(
+                text=f"🔄 {payer_label}",
+                callback_data=WaybillActionCallback(
+                    action="toggle_payer",
+                    payer_type=payer_type,
+                    cargo_type=cargo_type,
+                    declared_value=declared_value,
+                    cod_amount=cod_amount,
+                    cod_payment_type=cod_payment_type,
+                    session_id=session_id,
+                ).pack(),
+            ),
+            InlineKeyboardButton(
+                text=f"🔄 {cargo_label}",
+                callback_data=WaybillActionCallback(
+                    action="toggle_cargo",
+                    payer_type=payer_type,
+                    cargo_type=cargo_type,
+                    declared_value=declared_value,
+                    cod_amount=cod_amount,
+                    cod_payment_type=cod_payment_type,
+                    session_id=session_id,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"💰 Оцінка: {int(declared_value)} грн 🔄",
+                callback_data=WaybillActionCallback(
+                    action="cycle_value",
+                    payer_type=payer_type,
+                    cargo_type=cargo_type,
+                    declared_value=declared_value,
+                    cod_amount=cod_amount,
+                    cod_payment_type=cod_payment_type,
+                    session_id=session_id,
+                ).pack(),
+            ),
+            InlineKeyboardButton(
+                text=f"🔄 {cod_label}",
+                callback_data=WaybillActionCallback(
+                    action="cycle_cod",
+                    payer_type=payer_type,
+                    cargo_type=cargo_type,
+                    declared_value=declared_value,
+                    cod_amount=cod_amount,
+                    cod_payment_type=cod_payment_type,
+                    session_id=session_id,
+                ).pack(),
+            ),
+        ],
+    ]
+
+    # Add COD payout type toggle row when COD amount > 0
+    if cod_amount and cod_amount > 0:
+        if cod_payment_type == "card":
+            card_info = f" ({sender_card_mask})" if sender_card_mask else " (⚠️ Вказати картку)"
+            payout_label = f"🔄 💳 Виплата: На картку{card_info}"
+        else:
+            payout_label = "🔄 💵 Виплата: Готівкою у відділенні"
+
+        keyboard_rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"🔄 {payer_label}",
+                    text=payout_label,
                     callback_data=WaybillActionCallback(
-                        action="toggle_payer",
+                        action="toggle_cod_type",
                         payer_type=payer_type,
                         cargo_type=cargo_type,
                         declared_value=declared_value,
@@ -75,75 +137,40 @@ def get_confirmation_keyboard(
                         cod_payment_type=cod_payment_type,
                         session_id=session_id,
                     ).pack(),
-                ),
-                InlineKeyboardButton(
-                    text=f"🔄 {cargo_label}",
-                    callback_data=WaybillActionCallback(
-                        action="toggle_cargo",
-                        payer_type=payer_type,
-                        cargo_type=cargo_type,
-                        declared_value=declared_value,
-                        cod_amount=cod_amount,
-                        cod_payment_type=cod_payment_type,
-                        session_id=session_id,
-                    ).pack(),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"💰 Оцінка: {int(declared_value)} грн 🔄",
-                    callback_data=WaybillActionCallback(
-                        action="cycle_value",
-                        payer_type=payer_type,
-                        cargo_type=cargo_type,
-                        declared_value=declared_value,
-                        cod_amount=cod_amount,
-                        cod_payment_type=cod_payment_type,
-                        session_id=session_id,
-                    ).pack(),
-                ),
-                InlineKeyboardButton(
-                    text=f"🔄 {cod_label}",
-                    callback_data=WaybillActionCallback(
-                        action="cycle_cod",
-                        payer_type=payer_type,
-                        cargo_type=cargo_type,
-                        declared_value=declared_value,
-                        cod_amount=cod_amount,
-                        cod_payment_type=cod_payment_type,
-                        session_id=session_id,
-                    ).pack(),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✅ Створити ТТН",
-                    callback_data=WaybillActionCallback(
-                        action="confirm",
-                        payer_type=payer_type,
-                        cargo_type=cargo_type,
-                        declared_value=declared_value,
-                        cod_amount=cod_amount,
-                        cod_payment_type=cod_payment_type,
-                        session_id=session_id,
-                    ).pack(),
-                ),
-                InlineKeyboardButton(
-                    text="❌ Скасувати",
-                    callback_data=WaybillActionCallback(
-                        action="cancel",
-                        payer_type=payer_type,
-                        cargo_type=cargo_type,
-                        declared_value=declared_value,
-                        cod_amount=cod_amount,
-                        cod_payment_type=cod_payment_type,
-                        session_id=session_id,
-                    ).pack(),
-                ),
-            ],
+                )
+            ]
+        )
+
+    keyboard_rows.append(
+        [
+            InlineKeyboardButton(
+                text="✅ Створити ТТН",
+                callback_data=WaybillActionCallback(
+                    action="confirm",
+                    payer_type=payer_type,
+                    cargo_type=cargo_type,
+                    declared_value=declared_value,
+                    cod_amount=cod_amount,
+                    cod_payment_type=cod_payment_type,
+                    session_id=session_id,
+                ).pack(),
+            ),
+            InlineKeyboardButton(
+                text="❌ Скасувати",
+                callback_data=WaybillActionCallback(
+                    action="cancel",
+                    payer_type=payer_type,
+                    cargo_type=cargo_type,
+                    declared_value=declared_value,
+                    cod_amount=cod_amount,
+                    cod_payment_type=cod_payment_type,
+                    session_id=session_id,
+                ).pack(),
+            ),
         ]
     )
-    return kb
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
 
 class DraftActionCallback(CallbackData, prefix="draft"):

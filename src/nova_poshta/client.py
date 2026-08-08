@@ -530,17 +530,16 @@ class NovaPoshtaClient:
             return {}
 
         results = {}
+        shipped_codes = {"4", "41", "5", "6", "7", "8", "9", "10", "11", "106"}
         for item in res.get("data", []):
             doc_num = str(item.get("Number", item.get("DocumentNumber", "")))
             status_code = str(item.get("StatusCode", ""))
             status_name = str(item.get("Status", item.get("StateName", "")))
 
-            # Status code '1' means "Нова пошта очікує посилку від відправника" (Draft/Un-shipped).
-            # Status codes '2' (Deleted), '3' (Not found), '4'+ (In transit / Shipped / Delivered / Arrived) indicate parcel is NOT a draft.
+            # Status codes 1 (Draft/Expecting sender), 2/3 (Registered/Created online), 101-103 (Electronic TTN) are NOT shipped.
+            # Only status codes in shipped_codes (4+ physical handling, in branch, in transit, delivered) indicate parcel is physically shipped.
             is_shipped = False
-            if status_code and status_code != "1":
-                is_shipped = True
-            elif status_name and "очікує посилку" not in status_name.lower() and status_name.strip() != "":
+            if status_code in shipped_codes:
                 is_shipped = True
 
             results[doc_num] = {
@@ -550,6 +549,59 @@ class NovaPoshtaClient:
             }
 
         return results
+
+    async def get_internet_document_list(
+        self, days_back: int = 30
+    ) -> List[WaybillItemInfo]:
+        """Fetch active un-shipped waybill drafts directly from Nova Poshta API (InternetDocument/getInternetDocumentList)."""
+        dt_from = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime("%d.%m.%Y")
+        dt_to = (datetime.datetime.now() + datetime.timedelta(days=1)).strftime("%d.%m.%Y")
+
+        try:
+            res = await self._post(
+                model_name="InternetDocument",
+                called_method="getInternetDocumentList",
+                method_properties={
+                    "DateTimeFrom": dt_from,
+                    "DateTimeTo": dt_to,
+                    "GetFullList": "1",
+                },
+            )
+        except Exception as e:
+            logger.error(f"Error fetching InternetDocumentList from Nova Poshta: {e}")
+            return []
+
+        data = res.get("data", [])
+        items = []
+        for doc in data:
+            doc_num = str(doc.get("IntDocNumber", doc.get("Number", "")))
+            if not doc_num:
+                continue
+
+            cost_val = float(doc.get("CostOnSite", doc.get("Cost", 0)))
+            rec_name = (
+                doc.get("RecipientContactPerson")
+                or doc.get("RecipientDescription")
+                or "Отримувач"
+            )
+
+            items.append(
+                WaybillItemInfo(
+                    int_doc_number=doc_num,
+                    state_name=str(doc.get("StateName", doc.get("StateDescription", "Чернетка (Невідправлена)"))),
+                    recipient_name=str(rec_name),
+                    recipient_phone=str(doc.get("RecipientsPhone", "")),
+                    sender_name=str(doc.get("SenderDescription", "")),
+                    sender_phone=str(doc.get("SendersPhone", "")),
+                    city_recipient=str(doc.get("CityRecipientDescription", "")),
+                    address_recipient=str(doc.get("RecipientAddressDescription", "")),
+                    cost=cost_val,
+                    description=str(doc.get("Description", "Посилка")),
+                    estimated_delivery_date=doc.get("EstimatedDeliveryDate"),
+                    date_created=doc.get("DateTime"),
+                )
+            )
+        return items
 
     async def delete_waybill(self, document_ref: str) -> bool:
         """Delete an Express Waybill / Draft by document Ref GUID."""
