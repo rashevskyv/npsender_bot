@@ -487,6 +487,25 @@ def register_handlers(
             parse_mode="Markdown",
         )
 
+    @router.message(Command("set_card"))
+    async def cmd_set_card(message: Message):
+        """Set user's default bank card mask for cash on delivery payout."""
+        clear_user_active_session(message.from_user.id)
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "⚠️ *Використання:* `/set_card 414932******1234` (вкажіть маску або номер вашої банківської картки)",
+                parse_mode="Markdown",
+            )
+            return
+
+        card_str = parts[1].strip()
+        storage_manager.update_user_settings(message.from_user.id, sender_card_mask=card_str)
+        await message.answer(
+            f"✅ *Банківську картку для виплати наложки успішно збережено:* `{card_str}`",
+            parse_mode="Markdown",
+        )
+
     @router.message(Command("reset_settings"))
     async def cmd_reset_settings(message: Message):
         """Reset custom settings to system defaults."""
@@ -1141,6 +1160,8 @@ def register_handlers(
                 500.0,
             )
             cargo_desc = parsed_info.cargo_description or "Посилка"
+            cod_val = parsed_info.cod_amount or 0.0
+            cod_type = parsed_info.cod_payment_type or "cash"
 
             # Create or update session for interactive confirmation
             session_id = active_session_id or str(uuid.uuid4())[:8]
@@ -1152,9 +1173,13 @@ def register_handlers(
                 "cargo_type": eff_settings.default_cargo_type,
                 "declared_value": declared_val,
                 "cargo_description": cargo_desc,
+                "cod_amount": cod_val,
+                "cod_payment_type": cod_type,
                 "user_id": user_id,
             }
             USER_ACTIVE_SESSIONS[user_id] = session_id
+
+            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
             card_text = (
                 "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
@@ -1163,7 +1188,8 @@ def register_handlers(
                 f"🏙 *Місто:* {matched_city.description}\n"
                 f"📦 *Пункт призначення:* {warehouse.description}\n"
                 f"📝 *Опис вантажу:* {cargo_desc}\n"
-                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n\n"
+                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
+                f"💵 *Накладений платіж:* {cod_str}\n\n"
                 "Перевірте дані та оберіть дію нижче:"
             )
 
@@ -1174,6 +1200,8 @@ def register_handlers(
                     payer_type=eff_settings.default_payer_type,
                     cargo_type=eff_settings.default_cargo_type,
                     declared_value=declared_val,
+                    cod_amount=cod_val,
+                    cod_payment_type=cod_type,
                     session_id=session_id,
                 ),
             )
@@ -1287,6 +1315,9 @@ def register_handlers(
             city = session["city"]
             warehouse = session["warehouse"]
             cargo_desc = session["cargo_description"]
+            cod_val = session.get("cod_amount", 0.0)
+            cod_type = session.get("cod_payment_type", "cash")
+            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
             card_text = (
                 "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
@@ -1295,7 +1326,8 @@ def register_handlers(
                 f"🏙 *Місто:* {city.description}\n"
                 f"📦 *Пункт призначення:* {warehouse.description}\n"
                 f"📝 *Опис вантажу:* {cargo_desc}\n"
-                f"💰 *Оціночна вартість:* {int(next_val)} грн (Мін. 500 грн)\n\n"
+                f"💰 *Оціночна вартість:* {int(next_val)} грн (Мін. 500 грн)\n"
+                f"💵 *Накладений платіж:* {cod_str}\n\n"
                 "Перевірте дані та оберіть дію нижче:"
             )
 
@@ -1306,10 +1338,59 @@ def register_handlers(
                     payer_type=session["payer_type"],
                     cargo_type=session["cargo_type"],
                     declared_value=next_val,
+                    cod_amount=cod_val,
+                    cod_payment_type=cod_type,
                     session_id=session_id,
                 ),
             )
             await callback.answer(f"Оціночну вартість встановлено: {int(next_val)} грн")
+            return
+
+        if action == "cycle_cod":
+            COD_OPTIONS = [0.0, 500.0, 1000.0, 1500.0, 2000.0, 3000.0]
+            current_cod = session.get("cod_amount", 0.0)
+            try:
+                curr_idx = COD_OPTIONS.index(current_cod)
+                next_cod = COD_OPTIONS[(curr_idx + 1) % len(COD_OPTIONS)]
+            except ValueError:
+                next_cod = COD_OPTIONS[1]
+
+            session["cod_amount"] = next_cod
+
+            parsed_info = session["parsed_info"]
+            city = session["city"]
+            warehouse = session["warehouse"]
+            cargo_desc = session["cargo_description"]
+            declared_val = session["declared_value"]
+            cod_type = session.get("cod_payment_type", "cash")
+            cod_str = "❌ Немає" if next_cod <= 0 else f"{int(next_cod)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+
+            card_text = (
+                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+                f"👤 *Отримувач:* {parsed_info.full_name}\n"
+                f"📞 *Телефон:* `{parsed_info.phone}`\n"
+                f"🏙 *Місто:* {city.description}\n"
+                f"📦 *Пункт призначення:* {warehouse.description}\n"
+                f"📝 *Опис вантажу:* {cargo_desc}\n"
+                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
+                f"💵 *Накладений платіж:* {cod_str}\n\n"
+                "Перевірте дані та оберіть дію нижче:"
+            )
+
+            await callback.message.edit_text(
+                card_text,
+                parse_mode="Markdown",
+                reply_markup=get_confirmation_keyboard(
+                    payer_type=session["payer_type"],
+                    cargo_type=session["cargo_type"],
+                    declared_value=declared_val,
+                    cod_amount=next_cod,
+                    cod_payment_type=cod_type,
+                    session_id=session_id,
+                ),
+            )
+            msg_str = "Скасовано" if next_cod <= 0 else f"{int(next_cod)} грн"
+            await callback.answer(f"Накладений платіж: {msg_str}")
             return
 
         if action == "confirm":
@@ -1330,6 +1411,8 @@ def register_handlers(
             payer_type = session["payer_type"]
             declared_value = session["declared_value"]
             cargo_desc = session["cargo_description"]
+            cod_amount = session.get("cod_amount", 0.0)
+            cod_payment_type = session.get("cod_payment_type", "cash")
 
             try:
                 # Create recipient counterparty
@@ -1354,6 +1437,7 @@ def register_handlers(
                         seats_amount=eff_settings.default_seats_amount,
                         weight=eff_settings.default_weight,
                         declared_value=declared_value,
+                        cod_amount=cod_amount,
                     )
                     storage_manager.delete_user_draft(user_id, editing_ref)
                 else:
@@ -1368,6 +1452,7 @@ def register_handlers(
                         seats_amount=eff_settings.default_seats_amount,
                         weight=eff_settings.default_weight,
                         declared_value=declared_value,
+                        cod_amount=cod_amount,
                     )
 
                 PENDING_SESSIONS.pop(session_id, None)
@@ -1384,6 +1469,8 @@ def register_handlers(
                     payer_type=payer_type,
                     cargo_description=cargo_desc,
                     declared_value=declared_value,
+                    cod_amount=cod_amount,
+                    cod_payment_type=cod_payment_type,
                     cost=wb_res.cost,
                     created_at=datetime.date.today().strftime("%d.%m.%Y"),
                 )
@@ -1394,6 +1481,7 @@ def register_handlers(
                 )
                 payer_ua = "Отримувач" if payer_type == "Recipient" else "Відправник"
                 success_title = "одно успішно оновлено" if editing_ref else "о успішно створено"
+                cod_str = "❌ Немає" if not cod_amount or cod_amount <= 0 else f"{int(cod_amount)} грн"
 
                 success_card = (
                     f"✅ *Express-накладну{success_title}!*\n\n"
@@ -1404,7 +1492,8 @@ def register_handlers(
                     f"📦 *Пункт призначення:* {warehouse.description}\n"
                     f"📝 *Опис вантажу:* {cargo_desc}\n"
                     f"💳 *Платник:* {payer_ua}\n"
-                    f"💰 *Вартість доставки:* ~{wb_res.cost} грн | *Оцінка:* {int(declared_value)} грн\n"
+                    f"💰 *Доставка:* ~{wb_res.cost} грн | *Оцінка:* {int(declared_value)} грн\n"
+                    f"💵 *Накладений платіж:* {cod_str}\n"
                     f"📅 *Очікувана дата доставки:* {wb_res.estimated_delivery_date or 'Не вказано'}\n\n"
                     f"🔗 [Відстежити ТТН на сайті Нової Пошти]({tracking_url})"
                 )

@@ -27,6 +27,12 @@ def test_barcode_generation():
     # PNG signature header check: \x89PNG
     assert png_bytes[:4] == b"\x89PNG"
 
+    # Test hyphen preservation for registers like 105-79184007
+    png_bytes_hyphen = generate_code128_barcode("105-79184007")
+    assert isinstance(png_bytes_hyphen, bytes)
+    assert len(png_bytes_hyphen) > 500
+    assert png_bytes_hyphen[:4] == b"\x89PNG"
+
 
 def test_filter_user_drafts():
     today_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")

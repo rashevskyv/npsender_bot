@@ -304,6 +304,8 @@ class NovaPoshtaClient:
         seats_amount: int = 1,
         weight: float = 1.0,
         declared_value: float = 300.0,
+        cod_amount: Optional[float] = None,
+        cod_payer_type: str = "Recipient",
     ) -> WaybillCreateResult:
         """Create Nova Poshta Express Waybill (ТТН)."""
         today_str = datetime.date.today().strftime("%d.%m.%Y")
@@ -345,6 +347,15 @@ class NovaPoshtaClient:
             "DateTime": today_str,
             "OptionsSeat": options_seat,
         }
+
+        if cod_amount and cod_amount > 0:
+            method_props["BackwardDeliveryData"] = [
+                {
+                    "PayerType": cod_payer_type,
+                    "CargoType": "Money",
+                    "RedeliveryString": str(int(cod_amount)),
+                }
+            ]
 
         res = await self._post(
             model_name="InternetDocument",
@@ -691,3 +702,16 @@ class NovaPoshtaClient:
             method_properties={"ScanSheetRef": scan_sheet_ref},
         )
         return res.get("success", False)
+
+    async def get_payment_cards(self, counterparty_ref: str) -> List[Dict[str, Any]]:
+        """Fetch registered payment cards for a counterparty from Nova Poshta API."""
+        try:
+            res = await self._post(
+                model_name="Counterparty",
+                called_method="getPaymentCards",
+                method_properties={"CounterpartyRef": counterparty_ref},
+            )
+            return res.get("data", [])
+        except Exception as e:
+            logger.warning(f"Failed to fetch payment cards for counterparty {counterparty_ref}: {e}")
+            return []

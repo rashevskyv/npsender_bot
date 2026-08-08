@@ -66,6 +66,12 @@ class ParsedRecipientInfo(BaseModel):
     declared_value: Optional[float] = Field(
         default=None, description="Declared value in UAH if specified in text"
     )
+    cod_amount: Optional[float] = Field(
+        default=None, description="Cash on Delivery (накладений платіж / наложка) amount in UAH if specified in text"
+    )
+    cod_payment_type: Optional[str] = Field(
+        default=None, description="COD payout type: 'cash' (готівкою у відділенні) or 'card' (на банківську картку) if specified"
+    )
     is_register_intent: Optional[bool] = Field(
         default=False,
         description="True if the user is asking about ScanSheet registers or requesting to filter/create a register of express waybills",

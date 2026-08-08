@@ -44,6 +44,8 @@ Determine the user's intent:
      • is_address_delivery: Boolean (true if user explicitly confirmed or requested courier door delivery)
      • cargo_description: Item description if mentioned or updated
      • declared_value: Declared value number if mentioned or updated
+     • cod_amount: Cash on Delivery (накладений платіж / наложка / оплата при отриманні) amount in UAH if specified
+     • cod_payment_type: "cash" (готівкою у відділенні) or "card" (на картку) if specified
 
 3. REGISTER & WAYBILL FILTERING INTENT (is_register_intent: true):
    If the user asks to list/filter waybills by date, time, or cargo description, or asks to create a ScanSheet register (e.g. "надай мені всі накладні, які були створені за сьогодні", "створи реєстр з усіх накладних з описом сувенір", "створи реєстр з накладних створених вчора до обіду", "покажи мої реєстри"):

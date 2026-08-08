@@ -34,10 +34,12 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
 class WaybillActionCallback(CallbackData, prefix="wb"):
     """Callback data schema for waybill actions."""
 
-    action: str  # "confirm", "cancel", "toggle_payer", "toggle_cargo", "cycle_value"
+    action: str  # "confirm", "cancel", "toggle_payer", "toggle_cargo", "cycle_value", "cycle_cod", "toggle_cod_type"
     payer_type: str  # "Recipient", "Sender"
     cargo_type: str  # "Parcel", "Documents"
     declared_value: float  # e.g., 500.0, 1000.0, 2000.0
+    cod_amount: float = 0.0  # Cash on delivery amount in UAH
+    cod_payment_type: str = "cash"  # "cash" or "card"
     session_id: str  # unique ID or state reference
 
 
@@ -45,11 +47,19 @@ def get_confirmation_keyboard(
     payer_type: str = "Recipient",
     cargo_type: str = "Parcel",
     declared_value: float = 500.0,
+    cod_amount: float = 0.0,
+    cod_payment_type: str = "cash",
     session_id: str = "default",
 ) -> InlineKeyboardMarkup:
     """Build interactive confirmation keyboard with toggle buttons in Ukrainian."""
     payer_label = "👤 Платник: Отримувач" if payer_type == "Recipient" else "📦 Платник: Відправник"
     cargo_label = "📦 Вантаж: Посилка" if cargo_type == "Parcel" else "📄 Вантаж: Документи"
+
+    if not cod_amount or cod_amount <= 0:
+        cod_label = "💸 Наложка: ❌ Немає"
+    else:
+        payout_str = "💳 Картка" if cod_payment_type == "card" else "💵 Готівка"
+        cod_label = f"💰 Наложка: {int(cod_amount)} грн ({payout_str})"
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -61,6 +71,8 @@ def get_confirmation_keyboard(
                         payer_type=payer_type,
                         cargo_type=cargo_type,
                         declared_value=declared_value,
+                        cod_amount=cod_amount,
+                        cod_payment_type=cod_payment_type,
                         session_id=session_id,
                     ).pack(),
                 ),
@@ -71,6 +83,8 @@ def get_confirmation_keyboard(
                         payer_type=payer_type,
                         cargo_type=cargo_type,
                         declared_value=declared_value,
+                        cod_amount=cod_amount,
+                        cod_payment_type=cod_payment_type,
                         session_id=session_id,
                     ).pack(),
                 ),
@@ -83,6 +97,20 @@ def get_confirmation_keyboard(
                         payer_type=payer_type,
                         cargo_type=cargo_type,
                         declared_value=declared_value,
+                        cod_amount=cod_amount,
+                        cod_payment_type=cod_payment_type,
+                        session_id=session_id,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text=f"🔄 {cod_label}",
+                    callback_data=WaybillActionCallback(
+                        action="cycle_cod",
+                        payer_type=payer_type,
+                        cargo_type=cargo_type,
+                        declared_value=declared_value,
+                        cod_amount=cod_amount,
+                        cod_payment_type=cod_payment_type,
                         session_id=session_id,
                     ).pack(),
                 ),
@@ -95,6 +123,8 @@ def get_confirmation_keyboard(
                         payer_type=payer_type,
                         cargo_type=cargo_type,
                         declared_value=declared_value,
+                        cod_amount=cod_amount,
+                        cod_payment_type=cod_payment_type,
                         session_id=session_id,
                     ).pack(),
                 ),
@@ -105,6 +135,8 @@ def get_confirmation_keyboard(
                         payer_type=payer_type,
                         cargo_type=cargo_type,
                         declared_value=declared_value,
+                        cod_amount=cod_amount,
+                        cod_payment_type=cod_payment_type,
                         session_id=session_id,
                     ).pack(),
                 ),

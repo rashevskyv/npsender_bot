@@ -30,6 +30,8 @@ class UserCustomSettings(BaseModel):
     sender_warehouse_name: Optional[str] = None
     sender_phone: Optional[str] = None
     sender_name: Optional[str] = None
+    sender_card_mask: Optional[str] = None
+    sender_card_ref: Optional[str] = None
 
 
 class SavedDraft(BaseModel):
@@ -44,6 +46,8 @@ class SavedDraft(BaseModel):
     payer_type: str
     cargo_description: str
     declared_value: float
+    cod_amount: Optional[float] = None
+    cod_payment_type: Optional[str] = None
     cost: float
     created_at: str
 
