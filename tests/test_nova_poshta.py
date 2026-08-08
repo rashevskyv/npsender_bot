@@ -102,46 +102,114 @@ def test_format_relative_delivery_date():
 
 
 @pytest.mark.asyncio
-async def test_get_incoming_waybills_filtering():
+async def test_outgoing_vs_incoming_separation():
     from src.config import Settings
     from src.nova_poshta.client import NovaPoshtaClient
 
     client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="dummy"))
 
+    # User profile: Юрченко Роман, 380995360818
+    user_name = "Юрченко Роман Сергійович"
+    user_phone = "380995360818"
+
+    mock_docs = [
+        # Outgoing shipment: User is Sender
+        {
+            "IntDocNumber": "20450001",
+            "StateId": "4",
+            "StateName": "У дорозі",
+            "SenderContactPerson": "Юрченко Роман Сергійович",
+            "SendersPhone": "380995360818",
+            "RecipientContactPerson": "Іванов Іван Іванович",
+            "RecipientsPhone": "380971112233",
+            "CityRecipientDescription": "Львів",
+            "RecipientAddressDescription": "Відділення №1",
+            "Cost": "100",
+            "Description": "Ноутбук",
+        },
+        # Incoming shipment: User is Recipient
+        {
+            "IntDocNumber": "20450002",
+            "StateId": "4",
+            "StateName": "У дорозі",
+            "SenderContactPerson": "ТОВ Розетка",
+            "SendersPhone": "380445000000",
+            "RecipientContactPerson": "Юрченко Роман Сергійович",
+            "RecipientsPhone": "380995360818",
+            "CityRecipientDescription": "Київ",
+            "RecipientAddressDescription": "Відділення №5",
+            "Cost": "150",
+            "Description": "Навушники",
+        },
+    ]
+
     async def mock_post(model_name, called_method, method_properties):
+        return {"success": True, "data": mock_docs}
+
+    client._post = mock_post
+
+    outgoing = await client.get_outgoing_waybills(user_phone=user_phone, user_name=user_name)
+    incoming = await client.get_incoming_waybills(user_phone=user_phone, user_name=user_name)
+
+    assert len(outgoing) == 1
+    assert outgoing[0].int_doc_number == "20450001"
+    assert outgoing[0].recipient_name == "Іванов Іван Іванович"
+
+    assert len(incoming) == 1
+    assert incoming[0].int_doc_number == "20450002"
+    assert incoming[0].sender_name == "ТОВ Розетка"
+
+
+@pytest.mark.asyncio
+async def test_waybills_caching_behavior():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="test_cache_key_123"))
+    client.invalidate_waybills_cache()
+
+    api_call_count = 0
+
+    async def mock_post(model_name, called_method, method_properties):
+        nonlocal api_call_count
+        api_call_count += 1
         return {
             "success": True,
             "data": [
                 {
-                    "IntDocNumber": "20450991",
+                    "IntDocNumber": "20459999",
                     "StateId": "4",
-                    "StateName": "В дорозі",
-                    "SenderContactPerson": "ТОВ Розетка",
-                    "RecipientContactPerson": "Петренко Петро",
+                    "StateName": "У дорозі",
+                    "SenderContactPerson": "Тест Відправник",
+                    "SendersPhone": "380991112233",
+                    "RecipientContactPerson": "Тест Отримувач",
+                    "RecipientsPhone": "380994445566",
                     "CityRecipientDescription": "Київ",
-                    "RecipientAddressDescription": "Відділення №10",
-                    "Cost": "90",
-                    "Description": "Телефон",
-                    "EstimatedDeliveryDate": "09.08.2026 15:00",
-                },
-                {
-                    "IntDocNumber": "20450992",
-                    "StateId": "9",
-                    "StateName": "Відправлення отримано",
-                    "SenderContactPerson": "ТОВ Епіцентр",
-                    "RecipientContactPerson": "Петренко Петро",
-                    "CityRecipientDescription": "Київ",
-                    "RecipientAddressDescription": "Відділення №5",
-                    "Cost": "120",
-                    "Description": "Інструменти",
-                },
+                    "RecipientAddressDescription": "Відділення №1",
+                    "Cost": "50",
+                    "Description": "Кеш тест",
+                }
             ],
         }
 
     client._post = mock_post
-    items = await client.get_incoming_waybills()
-    assert len(items) == 1
-    assert items[0].int_doc_number == "20450991"
-    assert items[0].sender_name == "ТОВ Розетка"
+
+    # First call: cache miss, triggers API call
+    inc1 = await client.get_incoming_waybills(user_phone="380994445566")
+    assert api_call_count == 1
+    assert len(inc1) == 1
+
+    # Second call (outgoing right after incoming): cache HIT, 0 new API calls!
+    out1 = await client.get_outgoing_waybills(user_phone="380991112233")
+    assert api_call_count == 1
+    assert len(out1) == 1
+
+    # Third call: after invalidating cache, triggers API call again
+    client.invalidate_waybills_cache()
+    inc2 = await client.get_incoming_waybills(user_phone="380994445566")
+    assert api_call_count == 2
+    assert len(inc2) == 1
+
+
 
 

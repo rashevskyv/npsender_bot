@@ -402,7 +402,13 @@ def register_handlers(
             "🔍 *Отримання ваших вихідних посилок у дорозі...*", parse_mode="Markdown"
         )
         try:
-            items = await user_np_client.get_outgoing_waybills(days_back=30, limit=20)
+            items = await user_np_client.get_outgoing_waybills(
+                user_phone=eff_settings.sender_phone,
+                user_name=eff_settings.sender_name,
+                user_cp_ref=eff_settings.sender_counterparty_ref,
+                days_back=30,
+                limit=20,
+            )
             if not items:
                 await status_msg.edit_text(
                     "📤 *Активних вихідних посилок у дорозі не знайдено.*\n"
@@ -458,7 +464,13 @@ def register_handlers(
             "🔍 *Отримання ваших вхідних посилок у дорозі...*", parse_mode="Markdown"
         )
         try:
-            items = await user_np_client.get_incoming_waybills(days_back=30, limit=20)
+            items = await user_np_client.get_incoming_waybills(
+                user_phone=eff_settings.sender_phone,
+                user_name=eff_settings.sender_name,
+                user_cp_ref=eff_settings.sender_counterparty_ref,
+                days_back=30,
+                limit=20,
+            )
             if not items:
                 await status_msg.edit_text(
                     "📥 *Активних вхідних посилок у дорозі не знайдено.*\n"
