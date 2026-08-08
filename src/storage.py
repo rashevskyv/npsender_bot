@@ -24,7 +24,9 @@ class UserCustomSettings(BaseModel):
     sender_counterparty_ref: Optional[str] = None
     sender_contact_ref: Optional[str] = None
     sender_city_ref: Optional[str] = None
+    sender_city_name: Optional[str] = None
     sender_address_ref: Optional[str] = None
+    sender_warehouse_name: Optional[str] = None
     sender_phone: Optional[str] = None
     sender_name: Optional[str] = None
 
@@ -179,31 +181,43 @@ class UserSettingsManager:
             del self.data[uid_str]
             self.save_settings()
 
+    def is_user_configured(self, user_id: int) -> bool:
+        """Return True if user has provided their own personal Nova Poshta API key."""
+        u_id = str(user_id)
+        if u_id not in self.data:
+            return False
+        user_cfg = self.data[u_id]
+        return bool(user_cfg.nova_poshta_api_key and user_cfg.nova_poshta_api_key.strip())
+
     def get_effective_settings(
         self, user_id: int, global_settings: Settings
     ) -> Settings:
-        """Return a merged Settings object taking user overrides into account."""
+        """Return a merged Settings object taking user overrides into account.
+        If user is not configured with an API key, blank out Nova Poshta credentials to prevent fallback leakage.
+        """
         user_custom = self.get_user_settings(user_id)
         effective_dict = global_settings.model_dump()
 
-        if user_custom.nova_poshta_api_key:
+        if user_custom.nova_poshta_api_key and user_custom.nova_poshta_api_key.strip():
             effective_dict["nova_poshta_api_key"] = user_custom.nova_poshta_api_key
+            effective_dict["sender_counterparty_ref"] = user_custom.sender_counterparty_ref or ""
+            effective_dict["sender_contact_ref"] = user_custom.sender_contact_ref or ""
+            effective_dict["sender_city_ref"] = user_custom.sender_city_ref or ""
+            effective_dict["sender_address_ref"] = user_custom.sender_address_ref or ""
+            effective_dict["sender_phone"] = user_custom.sender_phone or ""
+        else:
+            # User has not provided their API key: blank out user credentials
+            effective_dict["nova_poshta_api_key"] = ""
+            effective_dict["sender_counterparty_ref"] = ""
+            effective_dict["sender_contact_ref"] = ""
+            effective_dict["sender_city_ref"] = ""
+            effective_dict["sender_address_ref"] = ""
+            effective_dict["sender_phone"] = ""
+
         if user_custom.ai_api_key:
             effective_dict["ai_api_key"] = user_custom.ai_api_key
         if user_custom.ai_base_url:
             effective_dict["ai_base_url"] = user_custom.ai_base_url
-        if user_custom.sender_counterparty_ref:
-            effective_dict["sender_counterparty_ref"] = (
-                user_custom.sender_counterparty_ref
-            )
-        if user_custom.sender_contact_ref:
-            effective_dict["sender_contact_ref"] = user_custom.sender_contact_ref
-        if user_custom.sender_city_ref:
-            effective_dict["sender_city_ref"] = user_custom.sender_city_ref
-        if user_custom.sender_address_ref:
-            effective_dict["sender_address_ref"] = user_custom.sender_address_ref
-        if user_custom.sender_phone:
-            effective_dict["sender_phone"] = user_custom.sender_phone
 
         return Settings(**effective_dict)
 

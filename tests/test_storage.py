@@ -11,11 +11,22 @@ def test_user_settings_manager(tmp_path):
     drafts_file = os.path.join(tmp_path, "user_drafts.json")
     manager = UserSettingsManager(filepath=storage_file, drafts_filepath=drafts_file)
 
-    # Initially empty
+    # Initially unconfigured
+    assert manager.is_user_configured(12345) is False
     u1 = manager.get_user_settings(12345)
     assert u1.nova_poshta_api_key is None
 
-    # Update settings
+    global_s = Settings(
+        TELEGRAM_BOT_TOKEN="dummy",
+        NOVA_POSHTA_API_KEY="global_admin_np_key",
+    )
+
+    # Unconfigured user must NOT leak global admin's NP API key
+    eff_uncfg = manager.get_effective_settings(12345, global_s)
+    assert eff_uncfg.nova_poshta_api_key == ""
+    assert eff_uncfg.sender_phone == ""
+
+    # Update user custom settings
     custom = UserCustomSettings(
         nova_poshta_api_key="custom_np_key_123",
         sender_phone="380991112233",
@@ -23,24 +34,21 @@ def test_user_settings_manager(tmp_path):
     )
     manager.update_user_settings(12345, custom)
 
-    # Re-read
+    # Re-read and check configured status
+    assert manager.is_user_configured(12345) is True
     u1_updated = manager.get_user_settings(12345)
     assert u1_updated.nova_poshta_api_key == "custom_np_key_123"
     assert u1_updated.sender_phone == "380991112233"
 
-    # Effective settings
-    global_s = Settings(
-        TELEGRAM_BOT_TOKEN="dummy",
-        NOVA_POSHTA_API_KEY="default_np_key",
-    )
     eff = manager.get_effective_settings(12345, global_s)
     assert eff.nova_poshta_api_key == "custom_np_key_123"
     assert eff.sender_phone == "380991112233"
 
     # Reset settings
     manager.reset_user_settings(12345)
+    assert manager.is_user_configured(12345) is False
     eff_reset = manager.get_effective_settings(12345, global_s)
-    assert eff_reset.nova_poshta_api_key == "default_np_key"
+    assert eff_reset.nova_poshta_api_key == ""
 
 
 def test_drafts_management(tmp_path):

@@ -215,6 +215,125 @@ def register_handlers(
             help_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard()
         )
 
+    async def ensure_user_configured(message: Message) -> bool:
+        """Check if user has configured their personal Nova Poshta API key. If not, send onboarding card."""
+        if not storage_manager.is_user_configured(message.from_user.id):
+            card = (
+                "⚠️ *Налаштування вашого профілю Нової Пошти:*\n\n"
+                "Для перегляду ваших посилок та створення накладних необхідно один раз прив'язати ваш особистий API-ключ Нової Пошти.\n\n"
+                "🔑 *Крок 1:* Надішліть свій API-ключ командою:\n"
+                "`/set_np_key ВАШ_API_КЛЮЧ`\n\n"
+                "🏙 *Крок 2:* Вкажіть ваше місто відправки:\n"
+                "`/set_city Київ`\n\n"
+                "📦 *Крок 3:* Вкажіть номер вашого відділення/поштомату відправки:\n"
+                "`/set_warehouse 5`\n\n"
+                "⚙️ Перевірити статус вашого профілю можна командою `/settings` або `/profile`."
+            )
+            await message.answer(card, parse_mode="Markdown")
+            return False
+        return True
+
+    @router.message(Command("settings"))
+    @router.message(Command("profile"))
+    @router.message(F.text == "⚙️ Налаштування")
+    async def cmd_settings(message: Message):
+        """Show current user configuration status."""
+        clear_user_active_session(message.from_user.id)
+        u_settings = storage_manager.get_user_settings(message.from_user.id)
+        is_cfg = storage_manager.is_user_configured(message.from_user.id)
+
+        status_icon = "✅ Підключено" if is_cfg else "⚠️ Не налаштовано"
+        masked_key = (
+            f"`{u_settings.nova_poshta_api_key[:6]}...{u_settings.nova_poshta_api_key[-4:]}`"
+            if is_cfg and u_settings.nova_poshta_api_key
+            else "_Не вказано_"
+        )
+
+        card = (
+            f"⚙️ *Персональний профіль користувача:* [{message.from_user.full_name}]\n\n"
+            f"📊 *Статус профілю:* {status_icon}\n"
+            f"🔑 *API-ключ НП:* {masked_key}\n"
+            f"👤 *ПІБ відправника:* `{u_settings.sender_name or 'Не підтягнуто'}`\n"
+            f"📞 *Телефон:* `{u_settings.sender_phone or 'Не підтягнуто'}`\n"
+            f"🏙 *Місто відправника:* `{u_settings.sender_city_name or 'Не вказано'}`\n"
+            f"📦 *Відділення відправника:* `{u_settings.sender_warehouse_name or 'Не вказано'}`\n\n"
+            "💡 *Команди для керування налаштуваннями:*\n"
+            "• `/set_np_key ВАШ_КЛЮЧ` — прив'язати API-ключ\n"
+            "• `/set_city НазваМіста` — обрати місто відправки\n"
+            "• `/set_warehouse Номер` — обрати відділення відправки"
+        )
+        await message.answer(card, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+
+    @router.message(Command("set_city"))
+    async def cmd_set_city(message: Message):
+        """Set user's sender city."""
+        clear_user_active_session(message.from_user.id)
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("⚠️ *Використання:* `/set_city НазваМіста` (наприклад, `/set_city Київ`)", parse_mode="Markdown")
+            return
+
+        city_query = parts[1].strip()
+        status_msg = await message.answer(f"🔍 *Пошук міста `{city_query}` у базі Нової Пошти...*", parse_mode="Markdown")
+        try:
+            eff_settings = storage_manager.get_effective_settings(message.from_user.id, settings)
+            user_np_client = NovaPoshtaClient(eff_settings)
+            cities = await user_np_client.search_city(city_query)
+            if not cities:
+                await status_msg.edit_text(f"❌ *Місто `{city_query}` не знайдено.* Спробуйте уточнити назву.", parse_mode="Markdown")
+                return
+
+            city = cities[0]
+            storage_manager.update_user_settings(
+                message.from_user.id,
+                sender_city_ref=city.ref,
+                sender_city_name=city.description,
+            )
+            await status_msg.edit_text(
+                f"✅ *Місто відправника успішно збережено:* `{city.description}`\n\n"
+                "Тепер вкажіть номер вашого відділення відправки: `/set_warehouse Номер`",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            await status_msg.edit_text(f"❌ *Помилка встановлення міста:* {str(e)}", parse_mode="Markdown")
+
+    @router.message(Command("set_warehouse"))
+    async def cmd_set_warehouse(message: Message):
+        """Set user's sender warehouse / postomat."""
+        clear_user_active_session(message.from_user.id)
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            await message.answer("⚠️ *Використання:* `/set_warehouse НомерВідділення` (наприклад, `/set_warehouse 5`)", parse_mode="Markdown")
+            return
+
+        wh_num = int(parts[1].strip())
+        u_settings = storage_manager.get_user_settings(message.from_user.id)
+        if not u_settings.sender_city_ref:
+            await message.answer("⚠️ *Спочатку встановіть місто відправника:* `/set_city НазваМіста`", parse_mode="Markdown")
+            return
+
+        status_msg = await message.answer(f"🔍 *Пошук відділення №{wh_num}...*", parse_mode="Markdown")
+        try:
+            eff_settings = storage_manager.get_effective_settings(message.from_user.id, settings)
+            user_np_client = NovaPoshtaClient(eff_settings)
+            wh = await user_np_client.get_warehouse(u_settings.sender_city_ref, wh_num)
+            if not wh:
+                await status_msg.edit_text(f"❌ *Відділення №{wh_num} у вашому місті не знайдено.*", parse_mode="Markdown")
+                return
+
+            storage_manager.update_user_settings(
+                message.from_user.id,
+                sender_address_ref=wh.ref,
+                sender_warehouse_name=wh.description,
+            )
+            await status_msg.edit_text(
+                f"✅ *Відділення відправника збережено:* `{wh.description}`\n\n"
+                "🎉 Вітаємо! Ваш профіль повністю налаштовано. Надішліть дані отримувача у повідомленні для створення ТТН!",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            await status_msg.edit_text(f"❌ *Помилка встановлення відділення:* {str(e)}", parse_mode="Markdown")
+
     @router.message(Command("set_np_key"))
     async def cmd_set_np_key(message: Message):
         """Set user's personal Nova Poshta API key."""
@@ -233,24 +352,25 @@ def register_handlers(
 
         try:
             profile = await np_client.fetch_sender_profile(api_key)
-            u_settings = storage_manager.get_user_settings(message.from_user.id)
 
-            u_settings.nova_poshta_api_key = api_key
-            u_settings.sender_counterparty_ref = profile["sender_counterparty_ref"]
-            u_settings.sender_contact_ref = profile["sender_contact_ref"]
-            u_settings.sender_city_ref = profile["sender_city_ref"]
-            u_settings.sender_address_ref = profile["sender_address_ref"]
-            u_settings.sender_phone = profile["sender_phone"]
-            u_settings.sender_name = profile["sender_name"]
-
-            storage_manager.update_user_settings(message.from_user.id, u_settings)
+            storage_manager.update_user_settings(
+                message.from_user.id,
+                nova_poshta_api_key=api_key,
+                sender_counterparty_ref=profile["sender_counterparty_ref"],
+                sender_contact_ref=profile["sender_contact_ref"],
+                sender_city_ref=profile["sender_city_ref"] or None,
+                sender_address_ref=profile["sender_address_ref"] or None,
+                sender_phone=profile["sender_phone"],
+                sender_name=profile["sender_name"],
+            )
 
             await status_msg.edit_text(
-                "✅ *API-ключ Нової Пошти успішно збережено!*\n\n"
+                "✅ *API-ключ Нової Пошти та профіль відправника успішно підв'язано!*\n\n"
                 f"👤 *Відправник:* `{profile['sender_name']}`\n"
                 f"📞 *Телефон:* `{profile['sender_phone'] or 'Не вказано'}`\n"
                 f"🔑 *Ключ:* `{api_key[:6]}...{api_key[-4:]}`\n\n"
-                "Усі наступні накладні будуть створюватися від імені вашого особистого акаунта!",
+                "🏙 Тепер вкажіть місто відправки командою `/set_city НазваМіста`\n"
+                "📦 Та номер відділення/поштомату: `/set_warehouse Номер`",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -322,8 +442,11 @@ def register_handlers(
     @router.message(Command("drafts"))
     @router.message(F.text == "📝 Мої чернетки (ТТН)")
     async def cmd_drafts(message: Message):
-        """View and manage created waybill drafts."""
+        """Show list of active created express waybill drafts."""
         clear_user_active_session(message.from_user.id)
+        if not await ensure_user_configured(message):
+            return
+
         user_id = message.from_user.id
         drafts = storage_manager.get_user_drafts(user_id)
 
@@ -395,6 +518,9 @@ def register_handlers(
     async def cmd_outgoing_parcels(message: Message):
         """Show active outgoing shipments sent by user (not yet received)."""
         clear_user_active_session(message.from_user.id)
+        if not await ensure_user_configured(message):
+            return
+
         eff_settings = storage_manager.get_effective_settings(message.from_user.id, settings)
         user_np_client = NovaPoshtaClient(eff_settings)
 
@@ -520,6 +646,9 @@ def register_handlers(
     async def cmd_registers(message: Message):
         """Show list of active created registers (ScanSheets) within last 2 days."""
         clear_user_active_session(message.from_user.id)
+        if not await ensure_user_configured(message):
+            return
+
         user_id = message.from_user.id
         eff_settings = storage_manager.get_effective_settings(user_id, settings)
         user_np_client = NovaPoshtaClient(eff_settings)
@@ -629,6 +758,9 @@ def register_handlers(
     async def _handle_combined_text_message(message: Message, text: str):
         """Core text processing logic for accumulated recipient messages."""
         user_id = message.from_user.id
+        if not await ensure_user_configured(message):
+            return
+
         eff_settings = storage_manager.get_effective_settings(user_id, settings)
         user_ai_extractor = AIExtractor(eff_settings)
         user_np_client = NovaPoshtaClient(eff_settings)

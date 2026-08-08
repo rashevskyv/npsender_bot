@@ -119,6 +119,86 @@ class NovaPoshtaClient:
                     raise RuntimeError(err_msg)
                 return data
 
+    async def fetch_sender_profile(self, api_key_override: Optional[str] = None) -> Dict[str, Any]:
+        """Fetch Sender Counterparty info, Contact Person info, phone, and name from Nova Poshta API."""
+        target_key = api_key_override or self.api_key
+        payload = {
+            "apiKey": target_key,
+            "modelName": "Counterparty",
+            "calledMethod": "getCounterparties",
+            "methodProperties": {"CounterpartyProperty": "Sender", "Page": "1"},
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res_http = await client.post(self.api_url, json=payload)
+            res_http.raise_for_status()
+            res = res_http.json()
+
+        if not res.get("success", False):
+            errors = ", ".join(res.get("errors", []))
+            raise RuntimeError(f"Помилка API Нової Пошти: {errors or 'Недійсний API-ключ'}")
+
+        cps = res.get("data", [])
+        if not cps:
+            raise RuntimeError("Не знайдено контрагента відправника для цього API-ключа Нової Пошти.")
+
+        cp_item = cps[0]
+        cp_ref = cp_item.get("Ref", "")
+        sender_name = cp_item.get("Description", "")
+
+        # Get contact persons for this counterparty
+        payload_cp = {
+            "apiKey": target_key,
+            "modelName": "Counterparty",
+            "calledMethod": "getCounterpartyContactPersons",
+            "methodProperties": {"Ref": cp_ref, "Page": "1"},
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            res_cp_http = await client.post(self.api_url, json=payload_cp)
+            res_cp_http.raise_for_status()
+            res_cp = res_cp_http.json()
+
+        contacts = res_cp.get("data", [])
+        contact_ref = ""
+        phone = ""
+        if contacts:
+            contact_item = contacts[0]
+            contact_ref = contact_item.get("Ref", "")
+            phone = contact_item.get("Phones", "")
+            if not sender_name or len(sender_name) < 3:
+                first = contact_item.get("FirstName", "")
+                last = contact_item.get("LastName", "")
+                middle = contact_item.get("MiddleName", "")
+                sender_name = f"{last} {first} {middle}".strip()
+
+        # Get default sender addresses if available
+        sender_city_ref = ""
+        sender_address_ref = ""
+        try:
+            payload_addr = {
+                "apiKey": target_key,
+                "modelName": "Counterparty",
+                "calledMethod": "getCounterpartyAddresses",
+                "methodProperties": {"Ref": cp_ref, "CounterpartyProperty": "Sender"},
+            }
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                res_addr_http = await client.post(self.api_url, json=payload_addr)
+                res_addr = res_addr_http.json()
+            addrs = res_addr.get("data", [])
+            if addrs:
+                sender_city_ref = addrs[0].get("CityRef", "")
+                sender_address_ref = addrs[0].get("Ref", "")
+        except Exception:
+            pass
+
+        return {
+            "sender_counterparty_ref": cp_ref,
+            "sender_contact_ref": contact_ref,
+            "sender_name": sender_name,
+            "sender_phone": phone,
+            "sender_city_ref": sender_city_ref,
+            "sender_address_ref": sender_address_ref,
+        }
+
     async def search_city(self, city_name: str) -> List[CityInfo]:
         """Search for a city by name."""
         res = await self._post(
