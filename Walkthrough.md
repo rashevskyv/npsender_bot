@@ -1,5 +1,10 @@
 # Walkthrough (Журнал змін)
 
+## [v0.18.2] - 2026-08-08
+- **Виправлення назви метода API Нової Пошти (`getDocumentList`)**:
+  - Метод `getInternetDocumentList` не існує в API Нової Пошти. Виправлено на коректну назву `getDocumentList` у `src/nova_poshta/client.py`.
+- **Тестування**: усі 24 модульні тести виконано успішно (`24 passed`).
+
 ## [v0.18.1] - 2026-08-08
 - **Виправлення імпорту `Optional` у `src/bot/keyboards.py`**:
   - Усунуто помилку `NameError: name 'Optional' is not defined` при імпорті `keyboards.py` в Linux/Systemd середовищах.

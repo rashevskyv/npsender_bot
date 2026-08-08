@@ -553,14 +553,14 @@ class NovaPoshtaClient:
     async def get_internet_document_list(
         self, days_back: int = 30
     ) -> List[WaybillItemInfo]:
-        """Fetch active un-shipped waybill drafts directly from Nova Poshta API (InternetDocument/getInternetDocumentList)."""
+        """Fetch active un-shipped waybill drafts directly from Nova Poshta API (InternetDocument/getDocumentList)."""
         dt_from = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime("%d.%m.%Y")
         dt_to = (datetime.datetime.now() + datetime.timedelta(days=1)).strftime("%d.%m.%Y")
 
         try:
             res = await self._post(
                 model_name="InternetDocument",
-                called_method="getInternetDocumentList",
+                called_method="getDocumentList",
                 method_properties={
                     "DateTimeFrom": dt_from,
                     "DateTimeTo": dt_to,
@@ -568,10 +568,13 @@ class NovaPoshtaClient:
                 },
             )
         except Exception as e:
-            logger.error(f"Error fetching InternetDocumentList from Nova Poshta: {e}")
+            logger.error(f"Error fetching document list from Nova Poshta: {e}")
             return []
 
         data = res.get("data", [])
+        if not data:
+            return []
+
         items = []
         for doc in data:
             doc_num = str(doc.get("IntDocNumber", doc.get("Number", "")))
