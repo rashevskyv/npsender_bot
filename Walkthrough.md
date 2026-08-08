@@ -1,5 +1,12 @@
 # Walkthrough (Журнал змін)
 
+## [v0.16.1] - 2026-08-08
+- **Виправлення помилки `AttributeError: 'Settings' object has no attribute 'sender_name'`**:
+  - Додано поле `sender_name: str = Field("", alias="SENDER_NAME")` у модель конфігурацій `Settings` (`src/config.py`).
+  - Оновлено `UserSettingsManager.get_effective_settings` (`src/storage.py`): додано коректне перенесення `sender_name` у об'єкт `Settings` користувача.
+  - У `src/bot/handlers.py` додано санітизацію тексту помилок перед надсиланням у Telegram (`clean_err = str(e).replace("*", "")...`), що запобігає падінню Telegram-парсерів (`TelegramBadRequest: can't parse entities`).
+- **Тестування**: усі 24 модульні тести виконано успішно (`24 passed`).
+
 ## [v0.16.0] - 2026-08-08
 - **Повна ізоляція AI-провайдера для кожного користувача Telegram**:
   - У `UserSettingsManager` (`src/storage.py`) скасовано фолбек на глобальні AI ключі з `.env` (`AI_API_KEY`, `AI_BASE_URL`).

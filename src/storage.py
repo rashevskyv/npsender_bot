@@ -208,6 +208,7 @@ class UserSettingsManager:
             effective_dict["sender_city_ref"] = user_custom.sender_city_ref or ""
             effective_dict["sender_address_ref"] = user_custom.sender_address_ref or ""
             effective_dict["sender_phone"] = user_custom.sender_phone or ""
+            effective_dict["sender_name"] = user_custom.sender_name or ""
         else:
             # User has not provided their API key: blank out user credentials
             effective_dict["nova_poshta_api_key"] = ""
@@ -216,6 +217,7 @@ class UserSettingsManager:
             effective_dict["sender_city_ref"] = ""
             effective_dict["sender_address_ref"] = ""
             effective_dict["sender_phone"] = ""
+            effective_dict["sender_name"] = ""
 
         if user_custom.ai_api_key and user_custom.ai_api_key.strip():
             effective_dict["ai_api_key"] = user_custom.ai_api_key

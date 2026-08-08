@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     sender_contact_ref: str = Field("", alias="SENDER_CONTACT_REF")
     sender_address_ref: str = Field("", alias="SENDER_ADDRESS_REF")
     sender_phone: str = Field("", alias="SENDER_PHONE")
+    sender_name: str = Field("", alias="SENDER_NAME")
 
     # Defaults for Express Waybill
     default_payer_type: Literal["Recipient", "Sender", "ThirdPerson"] = Field(
