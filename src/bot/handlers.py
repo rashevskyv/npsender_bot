@@ -61,7 +61,26 @@ def _parse_draft_date(date_str: str) -> Optional[datetime.datetime]:
         try:
             return datetime.datetime.strptime(date_str.split(".")[0], "%Y-%m-%d %H:%M:%S")
         except Exception:
+            try:
+                # Handle DD.MM.YYYY format
+                parts = date_str.split(".")
+                if len(parts) == 3:
+                    return datetime.datetime(int(parts[2]), int(parts[1]), int(parts[0]))
+            except Exception:
+                pass
             return None
+
+
+def _is_recent_scansheet(date_str: str, max_days: int = 2) -> bool:
+    """Check if scansheet creation date is within max_days (inclusive)."""
+    if not date_str:
+        return True
+    d_obj = _parse_draft_date(date_str)
+    if not d_obj:
+        return True
+    now = datetime.datetime.now()
+    diff_days = (now.date() - d_obj.date()).days
+    return diff_days <= max_days
 
 
 def filter_user_drafts(
@@ -266,6 +285,32 @@ def register_handlers(
             )
             return
 
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+        if eff_settings.nova_poshta_api_key:
+            user_np_client = NovaPoshtaClient(eff_settings)
+            doc_numbers = [d.int_doc_number for d in drafts if d.int_doc_number]
+            try:
+                statuses = await user_np_client.get_documents_status(doc_numbers)
+                sent_ids = [
+                    doc_num for doc_num, info in statuses.items()
+                    if info.get("is_shipped")
+                ]
+                if sent_ids:
+                    storage_manager.purge_sent_drafts(user_id, sent_ids)
+                    drafts = storage_manager.get_user_drafts(user_id)
+            except Exception as e:
+                logger.error(f"Error checking draft statuses for user {user_id}: {e}")
+
+        if not drafts:
+            await message.answer(
+                "📝 *Активних чернеток ТТН (невідправлених) не знайдено.*\n"
+                "Усі ваші створені накладні вже відправлені або знаходяться в дорозі. "
+                "Ви можете переглянути їх у розділі 📦 *Активні посилки*!",
+                parse_mode="Markdown",
+                reply_markup=get_main_reply_keyboard(),
+            )
+            return
+
         await message.answer(
             f"📄 *Ваші збережені чернетки ТТН ({len(drafts)}):*", parse_mode="Markdown"
         )
@@ -340,23 +385,70 @@ def register_handlers(
     @router.message(Command("registers"))
     @router.message(F.text == "📋 Реєстри (ScanSheet)")
     async def cmd_registers(message: Message):
-        """Show list of created registers (ScanSheets)."""
+        """Show list of active created registers (ScanSheets) within last 2 days."""
         clear_user_active_session(message.from_user.id)
         user_id = message.from_user.id
         eff_settings = storage_manager.get_effective_settings(user_id, settings)
         user_np_client = NovaPoshtaClient(eff_settings)
 
         status_msg = await message.answer(
-            "🔍 *Отримання ваших реєстрів з Нової Пошти...*", parse_mode="Markdown"
+            "🔍 *Отримання ваших активних реєстрів з Нової Пошти...*", parse_mode="Markdown"
         )
         try:
-            api_sheets = await user_np_client.get_scan_sheets()
-            saved_sheets = storage_manager.get_user_scansheets(user_id)
+            raw_api_sheets = await user_np_client.get_scan_sheets(days_back=2)
+            raw_saved_sheets = storage_manager.get_user_scansheets(user_id)
 
-            if not api_sheets and not saved_sheets:
+            # Purge locally saved sheets older than 2 days
+            old_saved_refs = [
+                s.ref for s in raw_saved_sheets
+                if not _is_recent_scansheet(s.date_created, max_days=2)
+            ]
+            if old_saved_refs:
+                storage_manager.purge_old_or_sent_scansheets(user_id, old_saved_refs)
+                raw_saved_sheets = storage_manager.get_user_scansheets(user_id)
+
+            # Filter API sheets by recent date & non-printed status
+            recent_api_sheets = [
+                s for s in raw_api_sheets
+                if not s.is_printed and _is_recent_scansheet(s.date_created, max_days=2) and s.count_of_documents > 0
+            ]
+
+            # Collect document numbers from saved sheets to check if they are all shipped
+            all_doc_numbers = []
+            for sheet in raw_saved_sheets:
+                if sheet.document_numbers:
+                    all_doc_numbers.extend(sheet.document_numbers)
+
+            shipped_doc_set = set()
+            if all_doc_numbers and eff_settings.nova_poshta_api_key:
+                try:
+                    doc_statuses = await user_np_client.get_documents_status(all_doc_numbers)
+                    for d_num, s_info in doc_statuses.items():
+                        if s_info.get("is_shipped"):
+                            shipped_doc_set.add(d_num)
+                except Exception as e:
+                    logger.error(f"Error checking TTN statuses for registers: {e}")
+
+            # Filter saved sheets: purge sheets where all TTNs are shipped
+            recent_saved_sheets = []
+            sent_saved_refs = []
+            for sheet in raw_saved_sheets:
+                if not _is_recent_scansheet(sheet.date_created, max_days=2):
+                    sent_saved_refs.append(sheet.ref)
+                    continue
+                if sheet.document_numbers and all(d_num in shipped_doc_set for d_num in sheet.document_numbers):
+                    sent_saved_refs.append(sheet.ref)
+                    continue
+                recent_saved_sheets.append(sheet)
+
+            if sent_saved_refs:
+                storage_manager.purge_old_or_sent_scansheets(user_id, sent_saved_refs)
+
+            if not recent_api_sheets and not recent_saved_sheets:
                 await status_msg.edit_text(
-                    "📋 *У вас поки немає створених реєстрів (ScanSheet).* \n\n"
-                    "💡 *Ви можете попросити мене створити реєстр, наприклад:* \n"
+                    "📋 *Активних невідправлених реєстрів (ScanSheet) за останні 2 дні не знайдено.*\n\n"
+                    "Усі ваші створені реєстри вже відправлені або застаріли.\n\n"
+                    "💡 *Ви можете попросити мене створити новий реєстр, наприклад:* \n"
                     "• *'Створи реєстр з усіх накладних за сьогодні'*\n"
                     "• *'Створи реєстр з накладних з описом сувенір'*",
                     parse_mode="Markdown",
@@ -364,11 +456,11 @@ def register_handlers(
                 return
 
             await status_msg.delete()
-            await message.answer("📋 *Ваші створені реєстри (ScanSheet):*", parse_mode="Markdown")
+            await message.answer("📋 *Ваші активні реєстри (ScanSheet) за 2 дні:*", parse_mode="Markdown")
 
-            all_refs = set()
-            for sheet in saved_sheets:
-                all_refs.add(sheet.ref)
+            displayed_refs = set()
+            for sheet in recent_saved_sheets:
+                displayed_refs.add(sheet.ref)
                 card = (
                     f"📋 *Реєстр №* `{sheet.number}`\n"
                     f"📅 *Дата:* {sheet.date_created}\n"
@@ -383,8 +475,8 @@ def register_handlers(
                     reply_markup=get_register_keyboard(ref=sheet.ref),
                 )
 
-            for a_sheet in api_sheets:
-                if a_sheet.ref not in all_refs:
+            for a_sheet in recent_api_sheets:
+                if a_sheet.ref not in displayed_refs:
                     card = (
                         f"📋 *Реєстр №* `{a_sheet.number}`\n"
                         f"📅 *Дата:* {a_sheet.date_created}\n"

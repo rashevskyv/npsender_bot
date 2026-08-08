@@ -72,3 +72,48 @@ def test_drafts_management(tmp_path):
     success = manager.delete_user_draft(999, "ref-123-abc")
     assert success is True
     assert len(manager.get_user_drafts(999)) == 0
+
+
+def test_purge_sent_drafts(tmp_path):
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    drafts_file = os.path.join(tmp_path, "user_drafts.json")
+    manager = UserSettingsManager(filepath=storage_file, drafts_filepath=drafts_file)
+
+    d1 = SavedDraft(
+        ref="ref-1",
+        int_doc_number="204501",
+        recipient_name="Іван",
+        recipient_phone="380971111111",
+        city_description="Київ",
+        warehouse_description="Відділення 1",
+        payer_type="Recipient",
+        cargo_description="Посилка 1",
+        declared_value=500.0,
+        cost=80.0,
+        created_at="08.08.2026",
+    )
+    d2 = SavedDraft(
+        ref="ref-2",
+        int_doc_number="204502",
+        recipient_name="Петро",
+        recipient_phone="380972222222",
+        city_description="Одеса",
+        warehouse_description="Відділення 2",
+        payer_type="Sender",
+        cargo_description="Посилка 2",
+        declared_value=600.0,
+        cost=90.0,
+        created_at="08.08.2026",
+    )
+
+    manager.add_user_draft(111, d1)
+    manager.add_user_draft(111, d2)
+    assert len(manager.get_user_drafts(111)) == 2
+
+    # Purge d1 by int_doc_number
+    purged = manager.purge_sent_drafts(111, ["204501"])
+    assert purged == 1
+    remaining = manager.get_user_drafts(111)
+    assert len(remaining) == 1
+    assert remaining[0].ref == "ref-2"
+

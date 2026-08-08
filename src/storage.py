@@ -232,6 +232,23 @@ class UserSettingsManager:
                 return True
         return False
 
+    def purge_sent_drafts(self, user_id: int, sent_identifiers: List[str]) -> int:
+        """Purge drafts matching any sent ref or document number for user ID."""
+        uid_str = str(user_id)
+        if uid_str not in self.drafts or not sent_identifiers:
+            return 0
+        
+        sent_set = set(sent_identifiers)
+        initial_len = len(self.drafts[uid_str])
+        self.drafts[uid_str] = [
+            d for d in self.drafts[uid_str]
+            if d.ref not in sent_set and d.int_doc_number not in sent_set
+        ]
+        removed_count = initial_len - len(self.drafts[uid_str])
+        if removed_count > 0:
+            self.save_drafts()
+        return removed_count
+
     def add_user_scansheet(self, user_id: int, scansheet: SavedScanSheet):
         """Add a created ScanSheet register to user's storage."""
         uid_str = str(user_id)
@@ -256,3 +273,20 @@ class UserSettingsManager:
                 self.save_scansheets()
                 return True
         return False
+
+    def purge_old_or_sent_scansheets(self, user_id: int, refs: List[str]) -> int:
+        """Purge ScanSheets matching any ref in refs list for user ID."""
+        uid_str = str(user_id)
+        if uid_str not in self.scansheets or not refs:
+            return 0
+        
+        purge_set = set(refs)
+        initial_len = len(self.scansheets[uid_str])
+        self.scansheets[uid_str] = [
+            s for s in self.scansheets[uid_str]
+            if s.ref not in purge_set
+        ]
+        removed_count = initial_len - len(self.scansheets[uid_str])
+        if removed_count > 0:
+            self.save_scansheets()
+        return removed_count

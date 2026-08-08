@@ -51,3 +51,36 @@ def test_waybill_item_info_model():
     assert item.int_doc_number == "20451506103956"
     assert item.cost == 100.0
     assert item.city_recipient == "Київ"
+
+
+@pytest.mark.asyncio
+async def test_get_documents_status_parsing():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="dummy"))
+
+    async def mock_post(model_name, called_method, method_properties):
+        return {
+            "success": True,
+            "data": [
+                {
+                    "Number": "204501",
+                    "StatusCode": "1",
+                    "Status": "Нова пошта очікує посилку від відправника",
+                },
+                {
+                    "Number": "204502",
+                    "StatusCode": "4",
+                    "Status": "Відправлення у місті Київ",
+                },
+            ],
+        }
+
+    client._post = mock_post
+    res = await client.get_documents_status(["204501", "204502"])
+
+    assert len(res) == 2
+    assert res["204501"]["is_shipped"] is False
+    assert res["204502"]["is_shipped"] is True
+

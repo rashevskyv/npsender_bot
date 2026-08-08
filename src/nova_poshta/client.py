@@ -273,6 +273,53 @@ class NovaPoshtaClient:
             )
         return items
 
+    async def get_documents_status(
+        self, document_numbers: List[str], phone: str = ""
+    ) -> Dict[str, Dict[str, Any]]:
+        """Fetch tracking status for a list of TTN document numbers.
+        
+        Returns a dict mapping document_number -> {'status_code': str, 'status_name': str, 'is_shipped': bool}
+        """
+        if not document_numbers:
+            return {}
+
+        docs_payload = [
+            {"DocumentNumber": doc_num, "Phone": phone}
+            for doc_num in document_numbers
+        ]
+
+        try:
+            res = await self._post(
+                model_name="TrackingDocument",
+                called_method="getStatusDocuments",
+                method_properties={"Documents": docs_payload},
+            )
+        except Exception as e:
+            logger.error(f"Error fetching document statuses from Nova Poshta: {e}")
+            return {}
+
+        results = {}
+        for item in res.get("data", []):
+            doc_num = str(item.get("Number", item.get("DocumentNumber", "")))
+            status_code = str(item.get("StatusCode", ""))
+            status_name = str(item.get("Status", item.get("StateName", "")))
+
+            # Status code '1' means "Нова пошта очікує посилку від відправника" (Draft/Un-shipped).
+            # Status codes '2' (Deleted), '3' (Not found), '4'+ (In transit / Shipped / Delivered / Arrived) indicate parcel is NOT a draft.
+            is_shipped = False
+            if status_code and status_code != "1":
+                is_shipped = True
+            elif status_name and "очікує посилку" not in status_name.lower() and status_name.strip() != "":
+                is_shipped = True
+
+            results[doc_num] = {
+                "status_code": status_code,
+                "status_name": status_name,
+                "is_shipped": is_shipped,
+            }
+
+        return results
+
     async def fetch_sender_profile(self, api_key: str) -> Dict[str, str]:
         """Fetch sender profile credentials for a custom API key."""
         payload = {
@@ -435,8 +482,8 @@ class NovaPoshtaClient:
             CountOfDocuments=int(info.get("CountOfDocuments", len(document_refs))),
         )
 
-    async def get_scan_sheets(self, days_back: int = 30) -> List[ScanSheetInfo]:
-        """Fetch list of user's active registers (ScanSheets)."""
+    async def get_scan_sheets(self, days_back: int = 2) -> List[ScanSheetInfo]:
+        """Fetch list of user's active registers (ScanSheets). Defaults to past 2 days."""
         today = datetime.date.today()
         from_date = (today - datetime.timedelta(days=days_back)).strftime("%d.%m.%Y")
         to_date = today.strftime("%d.%m.%Y")
@@ -465,12 +512,16 @@ class NovaPoshtaClient:
             except (ValueError, TypeError):
                 cnt = 0
 
+            printed_val = str(item.get("Printed", item.get("IsPrinted", "0"))).strip()
+            is_printed = printed_val in ("1", "true", "True")
+
             sheets.append(
                 ScanSheetInfo(
                     Ref=str(item.get("Ref", "")),
                     Number=str(item.get("Number", "")),
                     DateTime=str(item.get("DateTime", "")),
                     CountOfDocuments=cnt,
+                    is_printed=is_printed,
                 )
             )
         return sheets

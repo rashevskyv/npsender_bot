@@ -62,3 +62,5 @@ class ScanSheetInfo(BaseModel):
     number: str = Field(..., alias="Number")
     date_created: str = Field(default="", alias="DateTime")
     count_of_documents: int = Field(default=0, alias="CountOfDocuments")
+    is_printed: bool = Field(default=False)
+

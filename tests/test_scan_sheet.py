@@ -99,3 +99,57 @@ def test_filter_user_drafts():
     cargo_filtered = filter_user_drafts(all_drafts, cargo_query="сувенір")
     assert len(cargo_filtered) == 2
     assert {d.ref for d in cargo_filtered} == {"ref1", "ref3"}
+
+
+def test_is_recent_scansheet():
+    from src.bot.handlers import _is_recent_scansheet
+    now = datetime.datetime.now()
+
+    today_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    yesterday_str = (now - datetime.timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    three_days_ago_str = (now - datetime.timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+
+    assert _is_recent_scansheet(today_str, max_days=2) is True
+    assert _is_recent_scansheet(yesterday_str, max_days=2) is True
+    assert _is_recent_scansheet(three_days_ago_str, max_days=2) is False
+
+
+def test_purge_old_or_sent_scansheets(tmp_path):
+    import os
+    from src.storage import UserSettingsManager, SavedScanSheet
+
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    drafts_file = os.path.join(tmp_path, "user_drafts.json")
+    scansheets_file = os.path.join(tmp_path, "user_scansheets.json")
+    manager = UserSettingsManager(
+        filepath=storage_file,
+        drafts_filepath=drafts_file,
+        scansheets_filepath=scansheets_file,
+    )
+
+    s1 = SavedScanSheet(
+        ref="sheet-ref-1",
+        number="20450111",
+        date_created="2026-08-08 10:00:00",
+        count_of_documents=2,
+        document_numbers=["204501", "204502"],
+    )
+    s2 = SavedScanSheet(
+        ref="sheet-ref-2",
+        number="20450222",
+        date_created="2026-08-05 10:00:00",
+        count_of_documents=1,
+        document_numbers=["204503"],
+    )
+
+    manager.add_user_scansheet(555, s1)
+    manager.add_user_scansheet(555, s2)
+    assert len(manager.get_user_scansheets(555)) == 2
+
+    # Purge s2 by ref
+    purged = manager.purge_old_or_sent_scansheets(555, ["sheet-ref-2"])
+    assert purged == 1
+    remaining = manager.get_user_scansheets(555)
+    assert len(remaining) == 1
+    assert remaining[0].ref == "sheet-ref-1"
+
