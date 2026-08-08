@@ -1,5 +1,4 @@
-"""Inline and Reply keyboards for Telegram bot (Ukrainian UI)."""
-
+from typing import List, Dict, Any, Optional
 from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,

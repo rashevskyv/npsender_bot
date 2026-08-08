@@ -1,5 +1,11 @@
 # Walkthrough (Журнал змін)
 
+## [v0.18.1] - 2026-08-08
+- **Виправлення імпорту `Optional` у `src/bot/keyboards.py`**:
+  - Усунуто помилку `NameError: name 'Optional' is not defined` при імпорті `keyboards.py` в Linux/Systemd середовищах.
+  - Явно додано `from typing import Optional, List, Dict, Any` у `src/bot/keyboards.py`.
+- **Тестування**: перевірено імпорт `python -c "import src.bot.main"` та виконання pytest (`24 passed`).
+
 ## [v0.18.0] - 2026-08-08
 - **Пряме підтягування невідправлених чернеток з сервера Нової Пошти**:
   - У `NovaPoshtaClient` (`src/nova_poshta/client.py`) додано метод `get_internet_document_list()`, що звертається до ендпоінта `InternetDocument/getInternetDocumentList`.
