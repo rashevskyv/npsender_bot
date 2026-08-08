@@ -259,10 +259,31 @@ def register_handlers(
             f"📦 *Відділення відправника:* `{u_settings.sender_warehouse_name or 'Не вказано'}`\n\n"
             "💡 *Команди для керування налаштуваннями:*\n"
             "• `/set_np_key ВАШ_КЛЮЧ` — прив'язати API-ключ\n"
+            "• `/set_name ПІБ` — змінити ПІБ відправника\n"
             "• `/set_city НазваМіста` — обрати місто відправки\n"
             "• `/set_warehouse Номер` — обрати відділення відправки"
         )
         await message.answer(card, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+
+    @router.message(Command("set_name"))
+    @router.message(Command("set_sender_name"))
+    async def cmd_set_sender_name(message: Message):
+        """Set user's sender Full Name (ПІБ)."""
+        clear_user_active_session(message.from_user.id)
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("⚠️ *Використання:* `/set_name Прізвище Ім'я По-батькові`", parse_mode="Markdown")
+            return
+
+        new_name = parts[1].strip()
+        storage_manager.update_user_settings(
+            message.from_user.id,
+            sender_name=new_name,
+        )
+        await message.answer(
+            f"✅ *ПІБ відправника успішно оновлено:* `{new_name}`",
+            parse_mode="Markdown",
+        )
 
     @router.message(Command("set_city"))
     async def cmd_set_city(message: Message):

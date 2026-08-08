@@ -204,11 +204,65 @@ async def test_waybills_caching_behavior():
     assert api_call_count == 1
     assert len(out1) == 1
 
-    # Third call: after invalidating cache, triggers API call again
     client.invalidate_waybills_cache()
     inc2 = await client.get_incoming_waybills(user_phone="380994445566")
     assert api_call_count == 2
     assert len(inc2) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_sender_profile_private_person_name_resolution():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="test_key"))
+
+    async def mock_post(model_name, called_method, method_properties):
+        if called_method == "getCounterparties":
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "Ref": "cp-ref-111",
+                        "Description": "Приватна особа",
+                        "CounterpartyType": "PrivatePerson",
+                    }
+                ],
+            }
+        elif called_method == "getCounterpartyContactPersons":
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "Ref": "contact-ref-222",
+                        "Phones": "380995360818",
+                        "LastName": "Юрченко",
+                        "FirstName": "Роман",
+                        "MiddleName": "Сергійович",
+                    }
+                ],
+            }
+        elif called_method == "getCounterpartyAddresses":
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "Ref": "addr-ref-333",
+                        "CityRef": "city-ref-444",
+                    }
+                ],
+            }
+        return {"success": True, "data": []}
+
+    client._post = mock_post
+
+    profile = await client.fetch_sender_profile("test_key")
+
+    assert profile["sender_name"] == "Юрченко Роман Сергійович"
+    assert profile["sender_phone"] == "380995360818"
+    assert profile["sender_counterparty_ref"] == "cp-ref-111"
+    assert profile["sender_contact_ref"] == "contact-ref-222"
+
 
 
 
