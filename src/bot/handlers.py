@@ -1792,12 +1792,20 @@ def register_handlers(
                     )
                 else:
                     await callback.message.edit_text(
-                        "⚠️ *Не вдалося видалити ТТН з Нової Пошти (можливо, її вже скасовано або оброблено).*",
+                        "⚠️ *Не вдалося видалити ТТН з Нової Пошти.* \n"
+                        "Якщо ця накладна додана до реєстру (ScanSheet), спочатку розформуйте реєстр.",
                         parse_mode="Markdown",
                     )
             except Exception as e:
                 logger.error(f"Error deleting waybill: {e}", exc_info=True)
-                await callback.answer(f"Помилка видалення: {str(e)}", show_alert=True)
+                err_str = str(e)
+                user_msg = (
+                    "⚠️ *Не вдалося видалити ТТН.* \n"
+                    "Якщо ця накладна включена до реєстру (ScanSheet), спочатку розформуйте реєстр нижче."
+                    if "InternetDocument/delete" in err_str or "ScanSheet" in err_str
+                    else f"❌ *Помилка видалення ТТН:* {err_str}"
+                )
+                await callback.answer(user_msg, show_alert=True)
 
     @router.callback_query(CitySelectCallback.filter())
     async def process_city_select_callback(

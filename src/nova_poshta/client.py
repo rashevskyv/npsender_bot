@@ -661,10 +661,11 @@ class NovaPoshtaClient:
 
     async def delete_waybill(self, document_ref: str) -> bool:
         """Delete an Express Waybill / Draft by document Ref GUID."""
+        doc_refs = [document_ref] if isinstance(document_ref, str) else list(document_ref)
         res = await self._post(
             model_name="InternetDocument",
             called_method="delete",
-            method_properties={"DocumentRefs": document_ref},
+            method_properties={"DocumentRefs": doc_refs},
         )
         return bool(res.get("success", False))
 

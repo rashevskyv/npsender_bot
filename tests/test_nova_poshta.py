@@ -312,6 +312,30 @@ async def test_create_and_delete_scan_sheet_methods():
     )
 
 
+@pytest.mark.asyncio
+async def test_delete_waybill_method():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="test_key"))
+
+    recorded_calls = []
+
+    async def mock_post(model_name, called_method, method_properties):
+        recorded_calls.append((model_name, called_method, method_properties))
+        return {"success": True, "data": []}
+
+    client._post = mock_post
+
+    res = await client.delete_waybill("doc-guid-999")
+    assert res is True
+    assert recorded_calls[0] == (
+        "InternetDocument",
+        "delete",
+        {"DocumentRefs": ["doc-guid-999"]},
+    )
+
+
 
 
 
