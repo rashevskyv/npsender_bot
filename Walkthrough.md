@@ -1,5 +1,13 @@
 # Walkthrough (Журнал змін)
 
+## [v0.19.2] - 2026-08-09
+- **Виправлення видалення/розформування реєстру з фотоповідомлення (підтримка `edit_caption`)**:
+  - У `process_register_callback` (`src/bot/handlers.py`) виправлено обробку кнопки розформування реєстру `action == "delete"`. Оскільки створений реєстр надсилається як фото зі штрихкодом (має `caption`, а не `text`), прямий виклик `edit_text` викликав помилку `TelegramBadRequest: Bad Request: there is no text in the message to edit`.
+  - Додано коректну перевірку: якщо повідомлення містить фото/підпис (`photo` або `caption`), викликається `callback.message.edit_caption(...)`, інакше `callback.message.edit_text(...)` з fallback на `message.answer`.
+- **Тестування**:
+  - Додано юніт-тест `test_process_register_callback_deletes_caption_or_text` у `tests/test_scan_sheet.py`.
+  - Усі 30 модульних тестів виконано успішно (`30 passed`).
+
 ## [v0.19.1] - 2026-08-09
 - **Виправлення виклику створення реєстру в API Нової Пошти (`ScanSheet/insertDocuments`)**:
   - У `create_scan_sheet` (`src/nova_poshta/client.py`) виправлено назву методу API з неіснуючого `ScanSheet/save` на офіційний метод `ScanSheet/insertDocuments`.

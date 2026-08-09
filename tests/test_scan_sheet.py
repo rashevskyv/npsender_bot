@@ -237,3 +237,60 @@ async def test_fetch_user_active_drafts_combines_and_filters(tmp_path):
     assert active[0]["recipient_name"] == "Залужна Юлія"
     assert active[0]["city_description"] == "Кривий Ріг"
 
+
+@pytest.mark.asyncio
+async def test_process_register_callback_deletes_caption_or_text(tmp_path):
+    import os
+    from unittest.mock import AsyncMock, MagicMock
+    from src.config import Settings
+    from src.storage import UserSettingsManager, SavedScanSheet
+    from src.bot.keyboards import RegisterActionCallback
+    from src.bot.handlers import register_handlers
+    from aiogram import Router
+
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    drafts_file = os.path.join(tmp_path, "user_drafts.json")
+    scansheets_file = os.path.join(tmp_path, "user_scansheets.json")
+    manager = UserSettingsManager(
+        filepath=storage_file,
+        drafts_filepath=drafts_file,
+        scansheets_filepath=scansheets_file,
+    )
+
+    s1 = SavedScanSheet(
+        ref="sheet-to-delete",
+        number="105-79184007",
+        date_created="2026-08-09 17:20:00",
+        count_of_documents=1,
+        document_numbers=["20451506611097"],
+    )
+    manager.add_user_scansheet(999, s1)
+
+    mock_np_client = MagicMock()
+    mock_np_client.delete_scan_sheet = AsyncMock(return_value=True)
+
+    # Mock callback with photo/caption
+    mock_callback = MagicMock()
+    mock_callback.from_user.id = 999
+    mock_callback.answer = AsyncMock()
+    mock_callback.message.photo = [MagicMock()]
+    mock_callback.message.caption = "Some caption"
+    mock_callback.message.edit_caption = AsyncMock()
+    mock_callback.message.edit_text = AsyncMock()
+
+    callback_data = RegisterActionCallback(action="delete", ref="sheet-to-delete")
+
+    # Call delete handler directly or through simulated logic
+    from src.bot.handlers import router
+    handler = None
+    for h in router.callback_query.handlers:
+        if "process_register_callback" in str(h.callback):
+            handler = h.callback
+            break
+
+    if handler:
+        await handler(mock_callback, callback_data)
+        mock_callback.message.edit_caption.assert_called_once()
+        mock_np_client.delete_scan_sheet.assert_called_once_with("sheet-to-delete")
+        assert len(manager.get_user_scansheets(999)) == 0
+

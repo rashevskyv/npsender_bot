@@ -1898,17 +1898,37 @@ def register_handlers(
             try:
                 await user_np_client.delete_scan_sheet(ref)
                 storage_manager.delete_user_scansheet(user_id, ref)
-                await callback.message.edit_text(
-                    "🗑 *Реєстр (ScanSheet) успішно видалено / розформовано!*",
-                    parse_mode="Markdown",
-                )
+                deleted_text = "🗑 *Реєстр (ScanSheet) успішно видалено / розформовано!*"
+                if callback.message.photo or callback.message.caption:
+                    await callback.message.edit_caption(
+                        caption=deleted_text,
+                        parse_mode="Markdown",
+                    )
+                else:
+                    await callback.message.edit_text(
+                        deleted_text,
+                        parse_mode="Markdown",
+                    )
             except Exception as e:
                 logger.error(f"Error deleting scan sheet: {e}", exc_info=True)
                 storage_manager.delete_user_scansheet(user_id, ref)
-                await callback.message.edit_text(
-                    "🗑 *Реєстр видалено з локальної бази.*",
-                    parse_mode="Markdown",
-                )
+                local_deleted_text = "🗑 *Реєстр видалено з локальної бази.*"
+                if callback.message.photo or callback.message.caption:
+                    try:
+                        await callback.message.edit_caption(
+                            caption=local_deleted_text,
+                            parse_mode="Markdown",
+                        )
+                    except Exception:
+                        await callback.message.answer(local_deleted_text, parse_mode="Markdown")
+                else:
+                    try:
+                        await callback.message.edit_text(
+                            local_deleted_text,
+                            parse_mode="Markdown",
+                        )
+                    except Exception:
+                        await callback.message.answer(local_deleted_text, parse_mode="Markdown")
 
     @router.callback_query(AddressConfirmCallback.filter())
     async def process_address_confirm_callback(
