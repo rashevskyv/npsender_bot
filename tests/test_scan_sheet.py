@@ -1,6 +1,7 @@
 """Unit tests for ScanSheet Register management, barcode generation, and draft filtering."""
 
 import datetime
+import pytest
 from src.nova_poshta.models import ScanSheetInfo
 from src.storage import SavedDraft
 from src.utils.barcode_gen import generate_code128_barcode
@@ -158,4 +159,81 @@ def test_purge_old_or_sent_scansheets(tmp_path):
     remaining = manager.get_user_scansheets(555)
     assert len(remaining) == 1
     assert remaining[0].ref == "sheet-ref-1"
+
+
+@pytest.mark.asyncio
+async def test_fetch_user_active_drafts_combines_and_filters(tmp_path):
+    import os
+    import pytest
+    from unittest.mock import AsyncMock, MagicMock
+    from src.storage import UserSettingsManager, SavedDraft
+    from src.nova_poshta.models import WaybillItemInfo
+    from src.bot.handlers import fetch_user_active_drafts
+
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    drafts_file = os.path.join(tmp_path, "user_drafts.json")
+    scansheets_file = os.path.join(tmp_path, "user_scansheets.json")
+    manager = UserSettingsManager(
+        filepath=storage_file,
+        drafts_filepath=drafts_file,
+        scansheets_filepath=scansheets_file,
+    )
+
+    # Local draft
+    local_draft = SavedDraft(
+        ref="local-ref-1",
+        int_doc_number="20451506611097",
+        recipient_name="Залужна Юлія",
+        recipient_phone="380675641704",
+        city_description="Кривий Ріг",
+        warehouse_description="Відділення №42",
+        payer_type="Recipient",
+        cargo_description="Посилка",
+        declared_value=15000.0,
+        cost=90.0,
+        created_at="2026-08-08 16:51:27",
+    )
+    manager.add_user_draft(12345, local_draft)
+
+    # Mock NP client
+    mock_np_client = MagicMock()
+    # NP server returns 1 live draft (same number) + 1 another live draft (already shipped)
+    mock_np_client.get_internet_document_list = AsyncMock(return_value=[
+        WaybillItemInfo(
+            int_doc_number="20451506611097",
+            ref="np-ref-1",
+            state_name="Чернетка",
+            recipient_name="Залужна Юлія",
+            recipient_phone="380675641704",
+            city_recipient="Кривий Ріг",
+            address_recipient="Відділення №42",
+            cost=90.0,
+            declared_value=15000.0,
+            cod_amount=15000.0,
+            cod_payment_type="card",
+            payer_type="Recipient",
+            description="Посилка",
+        ),
+        WaybillItemInfo(
+            int_doc_number="20451506619999",
+            ref="np-ref-shipped",
+            state_name="Прямує до міста",
+            recipient_name="Іван Іванов",
+            city_recipient="Київ",
+            address_recipient="Відділення №1",
+            cost=100.0,
+            description="Вже їде",
+        )
+    ])
+
+    mock_np_client.get_documents_status = AsyncMock(return_value={
+        "20451506611097": {"is_shipped": False, "status": "Чернетка"},
+        "20451506619999": {"is_shipped": True, "status": "У дорозі"},
+    })
+
+    active = await fetch_user_active_drafts(12345, mock_np_client, manager)
+    assert len(active) == 1
+    assert active[0]["int_doc_number"] == "20451506611097"
+    assert active[0]["recipient_name"] == "Залужна Юлія"
+    assert active[0]["city_description"] == "Кривий Ріг"
 

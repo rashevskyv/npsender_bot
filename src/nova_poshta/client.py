@@ -639,6 +639,7 @@ class NovaPoshtaClient:
             items.append(
                 WaybillItemInfo(
                     int_doc_number=doc_num,
+                    ref=str(doc.get("Ref", doc_num)),
                     state_name=str(doc.get("StateName", doc.get("StateDescription", "Чернетка (Невідправлена)"))),
                     recipient_name=str(rec_name),
                     recipient_phone=str(doc.get("RecipientsPhone", "")),
@@ -741,22 +742,32 @@ class NovaPoshtaClient:
         )
 
     async def create_scan_sheet(self, document_refs: List[str]) -> ScanSheetInfo:
-        """Create a Nova Poshta ScanSheet (Register) from a list of waybill Ref GUIDs."""
+        """Create a Nova Poshta ScanSheet (Register) from a list of waybill Ref GUIDs / numbers."""
         res = await self._post(
             model_name="ScanSheet",
-            called_method="save",
+            called_method="insertDocuments",
             method_properties={"DocumentRefs": document_refs},
         )
         data = res.get("data", [])
         if not data:
-            raise RuntimeError("ScanSheet/save returned empty data array")
+            raise RuntimeError("ScanSheet/insertDocuments returned empty data array")
 
         info = data[0]
+        raw_cnt = (
+            info.get("CountOfDocuments")
+            or len(info.get("Success", []))
+            or len(document_refs)
+        )
+        try:
+            cnt = int(raw_cnt)
+        except (ValueError, TypeError):
+            cnt = len(document_refs)
+
         return ScanSheetInfo(
-            Ref=info.get("Ref", ""),
-            Number=info.get("Number", ""),
-            DateTime=info.get("DateTime", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-            CountOfDocuments=int(info.get("CountOfDocuments", len(document_refs))),
+            Ref=str(info.get("Ref", "")),
+            Number=str(info.get("Number", "")),
+            DateTime=str(info.get("DateTime", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))),
+            CountOfDocuments=cnt,
         )
 
     async def get_scan_sheets(self, days_back: int = 2) -> List[ScanSheetInfo]:
@@ -804,11 +815,11 @@ class NovaPoshtaClient:
         return sheets
 
     async def delete_scan_sheet(self, scan_sheet_ref: str) -> bool:
-        """Delete / unbind a ScanSheet register by Ref GUID."""
+        """Delete / unbind a ScanSheet register by Ref GUID or Number."""
         res = await self._post(
             model_name="ScanSheet",
             called_method="deleteScanSheet",
-            method_properties={"ScanSheetRef": scan_sheet_ref},
+            method_properties={"ScanSheetRefs": [scan_sheet_ref]},
         )
         return res.get("success", False)
 

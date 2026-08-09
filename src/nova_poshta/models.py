@@ -44,6 +44,7 @@ class WaybillItemInfo(BaseModel):
     """Detailed information about an existing express waybill."""
 
     int_doc_number: str
+    ref: Optional[str] = None
     state_name: str
     state_id: Optional[str] = None
     recipient_name: str

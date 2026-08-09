@@ -1,7 +1,37 @@
 """Pydantic schemas for AI entity extraction and conversational intent."""
 
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel, Field, field_validator
+
+
+class AIRegisterFilterResult(BaseModel):
+    """Structured AI output for selecting and matching waybill drafts for register (ScanSheet) creation or filtering."""
+
+    action: str = Field(
+        default="create",
+        description="Action type: 'create' (generate register from selected drafts), 'filter_drafts' (only display matched drafts), 'list_registers' (view existing registers), 'not_found' (no matching drafts)",
+    )
+    selected_doc_numbers: List[str] = Field(
+        default_factory=list,
+        description="List of 14-digit waybill numbers (IntDocNumber) selected from the provided drafts matching the user request",
+    )
+    summary: Optional[str] = Field(
+        default=None,
+        description="Concise description of the selection in Ukrainian (e.g. '1 накладна (Залужна Юлія, Кривий Ріг)' or '3 накладні за вчора')",
+    )
+    explanation: Optional[str] = Field(
+        default=None,
+        description="Brief reasoning of how the matching was performed",
+    )
+
+    @field_validator("selected_doc_numbers", mode="before")
+    @classmethod
+    def clean_doc_numbers(cls, v):
+        if not v:
+            return []
+        if isinstance(v, str):
+            return [v.strip()]
+        return [str(num).strip() for num in v if num]
 
 
 class ParsedRecipientInfo(BaseModel):

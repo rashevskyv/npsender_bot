@@ -264,6 +264,54 @@ async def test_fetch_sender_profile_private_person_name_resolution():
     assert profile["sender_contact_ref"] == "contact-ref-222"
 
 
+@pytest.mark.asyncio
+async def test_create_and_delete_scan_sheet_methods():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="test_key"))
+
+    recorded_calls = []
+
+    async def mock_post(model_name, called_method, method_properties):
+        recorded_calls.append((model_name, called_method, method_properties))
+        if called_method == "insertDocuments":
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "Ref": "sheet-guid-123",
+                        "Number": "105-79184007",
+                        "DateTime": "2026-08-09 16:20:00",
+                        "CountOfDocuments": 2,
+                    }
+                ],
+            }
+        elif called_method == "deleteScanSheet":
+            return {"success": True, "data": []}
+        return {"success": True, "data": []}
+
+    client._post = mock_post
+
+    res = await client.create_scan_sheet(["doc-ref-1", "doc-ref-2"])
+    assert res.ref == "sheet-guid-123"
+    assert res.number == "105-79184007"
+    assert res.count_of_documents == 2
+    assert recorded_calls[0] == (
+        "ScanSheet",
+        "insertDocuments",
+        {"DocumentRefs": ["doc-ref-1", "doc-ref-2"]},
+    )
+
+    del_res = await client.delete_scan_sheet("sheet-guid-123")
+    assert del_res is True
+    assert recorded_calls[1] == (
+        "ScanSheet",
+        "deleteScanSheet",
+        {"ScanSheetRefs": ["sheet-guid-123"]},
+    )
+
+
 
 
 

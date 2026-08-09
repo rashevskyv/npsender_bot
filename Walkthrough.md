@@ -1,6 +1,32 @@
 # Walkthrough (Журнал змін)
 
-## [v0.18.4] - 2026-08-08
+## [v0.19.1] - 2026-08-09
+- **Виправлення виклику створення реєстру в API Нової Пошти (`ScanSheet/insertDocuments`)**:
+  - У `create_scan_sheet` (`src/nova_poshta/client.py`) виправлено назву методу API з неіснуючого `ScanSheet/save` на офіційний метод `ScanSheet/insertDocuments`.
+  - У `delete_scan_sheet` (`src/nova_poshta/client.py`) оновлено параметр з `ScanSheetRef` на `ScanSheetRefs: [scan_sheet_ref]`.
+  - Усунуто помилку API Нової Пошти `Method ScanSheetGeneral_save not found, Validator for method ScanSheetGeneral_save not found`.
+- **Тестування**:
+  - Додано юніт-тест `test_create_and_delete_scan_sheet_methods` у `tests/test_nova_poshta.py`.
+  - Усі 29 модульних тестів виконано успішно (`29 passed`).
+
+## [v0.19.0] - 2026-08-09
+- **Інтелектуальне формування реєстрів (ScanSheet) через AI зі структурованим JSON**:
+  - **AI Schemas (`src/ai/schemas.py`)**: додано Pydantic модель `AIRegisterFilterResult` для структурованої відповіді ШІ (`action`, `selected_doc_numbers`, `summary`, `explanation`).
+  - **AI Extractor (`src/ai/extractor.py`)**: додано метод `filter_drafts_for_register` з системним промптом `REGISTER_FILTER_SYSTEM_PROMPT`. ШІ отримує контекст поточного часу (`current_timestamp`, `day_of_week`) та повний масив невідправлених чернеток користувача у форматі JSON. ШІ підтримує довільні запити:
+    - Вибір конкретних ТТН (наприклад: *"Створи реєстр з накладної 20451506611097"*).
+    - Вибір усіх чернеток (наприклад: *"Створи реєстр з усіх моїх чернеток"*).
+    - Часова фільтрація (наприклад: *"створені вчора"*, *"вчора до 12:00"*, *"за сьогодні"*).
+    - Фільтрація за містом, отримувачем, описом вантажу чи накладеним платежем.
+  - **Єдина синхронізація чернеток (`fetch_user_active_drafts`) у `src/bot/handlers.py`**:
+    - Пакетне отримання чернеток з кабінету Нової Пошти (`get_internet_document_list`) та локального сховища.
+    - Перевірка статусів відправлення через `getStatusDocuments` з автоматичним відсіюванням та очищенням уже відправлених посилок.
+    - `cmd_drafts` та створення реєстрів використовують єдине перевірене джерело чернеток.
+  - **Детальний опис накладних у створеному реєстрі**:
+    - Після успішного створення реєстру (`create_scan_sheet`) бот повертає високоякісний штрих-код Code128 у форматі PNG, номер реєстру, дату, кількість та структурований список кожної доданої ТТН (номер, ПІБ отримувача, місто/відділення, опис посилки, оцінка та накладений платіж).
+- **Тестування**:
+  - Додано тести `test_ai_register_filter_result_model`, `test_filter_drafts_for_register_mocked`, `test_filter_drafts_for_register_fallback` у `tests/test_ai_extractor.py`.
+  - Додано тест `test_fetch_user_active_drafts_combines_and_filters` у `tests/test_scan_sheet.py`.
+  - Усі 28 модульних тестів виконано успішно (`28 passed`).
 - **Точне відображення Оцінки та Накладеного платежу у картці чернетки**:
   - У `get_internet_document_list` (`src/nova_poshta/client.py`) виправлено парсинг:
     - `Cost` / `DeclaredCost` (реальна оціночна вартість, наприклад 15 000 грн) більше не перетирається доставковим тарифом або дефолтним 500 грн.

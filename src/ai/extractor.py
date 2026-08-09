@@ -2,11 +2,12 @@
 
 import json
 import logging
-from typing import Optional
+import datetime
+from typing import Optional, List, Dict, Any
 from openai import AsyncOpenAI
 
 from src.config import Settings
-from src.ai.schemas import ParsedRecipientInfo
+from src.ai.schemas import ParsedRecipientInfo, AIRegisterFilterResult
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ Determine the user's intent:
      • cod_payment_type: "cash" (готівкою у відділенні) or "card" (на картку) if specified
 
 3. REGISTER & WAYBILL FILTERING INTENT (is_register_intent: true):
-   If the user asks to list/filter waybills by date, time, or cargo description, or asks to create a ScanSheet register (e.g. "надай мені всі накладні, які були створені за сьогодні", "створи реєстр з усіх накладних з описом сувенір", "створи реєстр з накладних створених вчора до обіду", "покажи мої реєстри"):
+   If the user asks to list/filter waybills by date, time, or cargo description, or asks to create a ScanSheet register (e.g. "надай мені всі накладні, які були створені за сьогодні", "створи реєстр з усіх накладних з описом сувенір", "створи реєстр з накладних створених вчора до обіду", "покажи мої реєстри", "створи реєстр з накладної 2045..."):
    - Set `is_register_intent`: true
    - Set `register_action`:
      • "create": if user requests to build/create a register (ScanSheet)
@@ -59,6 +60,42 @@ Determine the user's intent:
      • filter_time_period: "today" (за сьогодні), "yesterday" (за вчора), "yesterday_before_noon" (вчора до обіду), or "all" (усі)
 
 Return ONLY valid JSON matching this schema."""
+
+
+REGISTER_FILTER_SYSTEM_PROMPT = """You are an intelligent Nova Poshta logistics assistant specialized in filtering express waybill drafts (ТТН / чернетки) and selecting waybills to combine into a ScanSheet Register (Реєстр).
+
+You will receive:
+1. `current_timestamp`: The exact current date, time and day of week.
+2. `drafts`: A JSON array containing all active un-shipped waybill drafts for the user.
+3. The user's natural language request.
+
+Your task:
+1. Analyze the user's requested action:
+   • "create": User explicitly wants to create / make / combine into a register (e.g. "створи реєстр", "зроби реєстр з усіх чернеток", "об'єднай у реєстр", "створи реєстр з накладної 20451506611097", "згенеруй сканшит")
+   • "filter_drafts": User only wants to see, find, or list drafts matching criteria without creating a register (e.g. "покажи чернетки за вчора", "знайди накладні на Київ", "які чернетки мають опис сувенір")
+   • "list_registers": User wants to view existing registers (e.g. "покажи мої реєстри")
+   • "not_found": No drafts in the provided list match the requested criteria
+
+2. Select the matching waybills (`selected_doc_numbers`):
+   • Explicit TTN numbers: If user mentions one or more specific TTN numbers (e.g. "20451506611097"), match those exact drafts from `drafts`.
+   • All drafts: If user requests all drafts ("з усіх моїх чернеток", "з усіх накладних", "з усіх", "всі чернетки", "створи реєстр") without restricting filters -> return ALL `int_doc_number` values present in `drafts`.
+   • Date / Time filters: Use `current_timestamp` to evaluate relative time phrases:
+     - "сьогодні" (today) -> drafts where `created_at` date matches current date.
+     - "вчора" (yesterday) -> drafts where `created_at` date matches yesterday's date.
+     - "вчора до 12:00" / "до обіду" -> drafts created yesterday before 12:00.
+     - "за останні 2 дні" -> drafts within past 2 days.
+   • Cargo description / keywords: e.g. "сувенір", "планшет", "одяг", "документи" -> match drafts where `cargo_description` contains the query.
+   • Recipient name / City / Branch: e.g. "у Кривий Ріг", "для Залужної", "для Юлії" -> match corresponding fields.
+   • Payment / COD filters: e.g. "з наложкою", "без наложки", "на картку".
+
+3. Return ONLY valid JSON in this format:
+{
+  "action": "create" | "filter_drafts" | "list_registers" | "not_found",
+  "selected_doc_numbers": ["20451506611097", ...],
+  "summary": "Короткий опис вибірки (наприклад: '1 накладна (Залужна Юлія, Кривий Ріг)' або '3 накладні за вчора')",
+  "explanation": "Коротке пояснення логіки вибору українською мовою"
+}
+"""
 
 
 class AIExtractor:
@@ -126,4 +163,63 @@ class AIExtractor:
                 return ParsedRecipientInfo(
                     is_recipient_info=False,
                     conversational_response="Привіт! Я AI-бот для автоматичного створення накладних Нової Пошти (ТТН). Надішліть мені ПІБ отримувача, телефон, місто та номер відділення/поштомату!",
+                )
+
+    async def filter_drafts_for_register(
+        self, user_prompt: str, drafts: List[Dict[str, Any]]
+    ) -> AIRegisterFilterResult:
+        """Evaluate active drafts against user prompt with AI to select TTNs for register creation."""
+        now = datetime.datetime.now()
+        time_context = {
+            "current_timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "day_of_week": now.strftime("%A"),
+            "today_date": now.strftime("%Y-%m-%d"),
+            "yesterday_date": (now - datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
+        }
+
+        user_content = (
+            f"Context:\n{json.dumps(time_context, ensure_ascii=False, indent=2)}\n\n"
+            f"Active Waybill Drafts ({len(drafts)}):\n{json.dumps(drafts, ensure_ascii=False, indent=2)}\n\n"
+            f"User Request:\n{user_prompt}"
+        )
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": REGISTER_FILTER_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content
+            if not content:
+                logger.warning("Empty response from AI model for register filtering")
+                return AIRegisterFilterResult(action="not_found", selected_doc_numbers=[])
+
+            data = json.loads(content)
+            return AIRegisterFilterResult(**data)
+        except Exception as e:
+            logger.error(f"Error filtering drafts for register with AI: {e}")
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": REGISTER_FILTER_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_content},
+                    ],
+                )
+                raw_text = response.choices[0].message.content or ""
+                clean_text = raw_text.replace("```json", "").replace("```", "").strip()
+                data = json.loads(clean_text)
+                return AIRegisterFilterResult(**data)
+            except Exception as fallback_err:
+                logger.error(f"Fallback AI register filtering failed: {fallback_err}")
+                # Programmatic fallback: if user prompt mentions "всі" or "усі" or "реєстр", select all drafts
+                all_nums = [str(d.get("int_doc_number", "")) for d in drafts if d.get("int_doc_number")]
+                return AIRegisterFilterResult(
+                    action="create" if all_nums else "not_found",
+                    selected_doc_numbers=all_nums,
+                    summary=f"Усі активні чернетки ({len(all_nums)})" if all_nums else None,
+                    explanation="Автоматичний вибір усіх чернеток через недоступність AI",
                 )

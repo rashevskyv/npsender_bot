@@ -134,6 +134,84 @@ def format_relative_delivery_date(raw_date_str: Optional[str]) -> str:
     return day_label
 
 
+async def fetch_user_active_drafts(
+    user_id: int,
+    user_np_client: NovaPoshtaClient,
+    storage_manager: UserSettingsManager,
+) -> List[Dict[str, Any]]:
+    """Fetch user's active un-shipped express waybill drafts from Nova Poshta API and local storage."""
+    np_live_drafts = await user_np_client.get_internet_document_list(days_back=30)
+    local_drafts = storage_manager.get_user_drafts(user_id)
+
+    # Collect all candidate document numbers
+    all_doc_numbers = list({
+        d.int_doc_number for d in local_drafts if d.int_doc_number
+    } | {
+        item.int_doc_number for item in np_live_drafts if item.int_doc_number
+    })
+
+    # Check tracking statuses in batch
+    statuses = {}
+    if all_doc_numbers:
+        try:
+            statuses = await user_np_client.get_documents_status(all_doc_numbers)
+        except Exception as e:
+            logger.error(f"Error checking tracking statuses for drafts: {e}")
+
+    # Purge local drafts that are physically shipped
+    sent_local_ids = [
+        d_num for d_num in all_doc_numbers
+        if statuses.get(d_num, {}).get("is_shipped")
+    ]
+    if sent_local_ids:
+        storage_manager.purge_sent_drafts(user_id, sent_local_ids)
+        local_drafts = storage_manager.get_user_drafts(user_id)
+
+    # Build combined strictly un-shipped drafts map
+    combined_drafts_map = {}
+    for d in local_drafts:
+        if not statuses.get(d.int_doc_number, {}).get("is_shipped"):
+            combined_drafts_map[d.int_doc_number] = {
+                "ref": d.ref,
+                "int_doc_number": d.int_doc_number,
+                "recipient_name": d.recipient_name,
+                "recipient_phone": d.recipient_phone,
+                "city_description": d.city_description,
+                "warehouse_description": d.warehouse_description,
+                "cargo_description": d.cargo_description,
+                "payer_type": d.payer_type,
+                "declared_value": d.declared_value,
+                "cod_amount": getattr(d, "cod_amount", 0.0) or 0.0,
+                "cod_payment_type": getattr(d, "cod_payment_type", "cash"),
+                "cost": d.cost,
+                "created_at": d.created_at,
+            }
+
+    for live_item in np_live_drafts:
+        doc_num = live_item.int_doc_number
+        if statuses.get(doc_num, {}).get("is_shipped"):
+            continue
+
+        if doc_num not in combined_drafts_map:
+            combined_drafts_map[doc_num] = {
+                "ref": live_item.ref or live_item.int_doc_number,
+                "int_doc_number": live_item.int_doc_number,
+                "recipient_name": live_item.recipient_name,
+                "recipient_phone": live_item.recipient_phone or "Не вказано",
+                "city_description": live_item.city_recipient or "Не вказано",
+                "warehouse_description": live_item.address_recipient or "Накладна на сайті",
+                "cargo_description": live_item.description or "Посилка",
+                "payer_type": live_item.payer_type or "Recipient",
+                "declared_value": live_item.declared_value,
+                "cod_amount": live_item.cod_amount,
+                "cod_payment_type": live_item.cod_payment_type,
+                "cost": live_item.cost,
+                "created_at": live_item.date_created or "Нещодавно",
+            }
+
+    return list(combined_drafts_map.values())
+
+
 def filter_user_drafts(
     drafts: List[SavedDraft],
     time_period: Optional[str] = None,
@@ -534,76 +612,7 @@ def register_handlers(
         )
 
         try:
-            # 1. Fetch drafts from Nova Poshta API & local storage
-            np_live_drafts = await user_np_client.get_internet_document_list(days_back=30)
-            local_drafts = storage_manager.get_user_drafts(user_id)
-
-            # Collect all candidate document numbers
-            all_doc_numbers = list({
-                d.int_doc_number for d in local_drafts if d.int_doc_number
-            } | {
-                item.int_doc_number for item in np_live_drafts if item.int_doc_number
-            })
-
-            # Check tracking statuses in batch
-            statuses = {}
-            if all_doc_numbers:
-                try:
-                    statuses = await user_np_client.get_documents_status(all_doc_numbers)
-                except Exception as e:
-                    logger.error(f"Error checking tracking statuses: {e}")
-
-            # Purge local drafts that are physically shipped
-            sent_local_ids = [
-                d_num for d_num in all_doc_numbers
-                if statuses.get(d_num, {}).get("is_shipped")
-            ]
-            if sent_local_ids:
-                storage_manager.purge_sent_drafts(user_id, sent_local_ids)
-                local_drafts = storage_manager.get_user_drafts(user_id)
-
-            # Build combined strictly un-shipped drafts list
-            combined_drafts_map = {}
-            for d in local_drafts:
-                if not statuses.get(d.int_doc_number, {}).get("is_shipped"):
-                    combined_drafts_map[d.int_doc_number] = {
-                        "ref": d.ref,
-                        "int_doc_number": d.int_doc_number,
-                        "recipient_name": d.recipient_name,
-                        "recipient_phone": d.recipient_phone,
-                        "city_description": d.city_description,
-                        "warehouse_description": d.warehouse_description,
-                        "cargo_description": d.cargo_description,
-                        "payer_type": d.payer_type,
-                        "declared_value": d.declared_value,
-                        "cost": d.cost,
-                        "created_at": d.created_at,
-                    }
-
-            for live_item in np_live_drafts:
-                doc_num = live_item.int_doc_number
-                # If already shipped/in transit/delivered, SKIP IT!
-                if statuses.get(doc_num, {}).get("is_shipped"):
-                    continue
-
-                if doc_num not in combined_drafts_map:
-                    combined_drafts_map[doc_num] = {
-                        "ref": live_item.int_doc_number,
-                        "int_doc_number": live_item.int_doc_number,
-                        "recipient_name": live_item.recipient_name,
-                        "recipient_phone": live_item.recipient_phone or "Не вказано",
-                        "city_description": live_item.city_recipient or "Не вказано",
-                        "warehouse_description": live_item.address_recipient or "Накладна на сайті",
-                        "cargo_description": live_item.description or "Посилка",
-                        "payer_type": live_item.payer_type or "Recipient",
-                        "declared_value": live_item.declared_value,
-                        "cod_amount": live_item.cod_amount,
-                        "cod_payment_type": live_item.cod_payment_type,
-                        "cost": live_item.cost,
-                        "created_at": live_item.date_created or "Нещодавно",
-                    }
-
-            all_drafts = list(combined_drafts_map.values())
+            all_drafts = await fetch_user_active_drafts(user_id, user_np_client, storage_manager)
 
             if not all_drafts:
                 await status_msg.edit_text(
@@ -935,40 +944,62 @@ def register_handlers(
                 action = parsed_info.register_action or "filter_drafts"
 
                 if action == "list":
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
                     await cmd_registers(message)
                     return
 
-                all_drafts = storage_manager.get_user_drafts(user_id)
-                filtered_drafts = filter_user_drafts(
-                    all_drafts,
-                    time_period=parsed_info.filter_time_period,
-                    cargo_query=parsed_info.filter_cargo_description,
+                await status_msg.edit_text(
+                    "🔍 *Отримання ваших активних чернеток та підбір накладних через AI...*",
+                    parse_mode="Markdown",
                 )
 
-                period_labels = {
-                    "today": "за сьогодні",
-                    "yesterday": "за вчора",
-                    "yesterday_before_noon": "за вчора до 12:00",
-                    "all": "усі",
-                }
-                period_str = period_labels.get(parsed_info.filter_time_period or "all", "")
-                cargo_str = f"з описом '{parsed_info.filter_cargo_description}'" if parsed_info.filter_cargo_description else ""
-                filter_title = f"{period_str} {cargo_str}".strip() or "за вказаним фільтром"
+                active_drafts = await fetch_user_active_drafts(user_id, user_np_client, storage_manager)
 
-                if not filtered_drafts:
+                if not active_drafts:
                     await status_msg.edit_text(
-                        f"🔍 *Накладних {filter_title} не знайдено серед ваших чернеток.*",
+                        "📝 *Активних чернеток ТТН (невідправлених) не знайдено.*\n"
+                        "Усі ваші накладні вже відправлені або ще не створені. "
+                        "Неможливо сформувати реєстр без накладних.",
                         parse_mode="Markdown",
                     )
                     return
 
-                if action == "create":
+                ai_reg_result = await user_ai_extractor.filter_drafts_for_register(
+                    user_prompt=text, drafts=active_drafts
+                )
+
+                if ai_reg_result.action == "list_registers":
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
+                    await cmd_registers(message)
+                    return
+
+                selected_nums_set = set(ai_reg_result.selected_doc_numbers)
+                matched_drafts = [
+                    d for d in active_drafts if str(d.get("int_doc_number")) in selected_nums_set
+                ]
+
+                if not matched_drafts or ai_reg_result.action == "not_found":
+                    explanation_part = f"\n💡 _{ai_reg_result.explanation}_" if ai_reg_result.explanation else ""
                     await status_msg.edit_text(
-                        f"⏳ *Формування реєстру (ScanSheet) для {len(filtered_drafts)} накладних {filter_title}...*",
+                        f"🔍 *За вашим запитом не знайдено відповідних накладних серед ваших чернеток.*{explanation_part}",
                         parse_mode="Markdown",
                     )
-                    doc_refs = [d.ref for d in filtered_drafts]
-                    doc_nums = [d.int_doc_number for d in filtered_drafts]
+                    return
+
+                if ai_reg_result.action == "create":
+                    summary_title = ai_reg_result.summary or f"{len(matched_drafts)} накладних"
+                    await status_msg.edit_text(
+                        f"⏳ *Формування реєстру (ScanSheet) для {summary_title}...*",
+                        parse_mode="Markdown",
+                    )
+                    doc_refs = [d["ref"] for d in matched_drafts]
+                    doc_nums = [d["int_doc_number"] for d in matched_drafts]
 
                     scansheet_info = await user_np_client.create_scan_sheet(doc_refs)
 
@@ -984,13 +1015,29 @@ def register_handlers(
                     barcode_bytes = generate_code128_barcode(scansheet_info.number)
                     photo_file = BufferedInputFile(barcode_bytes, filename=f"scansheet_{scansheet_info.number}.png")
 
-                    await status_msg.delete()
+                    # Construct detailed list of included TTNs
+                    details_lines = []
+                    for idx, d in enumerate(matched_drafts, 1):
+                        cod_str = f" | 💵 Наложка: {int(d.get('cod_amount', 0))} грн" if d.get("cod_amount") else ""
+                        line = (
+                            f"*{idx}. ТТН:* `{d['int_doc_number']}` | {d['recipient_name']}\n"
+                            f"   🏙 {d['city_description']}, {d['warehouse_description']}\n"
+                            f"   📝 {d['cargo_description']} | 💰 {int(d.get('declared_value', 500))} грн{cod_str}"
+                        )
+                        details_lines.append(line)
+                    details_block = "\n\n".join(details_lines)
+
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
+
                     caption_text = (
                         f"✅ *Реєстр (ScanSheet) успішно створено!*\n\n"
                         f"📋 *Номер реєстру:* `{scansheet_info.number}`\n"
                         f"📅 *Дата створення:* {scansheet_info.date_created}\n"
-                        f"📦 *Кількість накладних:* {scansheet_info.count_of_documents}\n"
-                        f"📄 *ТТН у реєстрі:* {', '.join(doc_nums)}\n\n"
+                        f"📦 *Кількість накладних:* {scansheet_info.count_of_documents}\n\n"
+                        f"📄 *Накладні у реєстрі:*\n{details_block}\n\n"
                         "📱 *Покажіть цей штрихкод оператору Нової Пошти для сканування!*"
                     )
                     await message.answer_photo(
@@ -1002,21 +1049,42 @@ def register_handlers(
                     return
 
                 # Default action: show filtered drafts list
+                summary_title = ai_reg_result.summary or f"{len(matched_drafts)} накладних"
                 await status_msg.edit_text(
-                    f"📋 *Знайдено {len(filtered_drafts)} накладних {filter_title}:*",
+                    f"📋 *Знайдено {summary_title}:*",
                     parse_mode="Markdown",
                 )
-                for idx, draft in enumerate(filtered_drafts, 1):
+                for idx, draft in enumerate(matched_drafts, 1):
+                    doc_num = draft["int_doc_number"]
+                    tracking_url = f"https://novaposhta.ua/tracking/?cargo_number={doc_num}"
+                    payer_ua = "Отримувач" if draft.get("payer_type") == "Recipient" else "Відправник"
+                    declared_val = draft.get("declared_value", 500.0)
+                    cod_val = draft.get("cod_amount", 0.0) or 0.0
+                    cod_type = draft.get("cod_payment_type", "cash")
+
+                    if cod_val > 0:
+                        payout_ua = "Картка" if cod_type == "card" else "Готівка"
+                        cod_line = f"💵 *Накладений платіж:* {int(cod_val)} грн ({payout_ua})\n"
+                    else:
+                        cod_line = ""
+
                     card = (
-                        f"*{idx}. ТТН:* `{draft.int_doc_number}` | {draft.recipient_name}\n"
-                        f"🏙 *Місто:* {draft.city_description}, {draft.warehouse_description}\n"
-                        f"📝 *Опис:* {draft.cargo_description} | 💰 {int(draft.declared_value)} грн\n"
-                        f"📅 *Створено:* {draft.created_at}"
+                        f"🎫 *{idx}. ТТН:* `{doc_num}`\n"
+                        f"👤 *Отримувач:* {draft['recipient_name']}\n"
+                        f"📞 *Телефон:* `{draft['recipient_phone']}`\n"
+                        f"🏙 *Місто:* {draft['city_description']}\n"
+                        f"📦 *Пункт призначення:* {draft['warehouse_description']}\n"
+                        f"📝 *Опис:* {draft['cargo_description']}\n"
+                        f"💳 *Платник:* {payer_ua} | 💰 *Оцінка:* {int(declared_val)} грн\n"
+                        f"{cod_line}"
+                        f"📅 *Створено:* {draft['created_at']}\n\n"
+                        f"🔗 [Відстежити ТТН на сайті Нової Пошти]({tracking_url})"
                     )
                     await message.answer(
                         card,
                         parse_mode="Markdown",
-                        reply_markup=get_draft_keyboard(ref=draft.ref),
+                        reply_markup=get_draft_keyboard(ref=draft["ref"]),
+                        disable_web_page_preview=True,
                     )
                 return
 
