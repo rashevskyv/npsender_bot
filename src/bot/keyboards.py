@@ -185,6 +185,33 @@ def get_city_selection_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+class StreetSelectCallback(CallbackData, prefix="strtsel"):
+    """Callback data schema for selecting street when multiple candidates exist."""
+
+    street_ref: str
+    session_id: str
+
+
+def get_street_selection_keyboard(
+    streets: list, session_id: str
+) -> InlineKeyboardMarkup:
+    """Build inline keyboard to let user pick between matching streets/lanes."""
+    buttons = []
+    for s in streets[:8]:
+        label = f"🏡 {s.streets_type} {s.description}"
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=StreetSelectCallback(
+                        street_ref=s.ref, session_id=session_id
+                    ).pack(),
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 class RegisterActionCallback(CallbackData, prefix="reg"):
     """Callback data schema for register management."""
 

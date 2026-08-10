@@ -24,6 +24,8 @@ from src.bot.keyboards import (
     get_draft_keyboard,
     CitySelectCallback,
     get_city_selection_keyboard,
+    StreetSelectCallback,
+    get_street_selection_keyboard,
     RegisterActionCallback,
     get_register_keyboard,
     AddressConfirmCallback,
@@ -36,6 +38,7 @@ router = Router()
 # In-memory storage for active pending waybill verification sessions
 PENDING_SESSIONS: Dict[str, Dict[str, Any]] = {}
 USER_ACTIVE_SESSIONS: Dict[int, str] = {}  # user_id -> active session_id
+USER_LAST_PARSED_INFO: Dict[int, ParsedRecipientInfo] = {}  # user_id -> last parsed recipient info for natural language follow-up edits
 VALUE_OPTIONS = [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
 
 # Debouncer buffers for multi-part forwarded messages
@@ -943,11 +946,13 @@ def register_handlers(
         user_ai_extractor = AIExtractor(eff_settings)
         user_np_client = NovaPoshtaClient(eff_settings)
 
-        # Check if there is an active pending verification session for this user
+        # Check if there is an active pending verification session or recent parsed info for this user
         prev_parsed_info = None
         active_session_id = USER_ACTIVE_SESSIONS.get(actual_user_id)
         if active_session_id and active_session_id in PENDING_SESSIONS:
             prev_parsed_info = PENDING_SESSIONS[active_session_id].get("parsed_info")
+        if not prev_parsed_info:
+            prev_parsed_info = USER_LAST_PARSED_INFO.get(actual_user_id)
 
         status_msg = await message.answer(
             "⏳ *Обробка повідомлення та аналіз реквізитів через AI...*", parse_mode="Markdown"
@@ -1117,6 +1122,8 @@ def register_handlers(
                 await status_msg.edit_text(resp_text, parse_mode="Markdown")
                 return
 
+            USER_LAST_PARSED_INFO[actual_user_id] = parsed_info
+
             # Get or generate active session ID
             session_id = active_session_id or str(uuid.uuid4())[:8]
 
@@ -1258,14 +1265,56 @@ def register_handlers(
                 )
                 return
 
-            matched_street = streets[0]
-            street_ref = matched_street.ref
-            street_display = f"{matched_street.streets_type} {matched_street.description}"
+            if len(streets) == 1:
+                matched_street = streets[0]
+                street_ref = matched_street.ref
+                street_display = f"{matched_street.streets_type} {matched_street.description}"
 
-            addr_parts = [f"{street_display}, буд. {parsed_info.building_number}"]
-            if parsed_info.flat_number:
-                addr_parts.append(f"кв. {parsed_info.flat_number}")
-            dest_desc = f"🏡 Адресна доставка: {', '.join(addr_parts)}"
+                addr_parts = [f"{street_display}, буд. {parsed_info.building_number}"]
+                if parsed_info.flat_number:
+                    addr_parts.append(f"кв. {parsed_info.flat_number}")
+                dest_desc = f"🏡 Адресна доставка: {', '.join(addr_parts)}"
+            else:
+                # Multiple matching streets/lanes found -> present disambiguation keyboard
+                cod_val = parsed_info.cod_amount or 0.0
+                cod_type = parsed_info.cod_payment_type or "cash"
+                declared_val = max(
+                    parsed_info.declared_value or eff_settings.default_declared_value,
+                    500.0,
+                    cod_val,
+                )
+                cargo_desc = parsed_info.cargo_description or "Посилка"
+
+                PENDING_SESSIONS[session_id] = {
+                    "parsed_info": parsed_info,
+                    "city": matched_city,
+                    "street_candidates": streets,
+                    "is_address_delivery": True,
+                    "building_number": parsed_info.building_number,
+                    "flat_number": parsed_info.flat_number,
+                    "payer_type": eff_settings.default_payer_type,
+                    "cargo_type": eff_settings.default_cargo_type,
+                    "declared_value": declared_val,
+                    "cargo_description": cargo_desc,
+                    "cod_amount": cod_val,
+                    "cod_payment_type": cod_type,
+                    "user_id": user_id,
+                }
+                USER_ACTIVE_SESSIONS[user_id] = session_id
+
+                candidate_lines = [
+                    f"⚠️ *Знайдено декілька варіантів вулиці для запиту '{street_query}' у м. {matched_city.description}:*\n"
+                ]
+                for idx, s in enumerate(streets[:8], 1):
+                    candidate_lines.append(f"*{idx}.* 🏡 `{s.streets_type} {s.description}`\n")
+                candidate_lines.append("Будь ласка, оберіть потрібну вулицю / провулок нижче:")
+
+                await status_msg.edit_text(
+                    "\n".join(candidate_lines),
+                    parse_mode="Markdown",
+                    reply_markup=get_street_selection_keyboard(streets, session_id),
+                )
+                return
         else:
             # Find matching (city, warehouse) pairs across candidate cities
             matching_candidates = []
@@ -1946,6 +1995,87 @@ def register_handlers(
             ),
         )
         await callback.answer(f"Обрано: {matched_city.description}")
+
+    @router.callback_query(StreetSelectCallback.filter())
+    async def process_street_select_callback(
+        callback: CallbackQuery, callback_data: StreetSelectCallback
+    ):
+        """Handle user selection of a street/lane when multiple candidates match."""
+        session_id = callback_data.session_id
+        session = PENDING_SESSIONS.get(session_id)
+
+        if not session or "street_candidates" not in session:
+            await callback.answer("Сесія застаріла. Надішліть реквізити заново.", show_alert=True)
+            return
+
+        user_id = callback.from_user.id
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+
+        candidates = session["street_candidates"]
+        target_ref = callback_data.street_ref
+
+        selected_street = next((s for s in candidates if s.ref == target_ref), None)
+        if not selected_street:
+            await callback.answer("Вулицю не знайдено.", show_alert=True)
+            return
+
+        parsed_info = session["parsed_info"]
+        city = session["city"]
+
+        street_ref = selected_street.ref
+        street_display = f"{selected_street.streets_type} {selected_street.description}"
+
+        addr_parts = [f"{street_display}, буд. {session.get('building_number') or parsed_info.building_number or '1'}"]
+        flat_num = session.get("flat_number") or parsed_info.flat_number
+        if flat_num:
+            addr_parts.append(f"кв. {flat_num}")
+        dest_desc = f"🏡 Адресна доставка: {', '.join(addr_parts)}"
+
+        declared_val = session.get("declared_value") or max(
+            parsed_info.declared_value or eff_settings.default_declared_value,
+            500.0,
+        )
+        cargo_desc = session.get("cargo_description") or parsed_info.cargo_description or "Посилка"
+        cod_val = session.get("cod_amount", 0.0)
+        cod_type = session.get("cod_payment_type", "cash")
+
+        session["street_ref"] = street_ref
+        session["street_name"] = selected_street.description
+        session["destination_description"] = dest_desc
+        session["is_address_delivery"] = True
+        session.pop("street_candidates", None)
+
+        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+
+        card_text = (
+            "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+            f"👤 *Отримувач:* {parsed_info.full_name}\n"
+            f"📞 *Телефон:* `{parsed_info.phone}`\n"
+            f"🏙 *Місто:* {city.description}\n"
+            f"📦 *Пункт призначення:* {dest_desc}\n"
+            f"📝 *Опис вантажу:* {cargo_desc}\n"
+            f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
+            f"💵 *Накладений платіж:* {cod_str}\n\n"
+            "Перевірте дані та оберіть дію нижче:"
+        )
+
+        u_custom = storage_manager.get_user_settings(user_id)
+        card_mask = u_custom.sender_card_mask
+
+        await callback.message.edit_text(
+            card_text,
+            parse_mode="Markdown",
+            reply_markup=get_confirmation_keyboard(
+                payer_type=session.get("payer_type", eff_settings.default_payer_type),
+                cargo_type=session.get("cargo_type", eff_settings.default_cargo_type),
+                declared_value=declared_val,
+                cod_amount=cod_val,
+                cod_payment_type=cod_type,
+                sender_card_mask=card_mask,
+                session_id=session_id,
+            ),
+        )
+        await callback.answer(f"Обрано: {street_display}")
 
     @router.callback_query(RegisterActionCallback.filter())
     async def process_register_callback(

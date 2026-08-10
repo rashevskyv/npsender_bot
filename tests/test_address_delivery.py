@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.ai.schemas import ParsedRecipientInfo
-from src.bot.keyboards import AddressConfirmCallback, WaybillActionCallback
+from src.bot.keyboards import AddressConfirmCallback, WaybillActionCallback, StreetSelectCallback
 from src.bot.handlers import (
     PENDING_SESSIONS,
     USER_ACTIVE_SESSIONS,
@@ -212,3 +212,71 @@ async def test_confirm_waybill_address_delivery_creates_doors_waybill(setup_test
         success_card = callback.message.edit_text.call_args[0][0]
         assert "20450999999999" in success_card
         assert "Адресна доставка" in success_card
+
+
+@pytest.mark.asyncio
+async def test_process_street_select_callback():
+    session_id = "test_street_sel"
+    user_id = 998877
+
+    parsed_info = ParsedRecipientInfo(
+        last_name="Жупник",
+        first_name="Арсеній",
+        middle_name="Олександрович",
+        phone="380502850704",
+        city_name="Сміла",
+        street_name="Віри Гордієнко",
+        building_number="99",
+        is_address_delivery=True,
+        is_recipient_info=True,
+        cargo_description="планшет",
+        declared_value=15000.0,
+        cod_amount=15000.0,
+        cod_payment_type="cash",
+    )
+    city = CityInfo(Ref="city-smila-ref", Description="Сміла", AreaDescription="Черкаська", RegionsDescription="")
+
+    candidate_street1 = StreetInfo(Ref="street-vul-ref", Description="Гордієнко Віри", StreetsType="вул.", CityRef="city-smila-ref")
+    candidate_street2 = StreetInfo(Ref="street-prov-ref", Description="Гордієнко Віри", StreetsType="пров.", CityRef="city-smila-ref")
+
+    PENDING_SESSIONS[session_id] = {
+        "parsed_info": parsed_info,
+        "city": city,
+        "street_candidates": [candidate_street1, candidate_street2],
+        "building_number": "99",
+        "is_address_delivery": True,
+        "payer_type": "Recipient",
+        "cargo_type": "Parcel",
+        "declared_value": 15000.0,
+        "cargo_description": "планшет",
+        "cod_amount": 15000.0,
+        "cod_payment_type": "cash",
+        "user_id": user_id,
+    }
+    USER_ACTIVE_SESSIONS[user_id] = session_id
+
+    callback = MagicMock()
+    callback.from_user.id = user_id
+    callback.message.edit_text = AsyncMock()
+    callback.answer = AsyncMock()
+
+    callback_data = StreetSelectCallback(
+        street_ref="street-vul-ref",
+        session_id=session_id,
+    )
+
+    handler = _get_handler("process_street_select_callback")
+    await handler(callback, callback_data)
+
+    assert callback.message.edit_text.called
+    updated_card = callback.message.edit_text.call_args[0][0]
+    assert "вул. Гордієнко Віри" in updated_card
+    assert "планшет" in updated_card
+    assert "15000 грн" in updated_card
+
+    # Verify session is updated
+    session = PENDING_SESSIONS[session_id]
+    assert session["street_ref"] == "street-vul-ref"
+    assert session["street_name"] == "Гордієнко Віри"
+    assert "вул. Гордієнко Віри" in session["destination_description"]
+

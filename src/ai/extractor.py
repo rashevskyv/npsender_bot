@@ -24,29 +24,39 @@ Determine the user's intent:
      • What data you need: Recipient Full Name (ПІБ), Phone (телефон), City (місто), Branch or Postomat number (номер відділення або поштомату), Optional cargo description and declared value.
      • Available features: View active shipments, manage waybill drafts, toggle payer & cargo settings.
 
-2. RECIPIENT INFO OR CONTEXTUAL UPDATE INTENT (is_recipient_info: true):
-   If the user provides recipient delivery information OR sends follow-up/reposted/forwarded messages containing missing parts or updates of an active shipment:
+2. RECIPIENT INFO OR CONTEXTUAL UPDATE / EDIT INTENT (is_recipient_info: true):
+   If the user provides recipient delivery information OR sends follow-up / modification messages in natural language (e.g. changing name, phone, city, branch, street address, cargo description, declared value, or COD):
    - Set `is_recipient_info`: true
-   - ALWAYS MERGE previous active recipient data with new updates. Keep all non-null fields from previous data (last_name, first_name, middle_name, phone, city_name, warehouse_number, etc.) unless the new message explicitly overrides them.
+   - ALWAYS MERGE previous active recipient data with new updates. Keep all non-null fields from previous data (last_name, first_name, middle_name, phone, city_name, warehouse_number, street_name, building_number, etc.) unless the new message explicitly updates or replaces them.
+   - Specific update rules:
+     • Recipient Name update (e.g. "зміни прізвище на Іваненко", "отримувач Шевченко Тарас", "поміняй ім'я на Арсеній"): update `last_name`, `first_name`, and/or `middle_name`.
+     • Phone update (e.g. "зміни телефон на 0971234567", "новий номер 0502850704"): update `phone`.
+     • City update (e.g. "місто Львів", "відправ у Київ", "поміняй місто на Одесу"): update `city_name`.
+     • Branch/Postomat update (e.g. "відділення 12", "поштомат 2548", "поміняй на відділення №1"): update `warehouse_number`, `is_postomat`, and set `is_address_delivery: false`, `street_name: null`, `building_number: null`.
+     • Address / Street / House update (e.g. "вулиця Франка 10", "вулиця Віри Гордієнко, а не провулок. Саме вулиця", "зміни адресу на вул. Соборна 25 кв 14"): update `street_name`, `building_number`, `flat_number`, set `is_address_delivery: true`, `has_address_suspicion: false`, and set `warehouse_number: null`.
+     • Cargo Description update (e.g. "зміни опис на планшет", "опис сувенір", "товар: одяг"): update `cargo_description`.
+     • Declared Value update (e.g. "оцінка 5000 грн", "зміни оцінку на 15000"): update `declared_value`.
+     • COD update (e.g. "додай наложку 15000 на картку", "накладений платіж 3000 готівка", "прибери наложку"): update `cod_amount` (0 if removed) and `cod_payment_type` ("cash" or "card").
+
    - Extract/merge the following fields:
      • last_name: Recipient's last name (Прізвище)
      • first_name: Recipient's first name (Ім'я)
      • middle_name: Recipient's patronymic/middle name (По-батькові), if present
      • phone: Phone number normalized starting with 380 or 0 (e.g. 380971234567 or 0971234567)
-     • city_name: Settlement name without prefix (e.g. "Київ", "Одеса", "Дніпро", "Рівне", "Черкаське")
-     • region_name: Oblast name if specified (e.g. "Дніпропетровська", "Донецька", "Київська")
-     • district_name: District/Raion name if specified (e.g. "Новомосковський", "Краматорський")
+     • city_name: Settlement name without prefix (e.g. "Київ", "Одеса", "Дніпро", "Рівне", "Сміла")
+     • region_name: Oblast name if specified (e.g. "Дніпропетровська", "Черкаська", "Київська")
+     • district_name: District/Raion name if specified
      • settlement_type: Settlement type if specified ("місто", "село", "смт")
      • warehouse_number: Primary integer branch or postomat number (e.g. 36, 12, 26584). 
-       IMPORTANT: If the text includes a branch/postomat number AND a physical street address of the branch (e.g. "Відділення №36 (до 30 кг на одне місце): вул. Княгині Ольги, 8" or "Поштомат №26584 (вул. Миколайчука 15v)"), extract ONLY the branch/postomat integer ID (`36` or `26584`). Ignore weight limits "(до 30 кг)" and street numbers "вул. Княгині Ольги, 8" when determining `warehouse_number`!
+       IMPORTANT: If the text includes a branch/postomat number AND a physical street address of the branch, extract ONLY the branch/postomat integer ID (`36` or `26584`).
      • is_postomat: Boolean (true if text mentions "поштомат", false for "відділення")
      • street_name, building_number, flat_number: extract personal home/office street name, building/house number, flat/apartment number.
      • has_address_suspicion: Boolean (true if text mentions personal home/office street address, apartment, or keywords "додому", "кур'єром", "на адресу", "вул.", "буд.", "кв.")
-     • is_address_delivery: Boolean (true if user explicitly confirmed or requested courier door delivery)
+     • is_address_delivery: Boolean (true if user explicitly confirmed or requested courier door delivery or specified a street with house number without warehouse)
      • cargo_description: Item description if mentioned or updated
      • declared_value: Declared value number if mentioned or updated
-     • cod_amount: Cash on Delivery (накладений платіж / наложка / оплата при отриманні) amount in UAH if specified
-     • cod_payment_type: "cash" (готівкою у відділенні) or "card" (на картку) if specified
+     • cod_amount: Cash on Delivery amount in UAH if specified
+     • cod_payment_type: "cash" or "card" if specified
 
 3. REGISTER & WAYBILL FILTERING INTENT (is_register_intent: true):
    If the user asks to list/filter waybills by date, time, or cargo description, or asks to create a ScanSheet register (e.g. "надай мені всі накладні, які були створені за сьогодні", "створи реєстр з усіх накладних з описом сувенір", "створи реєстр з накладних створених вчора до обіду", "покажи мої реєстри", "створи реєстр з накладної 2045..."):
