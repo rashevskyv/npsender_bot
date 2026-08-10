@@ -347,24 +347,29 @@ async def test_search_street_and_create_address_method():
     async def mock_post(model_name, called_method, method_properties):
         recorded_calls.append((model_name, called_method, method_properties))
         if called_method == "getStreet":
-            return {
-                "success": True,
-                "data": [
-                    {
-                        "Ref": "street-guid-123",
-                        "Description": "Віри Гордієнко",
-                        "StreetsType": "вул.",
-                        "CityRef": "city-guid-456",
-                    }
-                ],
-            }
+            query = method_properties.get("FindByString", "")
+            if query == "Віри Гордієнко":
+                return {"success": True, "data": []}
+            elif query == "Гордієнко Віри":
+                return {
+                    "success": True,
+                    "data": [
+                        {
+                            "Ref": "street-guid-123",
+                            "Description": "Гордієнко Віри",
+                            "StreetsType": "вул.",
+                            "CityRef": "city-guid-456",
+                        }
+                    ],
+                }
+            return {"success": True, "data": []}
         elif called_method == "save":
             return {
                 "success": True,
                 "data": [
                     {
                         "Ref": "addr-guid-789",
-                        "Description": "вул. Віри Гордієнко, 99",
+                        "Description": "вул. Гордієнко Віри, 99",
                     }
                 ],
             }
@@ -372,10 +377,10 @@ async def test_search_street_and_create_address_method():
 
     client._post = mock_post
 
-    streets = await client.search_street(city_ref="city-guid-456", street_name="Віри Гордієнко")
+    streets = await client.search_street(city_ref="city-guid-456", street_name="вул. Віри Гордієнко")
     assert len(streets) == 1
     assert streets[0].ref == "street-guid-123"
-    assert streets[0].description == "Віри Гордієнко"
+    assert streets[0].description == "Гордієнко Віри"
 
     addr = await client.create_counterparty_address(
         counterparty_ref="cp-guid-111",
@@ -384,8 +389,8 @@ async def test_search_street_and_create_address_method():
         flat="10",
     )
     assert addr.ref == "addr-guid-789"
-    assert addr.description == "вул. Віри Гордієнко, 99"
-    assert recorded_calls[1] == (
+    assert addr.description == "вул. Гордієнко Віри, 99"
+    assert recorded_calls[2] == (
         "Address",
         "save",
         {

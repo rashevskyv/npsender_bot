@@ -4,6 +4,7 @@ import asyncio
 import datetime
 import time
 import logging
+import re
 from typing import Optional, List, Dict, Any, Tuple
 import httpx
 
@@ -261,27 +262,81 @@ class NovaPoshtaClient:
     async def search_street(
         self, city_ref: str, street_name: str
     ) -> List[StreetInfo]:
-        """Search for streets by name within a city."""
-        res = await self._post(
-            model_name="Address",
-            called_method="getStreet",
-            method_properties={
-                "CityRef": city_ref,
-                "FindByString": street_name.strip(),
-                "Page": "1",
-            },
-        )
-        streets = []
-        for item in res.get("data", []):
-            streets.append(
-                StreetInfo(
-                    Ref=str(item.get("Ref", "")),
-                    Description=str(item.get("Description", "")),
-                    StreetsType=str(item.get("StreetsType", "вул.")),
-                    CityRef=str(item.get("CityRef", city_ref)),
+        """Search for streets by name within a city with intelligent variations and ranking."""
+        raw_name = street_name.strip()
+        if not raw_name or not city_ref:
+            return []
+
+        # Remove street type prefixes like вул., пров., etc.
+        cleaned = raw_name
+        street_prefixes = [
+            "вул.", "вулиця", "пров.", "провулок", "просп.", "проспект", "пр-т",
+            "бульв.", "бульвар", "б-р", "наб.", "набережна", "тупик", "узвіз",
+            "площа", "майдан", "шосе", "алея", "проїзд", "дорога"
+        ]
+        for p in street_prefixes:
+            pattern = rf"^{re.escape(p)}\s*|\s*{re.escape(p)}$"
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+
+        words = [w for w in re.findall(r"[\w']+", cleaned) if len(w) >= 2]
+
+        queries = [cleaned]
+        if len(words) > 1:
+            queries.append(" ".join(reversed(words)))
+            for w in reversed(words):
+                if len(w) >= 3 and w not in queries:
+                    queries.append(w)
+
+        seen_refs = set()
+        all_streets: List[StreetInfo] = []
+
+        for q in queries:
+            try:
+                res = await self._post(
+                    model_name="Address",
+                    called_method="getStreet",
+                    method_properties={
+                        "CityRef": city_ref,
+                        "FindByString": q,
+                        "Page": "1",
+                    },
                 )
-            )
-        return streets
+                for item in res.get("data", []):
+                    ref_str = str(item.get("Ref", ""))
+                    if ref_str and ref_str not in seen_refs:
+                        seen_refs.add(ref_str)
+                        all_streets.append(
+                            StreetInfo(
+                                Ref=ref_str,
+                                Description=str(item.get("Description", "")),
+                                StreetsType=str(item.get("StreetsType", "вул.")),
+                                CityRef=str(item.get("CityRef", city_ref)),
+                            )
+                        )
+                if all_streets:
+                    break
+            except Exception as e:
+                logger.warning(f"Error querying getStreet with '{q}': {e}")
+
+        # Rank all_streets by similarity to raw input
+        def score_street(s: StreetInfo) -> float:
+            s_words = set(re.findall(r"[\w']+", s.description.lower()))
+            q_words = set(w.lower() for w in words)
+            overlap = len(s_words & q_words)
+            # Exact match bonus
+            if s.description.lower() == cleaned.lower():
+                overlap += 2.0
+            # Street type bonus if user specified "вул" / "пров" etc.
+            if "вул" in raw_name.lower() and "вул" in s.streets_type.lower():
+                overlap += 0.5
+            elif "пров" in raw_name.lower() and "пров" in s.streets_type.lower():
+                overlap += 0.5
+            elif "просп" in raw_name.lower() and "просп" in s.streets_type.lower():
+                overlap += 0.5
+            return float(overlap)
+
+        all_streets.sort(key=score_street, reverse=True)
+        return all_streets
 
     async def create_counterparty_address(
         self,

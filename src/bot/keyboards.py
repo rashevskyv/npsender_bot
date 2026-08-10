@@ -34,11 +34,6 @@ class WaybillActionCallback(CallbackData, prefix="wb"):
     """Callback data schema for waybill actions."""
 
     action: str  # "confirm", "cancel", "toggle_payer", "toggle_cargo", "cycle_value", "cycle_cod", "toggle_cod_type"
-    payer_type: str  # "Recipient", "Sender"
-    cargo_type: str  # "Parcel", "Documents"
-    declared_value: float  # e.g., 500.0, 1000.0, 2000.0
-    cod_amount: float = 0.0  # Cash on delivery amount in UAH
-    cod_payment_type: str = "cash"  # "cash" or "card"
     session_id: str  # unique ID or state reference
 
 
@@ -66,11 +61,6 @@ def get_confirmation_keyboard(
                 text=f"🔄 {payer_label}",
                 callback_data=WaybillActionCallback(
                     action="toggle_payer",
-                    payer_type=payer_type,
-                    cargo_type=cargo_type,
-                    declared_value=declared_value,
-                    cod_amount=cod_amount,
-                    cod_payment_type=cod_payment_type,
                     session_id=session_id,
                 ).pack(),
             ),
@@ -78,11 +68,6 @@ def get_confirmation_keyboard(
                 text=f"🔄 {cargo_label}",
                 callback_data=WaybillActionCallback(
                     action="toggle_cargo",
-                    payer_type=payer_type,
-                    cargo_type=cargo_type,
-                    declared_value=declared_value,
-                    cod_amount=cod_amount,
-                    cod_payment_type=cod_payment_type,
                     session_id=session_id,
                 ).pack(),
             ),
@@ -92,11 +77,6 @@ def get_confirmation_keyboard(
                 text=f"💰 Оцінка: {int(declared_value)} грн 🔄",
                 callback_data=WaybillActionCallback(
                     action="cycle_value",
-                    payer_type=payer_type,
-                    cargo_type=cargo_type,
-                    declared_value=declared_value,
-                    cod_amount=cod_amount,
-                    cod_payment_type=cod_payment_type,
                     session_id=session_id,
                 ).pack(),
             ),
@@ -104,11 +84,6 @@ def get_confirmation_keyboard(
                 text=f"🔄 {cod_label}",
                 callback_data=WaybillActionCallback(
                     action="cycle_cod",
-                    payer_type=payer_type,
-                    cargo_type=cargo_type,
-                    declared_value=declared_value,
-                    cod_amount=cod_amount,
-                    cod_payment_type=cod_payment_type,
                     session_id=session_id,
                 ).pack(),
             ),
@@ -129,11 +104,6 @@ def get_confirmation_keyboard(
                     text=payout_label,
                     callback_data=WaybillActionCallback(
                         action="toggle_cod_type",
-                        payer_type=payer_type,
-                        cargo_type=cargo_type,
-                        declared_value=declared_value,
-                        cod_amount=cod_amount,
-                        cod_payment_type=cod_payment_type,
                         session_id=session_id,
                     ).pack(),
                 )
@@ -146,11 +116,6 @@ def get_confirmation_keyboard(
                 text="✅ Створити ТТН",
                 callback_data=WaybillActionCallback(
                     action="confirm",
-                    payer_type=payer_type,
-                    cargo_type=cargo_type,
-                    declared_value=declared_value,
-                    cod_amount=cod_amount,
-                    cod_payment_type=cod_payment_type,
                     session_id=session_id,
                 ).pack(),
             ),
@@ -158,11 +123,6 @@ def get_confirmation_keyboard(
                 text="❌ Скасувати",
                 callback_data=WaybillActionCallback(
                     action="cancel",
-                    payer_type=payer_type,
-                    cargo_type=cargo_type,
-                    declared_value=declared_value,
-                    cod_amount=cod_amount,
-                    cod_payment_type=cod_payment_type,
                     session_id=session_id,
                 ).pack(),
             ),

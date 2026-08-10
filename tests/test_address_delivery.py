@@ -167,9 +167,6 @@ async def test_confirm_waybill_address_delivery_creates_doors_waybill(setup_test
 
     callback_data = WaybillActionCallback(
         action="confirm",
-        payer_type="Recipient",
-        cargo_type="Parcel",
-        declared_value=500.0,
         session_id=session_id,
     )
 

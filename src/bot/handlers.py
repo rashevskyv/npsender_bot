@@ -1250,12 +1250,17 @@ def register_handlers(
             # Search street in NP database
             street_query = parsed_info.street_name or ""
             streets = await user_np_client.search_street(city_ref=matched_city.ref, street_name=street_query)
-            if streets:
-                matched_street = streets[0]
-                street_ref = matched_street.ref
-                street_display = f"{matched_street.streets_type} {matched_street.description}"
-            else:
-                street_display = f"вул. {street_query}"
+            if not streets:
+                await status_msg.edit_text(
+                    f"❌ Вулицю *'{street_query}'* у населеному пункті *{matched_city.description}* не знайдено в базі Нової Пошти.\n"
+                    "Будь ласка, перевірте правильність назви вулиці або вкажіть номер відділення/поштомату.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            matched_street = streets[0]
+            street_ref = matched_street.ref
+            street_display = f"{matched_street.streets_type} {matched_street.description}"
 
             addr_parts = [f"{street_display}, буд. {parsed_info.building_number}"]
             if parsed_info.flat_number:
@@ -1445,13 +1450,13 @@ def register_handlers(
             return
 
         if action == "toggle_payer":
-            new_payer = "Sender" if callback_data.payer_type == "Recipient" else "Recipient"
+            new_payer = "Sender" if session.get("payer_type", "Recipient") == "Recipient" else "Recipient"
             session["payer_type"] = new_payer
             await callback.message.edit_reply_markup(
                 reply_markup=get_confirmation_keyboard(
                     payer_type=new_payer,
-                    cargo_type=session["cargo_type"],
-                    declared_value=session["declared_value"],
+                    cargo_type=session.get("cargo_type", "Parcel"),
+                    declared_value=session.get("declared_value", 500.0),
                     cod_amount=session.get("cod_amount", 0.0),
                     cod_payment_type=session.get("cod_payment_type", "cash"),
                     session_id=session_id,
@@ -1462,13 +1467,13 @@ def register_handlers(
             return
 
         if action == "toggle_cargo":
-            new_cargo = "Documents" if callback_data.cargo_type == "Parcel" else "Parcel"
+            new_cargo = "Documents" if session.get("cargo_type", "Parcel") == "Parcel" else "Parcel"
             session["cargo_type"] = new_cargo
             await callback.message.edit_reply_markup(
                 reply_markup=get_confirmation_keyboard(
-                    payer_type=session["payer_type"],
+                    payer_type=session.get("payer_type", "Recipient"),
                     cargo_type=new_cargo,
-                    declared_value=session["declared_value"],
+                    declared_value=session.get("declared_value", 500.0),
                     session_id=session_id,
                 )
             )
@@ -1578,7 +1583,7 @@ def register_handlers(
             return
 
         if action == "toggle_cod_type":
-            new_type = "card" if callback_data.cod_payment_type == "cash" else "cash"
+            new_type = "card" if session.get("cod_payment_type", "cash") == "cash" else "cash"
             session["cod_payment_type"] = new_type
 
             u_custom = storage_manager.get_user_settings(user_id)

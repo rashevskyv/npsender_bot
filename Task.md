@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.19.4
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.19.5
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -22,9 +22,11 @@
   - [x] Оновити `_handle_combined_text_message` для створення реєстрів на основі вибору AI та генерації штрих-коду Code128 з розширеним описом накладних
   - [x] Підтримка вибірки за будь-якими критеріями (номери ТТН, "усі чернетки", дати "вчора/сьогодні", місто, опис вантажу, наложка)
 
-- [x] **Крок 4: Підтримка адресної доставки кур'єром (v0.19.4)**
+- [x] **Крок 4: Підтримка адресної доставки кур'єром та оптимізація CallbackData (v0.19.4 - v0.19.5)**
   - [x] Додати моделі `StreetInfo` та `AddressSaveResult` у `src/nova_poshta/models.py`
-  - [x] Реалізувати методи `search_street` та `create_counterparty_address` у `src/nova_poshta/client.py`
+  - [x] Реалізувати інтелектуальний пошук вулиць `search_street` з перестановками слів та ранжуванням
+  - [x] Реалізувати метод `create_counterparty_address` у `src/nova_poshta/client.py`
+  - [x] Спростити `WaybillActionCallback` (action, session_id), усунувши ліміт 64 байти в Telegram
   - [x] Підтримка `service_type="WarehouseDoors"` при створенні/оновленні накладної
   - [x] Виправлення ідентифікації користувача `callback.from_user.id` при виборі адресної доставки в `ensure_user_configured`
 
