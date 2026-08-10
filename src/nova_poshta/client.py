@@ -15,6 +15,8 @@ from src.nova_poshta.models import (
     WaybillCreateResult,
     WaybillItemInfo,
     ScanSheetInfo,
+    StreetInfo,
+    AddressSaveResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -256,6 +258,61 @@ class NovaPoshtaClient:
             CityDescription=selected.get("CityDescription"),
         )
 
+    async def search_street(
+        self, city_ref: str, street_name: str
+    ) -> List[StreetInfo]:
+        """Search for streets by name within a city."""
+        res = await self._post(
+            model_name="Address",
+            called_method="getStreet",
+            method_properties={
+                "CityRef": city_ref,
+                "FindByString": street_name.strip(),
+                "Page": "1",
+            },
+        )
+        streets = []
+        for item in res.get("data", []):
+            streets.append(
+                StreetInfo(
+                    Ref=str(item.get("Ref", "")),
+                    Description=str(item.get("Description", "")),
+                    StreetsType=str(item.get("StreetsType", "вул.")),
+                    CityRef=str(item.get("CityRef", city_ref)),
+                )
+            )
+        return streets
+
+    async def create_counterparty_address(
+        self,
+        counterparty_ref: str,
+        street_ref: str,
+        building_number: str,
+        flat: str = "",
+        note: str = "",
+    ) -> AddressSaveResult:
+        """Create and save a recipient address for a counterparty in Nova Poshta."""
+        res = await self._post(
+            model_name="Address",
+            called_method="save",
+            method_properties={
+                "CounterpartyRef": counterparty_ref,
+                "StreetRef": street_ref,
+                "BuildingNumber": str(building_number).strip(),
+                "Flat": str(flat).strip() if flat else "",
+                "Note": note,
+            },
+        )
+        data = res.get("data", [])
+        if not data:
+            raise RuntimeError("Address/save returned empty data array")
+
+        addr_info = data[0]
+        return AddressSaveResult(
+            Ref=str(addr_info.get("Ref", "")),
+            Description=str(addr_info.get("Description", "")),
+        )
+
     async def create_recipient_counterparty(
         self, first_name: str, last_name: str, phone: str, middle_name: str = ""
     ) -> CounterpartyRecipientResult:
@@ -306,6 +363,7 @@ class NovaPoshtaClient:
         declared_value: float = 300.0,
         cod_amount: Optional[float] = None,
         cod_payer_type: str = "Recipient",
+        service_type: Optional[str] = None,
     ) -> WaybillCreateResult:
         """Create Nova Poshta Express Waybill (ТТН)."""
         today_str = datetime.date.today().strftime("%d.%m.%Y")
@@ -325,6 +383,8 @@ class NovaPoshtaClient:
             for _ in range(seats_amount)
         ]
 
+        eff_service_type = service_type or self.settings.default_service_type or "WarehouseWarehouse"
+
         method_props = {
             "Sender": self.settings.sender_counterparty_ref,
             "ContactSender": self.settings.sender_contact_ref,
@@ -338,7 +398,7 @@ class NovaPoshtaClient:
             "RecipientAddress": recipient_warehouse_ref,
             "PayerType": payer_type,
             "PaymentMethod": self.settings.default_payment_method,
-            "ServiceType": self.settings.default_service_type,
+            "ServiceType": eff_service_type,
             "SeatsAmount": str(seats_amount),
             "Weight": str(weight),
             "Cost": str(declared_value),
@@ -682,6 +742,7 @@ class NovaPoshtaClient:
         seats_amount: int = 1,
         weight: float = 1.0,
         declared_value: float = 500.0,
+        service_type: Optional[str] = None,
     ) -> WaybillCreateResult:
         """Update an existing Nova Poshta Express Waybill (ТТН)."""
         today_str = datetime.date.today().strftime("%d.%m.%Y")
@@ -701,6 +762,8 @@ class NovaPoshtaClient:
             for _ in range(seats_amount)
         ]
 
+        eff_service_type = service_type or self.settings.default_service_type or "WarehouseWarehouse"
+
         method_props = {
             "Ref": document_ref,
             "Sender": self.settings.sender_counterparty_ref,
@@ -715,7 +778,7 @@ class NovaPoshtaClient:
             "RecipientAddress": recipient_warehouse_ref,
             "PayerType": payer_type,
             "PaymentMethod": self.settings.default_payment_method,
-            "ServiceType": self.settings.default_service_type,
+            "ServiceType": eff_service_type,
             "SeatsAmount": str(seats_amount),
             "Weight": str(weight),
             "Cost": str(declared_value),

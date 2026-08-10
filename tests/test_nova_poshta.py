@@ -336,6 +336,103 @@ async def test_delete_waybill_method():
     )
 
 
+@pytest.mark.asyncio
+async def test_search_street_and_create_address_method():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="test_key"))
+    recorded_calls = []
+
+    async def mock_post(model_name, called_method, method_properties):
+        recorded_calls.append((model_name, called_method, method_properties))
+        if called_method == "getStreet":
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "Ref": "street-guid-123",
+                        "Description": "Віри Гордієнко",
+                        "StreetsType": "вул.",
+                        "CityRef": "city-guid-456",
+                    }
+                ],
+            }
+        elif called_method == "save":
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "Ref": "addr-guid-789",
+                        "Description": "вул. Віри Гордієнко, 99",
+                    }
+                ],
+            }
+        return {"success": True, "data": []}
+
+    client._post = mock_post
+
+    streets = await client.search_street(city_ref="city-guid-456", street_name="Віри Гордієнко")
+    assert len(streets) == 1
+    assert streets[0].ref == "street-guid-123"
+    assert streets[0].description == "Віри Гордієнко"
+
+    addr = await client.create_counterparty_address(
+        counterparty_ref="cp-guid-111",
+        street_ref="street-guid-123",
+        building_number="99",
+        flat="10",
+    )
+    assert addr.ref == "addr-guid-789"
+    assert addr.description == "вул. Віри Гордієнко, 99"
+    assert recorded_calls[1] == (
+        "Address",
+        "save",
+        {
+            "CounterpartyRef": "cp-guid-111",
+            "StreetRef": "street-guid-123",
+            "BuildingNumber": "99",
+            "Flat": "10",
+            "Note": "",
+        },
+    )
 
 
+@pytest.mark.asyncio
+async def test_create_waybill_with_address_delivery():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="test_key"))
+    recorded_calls = []
+
+    async def mock_post(model_name, called_method, method_properties):
+        recorded_calls.append((model_name, called_method, method_properties))
+        return {
+            "success": True,
+            "data": [
+                {
+                    "IntDocNumber": "20450999999999",
+                    "Ref": "doc-guid-777",
+                    "Cost": 120,
+                    "EstimatedDeliveryDate": "11.08.2026",
+                }
+            ],
+        }
+
+    client._post = mock_post
+
+    res = await client.create_waybill(
+        recipient_cp_ref="cp-ref",
+        recipient_contact_ref="contact-ref",
+        recipient_phone="0502850704",
+        recipient_city_ref="city-ref",
+        recipient_warehouse_ref="addr-guid-789",
+        service_type="WarehouseDoors",
+    )
+
+    assert res.int_doc_number == "20450999999999"
+    assert res.ref == "doc-guid-777"
+    assert recorded_calls[0][2]["ServiceType"] == "WarehouseDoors"
+    assert recorded_calls[0][2]["RecipientAddress"] == "addr-guid-789"
 

@@ -241,7 +241,7 @@ async def test_fetch_user_active_drafts_combines_and_filters(tmp_path):
 @pytest.mark.asyncio
 async def test_process_register_callback_deletes_caption_or_text(tmp_path):
     import os
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import AsyncMock, MagicMock, patch
     from src.config import Settings
     from src.storage import UserSettingsManager, SavedScanSheet
     from src.bot.keyboards import RegisterActionCallback
@@ -266,9 +266,6 @@ async def test_process_register_callback_deletes_caption_or_text(tmp_path):
     )
     manager.add_user_scansheet(999, s1)
 
-    mock_np_client = MagicMock()
-    mock_np_client.delete_scan_sheet = AsyncMock(return_value=True)
-
     # Mock callback with photo/caption
     mock_callback = MagicMock()
     mock_callback.from_user.id = 999
@@ -278,19 +275,26 @@ async def test_process_register_callback_deletes_caption_or_text(tmp_path):
     mock_callback.message.edit_caption = AsyncMock()
     mock_callback.message.edit_text = AsyncMock()
 
-    callback_data = RegisterActionCallback(action="delete", ref="sheet-to-delete")
+    # Register handlers with this manager
+    register_handlers(
+        settings=Settings(TELEGRAM_BOT_TOKEN="dummy"),
+        ai_extractor=MagicMock(),
+        np_client=MagicMock(),
+        storage_manager=manager,
+    )
 
     # Call delete handler directly or through simulated logic
     from src.bot.handlers import router
-    handler = None
-    for h in router.callback_query.handlers:
-        if "process_register_callback" in str(h.callback):
-            handler = h.callback
-            break
+    matching_handlers = [h.callback for h in router.callback_query.handlers if "process_register_callback" in str(h.callback)]
+    handler = matching_handlers[-1] if matching_handlers else None
+
+    callback_data = RegisterActionCallback(action="delete", ref="sheet-to-delete")
 
     if handler:
-        await handler(mock_callback, callback_data)
-        mock_callback.message.edit_caption.assert_called_once()
-        mock_np_client.delete_scan_sheet.assert_called_once_with("sheet-to-delete")
-        assert len(manager.get_user_scansheets(999)) == 0
+        with patch("src.nova_poshta.client.NovaPoshtaClient.delete_scan_sheet", new_callable=AsyncMock) as mock_delete_ss:
+            mock_delete_ss.return_value = True
+            await handler(mock_callback, callback_data)
+            mock_callback.message.edit_caption.assert_called_once()
+            mock_delete_ss.assert_called_once_with("sheet-to-delete")
+            assert len(manager.get_user_scansheets(999)) == 0
 

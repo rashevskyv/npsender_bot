@@ -6,6 +6,9 @@ from src.nova_poshta.models import (
     CounterpartyRecipientResult,
     WaybillCreateResult,
     WaybillItemInfo,
+    ScanSheetInfo,
+    StreetInfo,
+    AddressSaveResult,
 )
 from src.nova_poshta.client import NovaPoshtaClient
 
@@ -15,5 +18,8 @@ __all__ = [
     "CounterpartyRecipientResult",
     "WaybillCreateResult",
     "WaybillItemInfo",
+    "ScanSheetInfo",
+    "StreetInfo",
+    "AddressSaveResult",
     "NovaPoshtaClient",
 ]

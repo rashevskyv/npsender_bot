@@ -1,6 +1,22 @@
 # Walkthrough (Журнал змін)
 
-## [v0.19.3] - 2026-08-09
+## [v0.19.4] - 2026-08-10
+- **Повна підтримка адресної доставки кур'єром ("🏡 Адресна доставка кур'єром") та виправлення ідентифікації користувача у Callback-запитах**:
+  - **Виправлення перевірки профілю (`callback.from_user.id` замість `callback.message.from_user.id`)**:
+    - У `ensure_user_configured` та `_handle_combined_text_message` (`src/bot/handlers.py`) додано параметр `user_id: int` для явної передачі ідентифікатора користувача.
+    - Раніше при натисканні на інлайн-кнопку "🏡 Адресна доставка кур'єром" виклик `callback.message.from_user.id` повертав ID самого Telegram-бота, через що бот помилково повідомляв, що налаштування та API-ключ не заповнені. Тепер використовується реальний ID користувача (`callback.from_user.id`).
+  - **Інтеграція методів адресної доставки в Nova Poshta API Client (`src/nova_poshta/`)**:
+    - Додано моделі `StreetInfo` та `AddressSaveResult` у `src/nova_poshta/models.py`.
+    - Додано метод `search_street(city_ref, street_name)` через API `Address/getStreet`.
+    - Додано метод `create_counterparty_address(counterparty_ref, street_ref, building_number, flat, note)` через API `Address/save`.
+    - Оновлено `create_waybill` та `update_waybill` для підтримки типу послуги `service_type` (наприклад, `WarehouseDoors` для адресної доставки кур'єром).
+  - **Інтерактивний ланцюжок створення адресної накладної (`src/bot/handlers.py`)**:
+    - Додано метод `_continue_processing_recipient_info`, який без повторного парсингу тексту виконує пошук вулиці в базі НП, валідує номер будинку та генерує картку підтвердження з адресною доставкою.
+    - У виклику підтвердження накладної (`action == "confirm"`) додано створення адреси отримувача та формування накладної `WarehouseDoors`.
+- **Тестування**:
+  - Додано `tests/test_address_delivery.py` з тестами повного циклу вибору адресної доставки та створення накладної `WarehouseDoors`.
+  - Додано тести `test_search_street_and_create_address_method` та `test_create_waybill_with_address_delivery` у `tests/test_nova_poshta.py`.
+  - Усі 35 модульних тестів виконано успішно (`35 passed`).
 - **Покращення видалення ТТН та обробка накладних, включених до реєстру**:
   - У `delete_waybill` (`src/nova_poshta/client.py`) параметр `DocumentRefs` тепер гарантовано передається як масив `[document_ref]` згідно зі специфікацією API Нової Пошти.
   - У `process_draft_callback` (`src/bot/handlers.py`) додано зрозуміле та інформативне попередження користувачеві при спробі видалити ТТН, яка наразі включена до активного реєстру:

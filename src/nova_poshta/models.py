@@ -72,3 +72,19 @@ class ScanSheetInfo(BaseModel):
     count_of_documents: int = Field(default=0, alias="CountOfDocuments")
     is_printed: bool = Field(default=False)
 
+
+class StreetInfo(BaseModel):
+    """Nova Poshta Street entity."""
+
+    ref: str = Field(..., alias="Ref")
+    description: str = Field(..., alias="Description")
+    streets_type: str = Field(default="вул.", alias="StreetsType")
+    city_ref: str = Field(..., alias="CityRef")
+
+
+class AddressSaveResult(BaseModel):
+    """Result of Address/save operation."""
+
+    ref: str = Field(..., alias="Ref")
+    description: Optional[str] = Field(default=None, alias="Description")
+
