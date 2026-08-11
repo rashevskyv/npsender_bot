@@ -280,3 +280,101 @@ async def test_process_street_select_callback():
     assert session["street_name"] == "Гордієнко Віри"
     assert "вул. Гордієнко Віри" in session["destination_description"]
 
+
+def _get_message_handler():
+    for h in reversed(router.message.handlers):
+        if "process_text_message" in str(h.callback):
+            return h.callback
+    raise RuntimeError("process_text_message not found in router")
+
+
+@pytest.mark.asyncio
+async def test_preserve_user_custom_settings_across_natural_language_updates(setup_test_handlers):
+    """Verify that toggling payer to 'Sender' is preserved when user sends a text update like 'Опис вантажу сувенір'."""
+    import asyncio
+    manager = setup_test_handlers
+    session_id = "test_sess_preserve"
+    user_id = 112233
+
+    manager.update_user_settings(
+        user_id,
+        nova_poshta_api_key="test_np_key",
+        ai_api_key="test_ai_key",
+    )
+
+    parsed_info = ParsedRecipientInfo(
+        last_name="Ковальчук",
+        first_name="Р.",
+        middle_name="О.",
+        phone="0631344371",
+        city_name="Житомир",
+        warehouse_number=19,
+        is_recipient_info=True,
+        cargo_description="планшет",
+        declared_value=500.0,
+    )
+    city = CityInfo(Ref="city-zhytomyr-ref", Description="Житомир", AreaDescription="Житомирська", RegionsDescription="")
+    warehouse = MagicMock()
+    warehouse.ref = "wh-19-ref"
+    warehouse.description = "Відділення №19: вул. Чуднівська, 92"
+
+    PENDING_SESSIONS[session_id] = {
+        "parsed_info": parsed_info,
+        "city": city,
+        "warehouse": warehouse,
+        "is_address_delivery": False,
+        "destination_description": warehouse.description,
+        "payer_type": "Sender",  # User toggled to Sender!
+        "cargo_type": "Documents",  # User toggled to Documents!
+        "declared_value": 2000.0,
+        "cargo_description": "планшет",
+        "cod_amount": 1000.0,
+        "cod_payment_type": "card",
+        "user_id": user_id,
+    }
+    USER_ACTIVE_SESSIONS[user_id] = session_id
+
+    # Now user sends follow-up text "Опис вантажу сувенір"
+    updated_parsed_info = ParsedRecipientInfo(
+        last_name="Ковальчук",
+        first_name="Р.",
+        middle_name="О.",
+        phone="0631344371",
+        city_name="Житомир",
+        warehouse_number=19,
+        is_recipient_info=True,
+        cargo_description="сувенір",  # Updated description
+        payer_type=None,  # No explicit payer mentioned in text
+        cargo_type=None,
+    )
+
+    message = MagicMock()
+    message.from_user.id = user_id
+    message.text = "Опис вантажу сувенір"
+    status_mock = MagicMock()
+    status_mock.edit_text = AsyncMock()
+    message.answer = AsyncMock(return_value=status_mock)
+
+    with patch("src.ai.extractor.AIExtractor.parse_text", new_callable=AsyncMock) as mock_parse, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.search_city", new_callable=AsyncMock) as mock_city, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_warehouse", new_callable=AsyncMock) as mock_wh:
+        mock_parse.return_value = updated_parsed_info
+        mock_city.return_value = [city]
+        mock_wh.return_value = warehouse
+
+        msg_handler = _get_message_handler()
+        await msg_handler(message)
+        from src.bot.handlers import USER_DEBOUNCE_TASKS
+        if user_id in USER_DEBOUNCE_TASKS:
+            await USER_DEBOUNCE_TASKS[user_id]
+
+    # Session MUST have preserved:
+    session = PENDING_SESSIONS[session_id]
+    assert session["payer_type"] == "Sender", "Payer type 'Sender' must be preserved!"
+    assert session["cargo_type"] == "Documents", "Cargo type 'Documents' must be preserved!"
+    assert session["declared_value"] == 2000.0, "Declared value 2000.0 must be preserved!"
+    assert session["cod_amount"] == 1000.0, "COD amount 1000.0 must be preserved!"
+    assert session["cod_payment_type"] == "card", "COD payment type 'card' must be preserved!"
+    assert session["cargo_description"] == "сувенір", "Cargo description must be updated to 'сувенір'!"
+
+

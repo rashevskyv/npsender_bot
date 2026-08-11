@@ -102,6 +102,12 @@ class ParsedRecipientInfo(BaseModel):
     cod_payment_type: Optional[str] = Field(
         default=None, description="COD payout type: 'cash' (готівкою у відділенні) or 'card' (на банківську картку) if specified"
     )
+    payer_type: Optional[str] = Field(
+        default=None, description="Payer type: 'Sender' (відправник) or 'Recipient' (отримувач) if explicitly specified in text"
+    )
+    cargo_type: Optional[str] = Field(
+        default=None, description="Cargo type: 'Parcel' (посилка) or 'Documents' (документи) if explicitly specified in text"
+    )
     is_register_intent: Optional[bool] = Field(
         default=False,
         description="True if the user is asking about ScanSheet registers or requesting to filter/create a register of express waybills",

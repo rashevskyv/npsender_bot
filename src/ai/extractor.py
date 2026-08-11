@@ -37,6 +37,8 @@ Determine the user's intent:
      • Cargo Description update (e.g. "зміни опис на планшет", "опис сувенір", "товар: одяг"): update `cargo_description`.
      • Declared Value update (e.g. "оцінка 5000 грн", "зміни оцінку на 15000"): update `declared_value`.
      • COD update (e.g. "додай наложку 15000 на картку", "накладений платіж 3000 готівка", "прибери наложку"): update `cod_amount` (0 if removed) and `cod_payment_type` ("cash" or "card").
+     • Payer update (e.g. "платник відправник", "я оплачу", "оплата відправник"): update `payer_type` to "Sender"; ("платник отримувач", "оплата отримувачем"): update `payer_type` to "Recipient".
+     • Cargo Type update (e.g. "тип вантажу документи", "документи"): update `cargo_type` to "Documents"; ("посилка"): update `cargo_type` to "Parcel".
 
    - Extract/merge the following fields:
      • last_name: Recipient's last name (Прізвище)
@@ -57,6 +59,8 @@ Determine the user's intent:
      • declared_value: Declared value number if mentioned or updated
      • cod_amount: Cash on Delivery amount in UAH if specified
      • cod_payment_type: "cash" or "card" if specified
+     • payer_type: "Sender" or "Recipient" if explicitly specified
+     • cargo_type: "Parcel" or "Documents" if explicitly specified
 
 3. REGISTER & WAYBILL FILTERING INTENT (is_register_intent: true):
    If the user asks to list/filter waybills by date, time, or cargo description, or asks to create a ScanSheet register (e.g. "надай мені всі накладні, які були створені за сьогодні", "створи реєстр з усіх накладних з описом сувенір", "створи реєстр з накладних створених вчора до обіду", "покажи мої реєстри", "створи реєстр з накладної 2045..."):

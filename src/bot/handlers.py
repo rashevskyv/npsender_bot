@@ -1276,30 +1276,59 @@ def register_handlers(
                 dest_desc = f"🏡 Адресна доставка: {', '.join(addr_parts)}"
             else:
                 # Multiple matching streets/lanes found -> present disambiguation keyboard
-                cod_val = parsed_info.cod_amount or 0.0
-                cod_type = parsed_info.cod_payment_type or "cash"
-                declared_val = max(
-                    parsed_info.declared_value or eff_settings.default_declared_value,
-                    500.0,
-                    cod_val,
-                )
-                cargo_desc = parsed_info.cargo_description or "Посилка"
+                existing_session = PENDING_SESSIONS.get(session_id, {})
+                payer_type = parsed_info.payer_type or existing_session.get("payer_type") or eff_settings.default_payer_type
+                cargo_type = parsed_info.cargo_type or existing_session.get("cargo_type") or eff_settings.default_cargo_type
 
-                PENDING_SESSIONS[session_id] = {
+                if parsed_info.cod_amount is not None:
+                    cod_val = parsed_info.cod_amount
+                elif "cod_amount" in existing_session:
+                    cod_val = existing_session["cod_amount"]
+                else:
+                    cod_val = 0.0
+
+                if parsed_info.cod_payment_type:
+                    cod_type = parsed_info.cod_payment_type
+                elif "cod_payment_type" in existing_session:
+                    cod_type = existing_session["cod_payment_type"]
+                else:
+                    cod_type = "cash"
+
+                if parsed_info.declared_value is not None:
+                    raw_decl = parsed_info.declared_value
+                elif "declared_value" in existing_session:
+                    raw_decl = existing_session["declared_value"]
+                else:
+                    raw_decl = eff_settings.default_declared_value
+                declared_val = max(raw_decl, 500.0, cod_val)
+
+                if parsed_info.cargo_description:
+                    cargo_desc = parsed_info.cargo_description
+                elif "cargo_description" in existing_session:
+                    cargo_desc = existing_session["cargo_description"]
+                else:
+                    cargo_desc = "Посилка"
+
+                session_payload = {
                     "parsed_info": parsed_info,
                     "city": matched_city,
                     "street_candidates": streets,
                     "is_address_delivery": True,
                     "building_number": parsed_info.building_number,
                     "flat_number": parsed_info.flat_number,
-                    "payer_type": eff_settings.default_payer_type,
-                    "cargo_type": eff_settings.default_cargo_type,
+                    "payer_type": payer_type,
+                    "cargo_type": cargo_type,
                     "declared_value": declared_val,
                     "cargo_description": cargo_desc,
                     "cod_amount": cod_val,
                     "cod_payment_type": cod_type,
                     "user_id": user_id,
                 }
+                editing_ref = existing_session.get("editing_draft_ref")
+                if editing_ref:
+                    session_payload["editing_draft_ref"] = editing_ref
+
+                PENDING_SESSIONS[session_id] = session_payload
                 USER_ACTIVE_SESSIONS[user_id] = session_id
 
                 candidate_lines = [
@@ -1345,11 +1374,20 @@ def register_handlers(
                 dest_desc = warehouse.description
             else:
                 # Save candidates in session and present city disambiguation keyboard
-                PENDING_SESSIONS[session_id] = {
+                existing_session = PENDING_SESSIONS.get(session_id, {})
+                session_payload = {
                     "parsed_info": parsed_info,
                     "candidates": matching_candidates,
                     "user_id": user_id,
                 }
+                editing_ref = existing_session.get("editing_draft_ref")
+                if editing_ref:
+                    session_payload["editing_draft_ref"] = editing_ref
+                for k in ["payer_type", "cargo_type", "declared_value", "cargo_description", "cod_amount", "cod_payment_type"]:
+                    if k in existing_session:
+                        session_payload[k] = existing_session[k]
+
+                PENDING_SESSIONS[session_id] = session_payload
                 USER_ACTIVE_SESSIONS[user_id] = session_id
 
                 candidate_text_lines = [
@@ -1367,17 +1405,49 @@ def register_handlers(
                 )
                 return
 
-        # Enforce minimum declared value of 500 UAH AND declared_value >= cod_amount
-        cod_val = parsed_info.cod_amount or 0.0
-        cod_type = parsed_info.cod_payment_type or "cash"
-        declared_val = max(
-            parsed_info.declared_value or eff_settings.default_declared_value,
-            500.0,
-            cod_val,
-        )
-        cargo_desc = parsed_info.cargo_description or "Посилка"
+        existing_session = PENDING_SESSIONS.get(session_id, {})
 
-        PENDING_SESSIONS[session_id] = {
+        # Payer Type: explicit in parsed_info -> existing in session -> default
+        payer_type = parsed_info.payer_type or existing_session.get("payer_type") or eff_settings.default_payer_type
+
+        # Cargo Type: explicit in parsed_info -> existing in session -> default
+        cargo_type = parsed_info.cargo_type or existing_session.get("cargo_type") or eff_settings.default_cargo_type
+
+        # COD Amount & Payout Type:
+        if parsed_info.cod_amount is not None:
+            cod_val = parsed_info.cod_amount
+        elif "cod_amount" in existing_session:
+            cod_val = existing_session["cod_amount"]
+        else:
+            cod_val = 0.0
+
+        if parsed_info.cod_payment_type:
+            cod_type = parsed_info.cod_payment_type
+        elif "cod_payment_type" in existing_session:
+            cod_type = existing_session["cod_payment_type"]
+        else:
+            cod_type = "cash"
+
+        # Declared Value:
+        if parsed_info.declared_value is not None:
+            raw_decl = parsed_info.declared_value
+        elif "declared_value" in existing_session:
+            raw_decl = existing_session["declared_value"]
+        else:
+            raw_decl = eff_settings.default_declared_value
+        declared_val = max(raw_decl, 500.0, cod_val)
+
+        # Cargo Description:
+        if parsed_info.cargo_description:
+            cargo_desc = parsed_info.cargo_description
+        elif "cargo_description" in existing_session:
+            cargo_desc = existing_session["cargo_description"]
+        else:
+            cargo_desc = "Посилка"
+
+        editing_ref = existing_session.get("editing_draft_ref")
+
+        session_payload = {
             "parsed_info": parsed_info,
             "city": matched_city,
             "warehouse": warehouse,
@@ -1387,14 +1457,18 @@ def register_handlers(
             "building_number": parsed_info.building_number,
             "flat_number": parsed_info.flat_number,
             "destination_description": dest_desc,
-            "payer_type": eff_settings.default_payer_type,
-            "cargo_type": eff_settings.default_cargo_type,
+            "payer_type": payer_type,
+            "cargo_type": cargo_type,
             "declared_value": declared_val,
             "cargo_description": cargo_desc,
             "cod_amount": cod_val,
             "cod_payment_type": cod_type,
             "user_id": user_id,
         }
+        if editing_ref:
+            session_payload["editing_draft_ref"] = editing_ref
+
+        PENDING_SESSIONS[session_id] = session_payload
         USER_ACTIVE_SESSIONS[user_id] = session_id
 
         cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
@@ -1411,15 +1485,19 @@ def register_handlers(
             "Перевірте дані та оберіть дію нижче:"
         )
 
+        u_custom = storage_manager.get_user_settings(user_id)
+        card_mask = u_custom.sender_card_mask
+
         await status_msg.edit_text(
             card_text,
             parse_mode="Markdown",
             reply_markup=get_confirmation_keyboard(
-                payer_type=eff_settings.default_payer_type,
-                cargo_type=eff_settings.default_cargo_type,
+                payer_type=payer_type,
+                cargo_type=cargo_type,
                 declared_value=declared_val,
                 cod_amount=cod_val,
                 cod_payment_type=cod_type,
+                sender_card_mask=card_mask,
                 session_id=session_id,
             ),
         )
@@ -1959,19 +2037,27 @@ def register_handlers(
         matched_city, warehouse = selected
         parsed_info = session["parsed_info"]
 
-        declared_val = max(
+        payer_type = session.get("payer_type") or parsed_info.payer_type or eff_settings.default_payer_type
+        cargo_type = session.get("cargo_type") or parsed_info.cargo_type or eff_settings.default_cargo_type
+        declared_val = session.get("declared_value") or max(
             parsed_info.declared_value or eff_settings.default_declared_value,
             500.0,
         )
-        cargo_desc = parsed_info.cargo_description or "Посилка"
+        cargo_desc = session.get("cargo_description") or parsed_info.cargo_description or "Посилка"
+        cod_val = session.get("cod_amount", 0.0)
+        cod_type = session.get("cod_payment_type", "cash")
 
         session["city"] = matched_city
         session["warehouse"] = warehouse
-        session["payer_type"] = eff_settings.default_payer_type
-        session["cargo_type"] = eff_settings.default_cargo_type
+        session["payer_type"] = payer_type
+        session["cargo_type"] = cargo_type
         session["declared_value"] = declared_val
         session["cargo_description"] = cargo_desc
+        session["cod_amount"] = cod_val
+        session["cod_payment_type"] = cod_type
         session.pop("candidates", None)
+
+        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
         card_text = (
             "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
@@ -1980,17 +2066,24 @@ def register_handlers(
             f"🏙 *Місто:* {matched_city.description}\n"
             f"📦 *Пункт призначення:* {warehouse.description}\n"
             f"📝 *Опис вантажу:* {cargo_desc}\n"
-            f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n\n"
+            f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
+            f"💵 *Накладений платіж:* {cod_str}\n\n"
             "Перевірте дані та оберіть дію нижче:"
         )
+
+        u_custom = storage_manager.get_user_settings(user_id)
+        card_mask = u_custom.sender_card_mask
 
         await callback.message.edit_text(
             card_text,
             parse_mode="Markdown",
             reply_markup=get_confirmation_keyboard(
-                payer_type=eff_settings.default_payer_type,
-                cargo_type=eff_settings.default_cargo_type,
+                payer_type=payer_type,
+                cargo_type=cargo_type,
                 declared_value=declared_val,
+                cod_amount=cod_val,
+                cod_payment_type=cod_type,
+                sender_card_mask=card_mask,
                 session_id=session_id,
             ),
         )
