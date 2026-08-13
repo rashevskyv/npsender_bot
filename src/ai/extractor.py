@@ -17,7 +17,7 @@ SYSTEM_PROMPT = """You are an intelligent AI assistant for creating Nova Poshta 
 Determine the user's intent:
 
 1. CONVERSATIONAL INTENT (is_recipient_info: false):
-   If the user greets you, asks who you are ("хто ти", "що ти робиш"), asks what you need or how to use you ("що тобі треба", "які дані потрібні", "як з тобою працювати"), or asks general questions:
+   If the user greets you, asks who you are ("хто ти", "що ти робиш"), asks what you need or how to use you ("що тобі треба", "які дані потрібні", "як з тобою працювати"), or asks general questions WITHOUT any delivery recipient info:
    - Set `is_recipient_info`: false
    - Set `conversational_response`: Provide a polite, friendly response in Ukrainian explaining:
      • Who you are: AI assistant for instant Nova Poshta Express Waybill (ТТН) generation.
@@ -27,7 +27,28 @@ Determine the user's intent:
 2. RECIPIENT INFO OR CONTEXTUAL UPDATE / EDIT INTENT (is_recipient_info: true):
    If the user provides recipient delivery information OR sends follow-up / modification messages in natural language (e.g. changing name, phone, city, branch, street address, cargo description, declared value, or COD):
    - Set `is_recipient_info`: true
-   - ALWAYS MERGE previous active recipient data with new updates. Keep all non-null fields from previous data (last_name, first_name, middle_name, phone, city_name, warehouse_number, street_name, building_number, etc.) unless the new message explicitly updates or replaces them.
+   - ALWAYS MERGE previous active recipient data with new updates. Keep all non-null fields from previous data unless the new message explicitly updates or replaces them.
+
+   - TELEGRAM FORWARDED HEADERS:
+     Ignore Telegram forwarding metadata headers like "Переслано від <Name>", "Forwarded from <Name>", or "Переслане повідомлення".
+     Extract the recipient details strictly from the message payload body (e.g. in "Переслано від Vlad Martyniuk ... Мартинюк Є.В.", the recipient name is "Мартинюк Є.В.", NOT "Vlad Martyniuk").
+
+   - RECIPIENT NAME & INITIALS:
+     Support Ukrainian names with initials format like "Мартинюк Є.В.", "Ковальчук Р. О.", "Іванов І.":
+     • last_name: "Мартинюк"
+     • first_name: "Є."
+     • middle_name: "В."
+     NEVER discard or leave name null when initials are provided!
+
+   - POSTOMAT & BRANCH TERMINOLOGY:
+     Support Ukrainian, Russian, and Surzhyk terms:
+     • "поштомат", "почтомат", "паштомат", "пм", "поштомат НП" -> set `is_postomat: true`, `warehouse_number: <int>`
+     • "відділення", "відд", "склад", "отделение" -> set `is_postomat: false`, `warehouse_number: <int>`
+     • If a postomat or branch number is specified (e.g. "почтомат НП 24991") followed by a physical location address in parentheses (e.g. "(просп Князя Володимира Великого 75А, 3 під'їзд)"), extract `warehouse_number: 24991`, `is_postomat: true`, and set `has_address_suspicion: false` and `is_address_delivery: false`.
+
+   - PHONE LABELS:
+     Extract phone number even if prefixed with "Тел.", "тел:", "номер", "т." (e.g. "Тел. 0674840376" -> "0674840376").
+
    - Specific update rules:
      • Recipient Name update (e.g. "зміни прізвище на Іваненко", "отримувач Шевченко Тарас", "поміняй ім'я на Арсеній"): update `last_name`, `first_name`, and/or `middle_name`.
      • Phone update (e.g. "зміни телефон на 0971234567", "новий номер 0502850704"): update `phone`.
@@ -49,11 +70,11 @@ Determine the user's intent:
      • region_name: Oblast name if specified (e.g. "Дніпропетровська", "Черкаська", "Київська")
      • district_name: District/Raion name if specified
      • settlement_type: Settlement type if specified ("місто", "село", "смт")
-     • warehouse_number: Primary integer branch or postomat number (e.g. 36, 12, 26584). 
-       IMPORTANT: If the text includes a branch/postomat number AND a physical street address of the branch, extract ONLY the branch/postomat integer ID (`36` or `26584`).
-     • is_postomat: Boolean (true if text mentions "поштомат", false for "відділення")
+     • warehouse_number: Primary integer branch or postomat number (e.g. 36, 12, 26584, 24991). 
+       IMPORTANT: If the text includes a branch/postomat number AND a physical street address of the branch, extract ONLY the branch/postomat integer ID (`36` or `24991`).
+     • is_postomat: Boolean (true if text mentions "поштомат"/"почтомат", false for "відділення")
      • street_name, building_number, flat_number: extract personal home/office street name, building/house number, flat/apartment number.
-     • has_address_suspicion: Boolean (true if text mentions personal home/office street address, apartment, or keywords "додому", "кур'єром", "на адресу", "вул.", "буд.", "кв.")
+     • has_address_suspicion: Boolean (true if text mentions personal home/office street address, apartment, or keywords "додому", "кур'єром", "на адресу", "вул.", "буд.", "кв." WITHOUT a branch/postomat number)
      • is_address_delivery: Boolean (true if user explicitly confirmed or requested courier door delivery or specified a street with house number without warehouse)
      • cargo_description: Item description if mentioned or updated
      • declared_value: Declared value number if mentioned or updated
@@ -112,8 +133,24 @@ Your task:
 """
 
 
+UKRAINIAN_CITIES_REFERENCE = [
+    "Київ", "Одеса", "Харків", "Дніпро", "Львів", "Запоріжжя", "Кривий Ріг",
+    "Миколаїв", "Вінниця", "Полтава", "Чернігів", "Черкаси", "Житомир", "Суми",
+    "Хмельницький", "Чернівці", "Рівне", "Кам'янське", "Кропивницький",
+    "Івано-Франківськ", "Кременчук", "Тернопіль", "Луцьк", "Біла Церква",
+    "Ужгород", "Нікополь", "Бровари", "Бердянськ", "Павлоград",
+    "Кам'янець-Подільський", "Мукачево", "Конотоп", "Умань", "Олександрія",
+    "Дрогобич", "Бердичів", "Шостка", "Бахмут", "Ізмаїл", "Новомосковськ",
+    "Ковель", "Ніжин", "Сміла", "Калуш", "Червоноград", "Первомайськ",
+    "Бориспіль", "Коростень", "Коломия", "Чорноморськ", "Стрий", "Прилуки",
+    "Лозова", "Новоград-Волинський", "Енергодар", "Нововолинськ", "Горішні Плавні",
+    "Ізюм", "Білгород-Дністровський", "Ірпінь", "Буча", "Вишневе", "Васильків",
+    "Обухів", "Боярка", "Вишгород", "Фастів", "Трускавець", "Самбір", "Чортків",
+]
+
+
 class AIExtractor:
-    """Async AI extractor leveraging OpenAI client."""
+    """Async AI extractor leveraging OpenAI client with robust entity healing."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -124,6 +161,130 @@ class AIExtractor:
             base_url=base_url,
         )
         self.model = settings.ai_model
+
+    @classmethod
+    def heal_parsed_recipient_info(
+        cls, text: str, parsed: ParsedRecipientInfo
+    ) -> ParsedRecipientInfo:
+        """Heal and fill missing recipient fields from raw text via robust regex heuristics."""
+        import re
+
+        if not text or not text.strip():
+            return parsed
+
+        if parsed.is_register_intent:
+            return parsed
+
+        # 1. Phone extraction / normalization
+        if not parsed.phone:
+            phone_match = re.search(
+                r'(?:(?:\+?38)?\s*\(?(0\d{2})\)?[\s\-]?(\d{3})[\s\-]?(\d{2})[\s\-]?(\d{2})|\b(0\d{9})\b|\b(\+?380\d{9})\b)',
+                text,
+            )
+            if phone_match:
+                raw_phone = "".join(c for c in phone_match.group(0) if c.isdigit())
+                if len(raw_phone) == 10 and raw_phone.startswith("0"):
+                    parsed.phone = raw_phone
+                elif len(raw_phone) == 12 and raw_phone.startswith("380"):
+                    parsed.phone = raw_phone
+                elif len(raw_phone) == 9:
+                    parsed.phone = "0" + raw_phone
+
+        # 2. Postomat / Branch extraction
+        if not parsed.warehouse_number:
+            # Check postomat first (Ukrainian / Russian / Surzhyk variations)
+            postomat_match = re.search(
+                r'(?:поштомат|почтомат|паштомат|пм|поштоматі|почтоматі)\s*(?:нп|№|номер)?\s*(\d{1,6})',
+                text,
+                re.IGNORECASE,
+            )
+            if postomat_match:
+                parsed.warehouse_number = int(postomat_match.group(1))
+                parsed.is_postomat = True
+            else:
+                # Check branch
+                branch_match = re.search(
+                    r'(?:відділення|відділенні|відд|склад|складі|отделение)\s*(?:нп|№|номер)?\s*(\d{1,5})',
+                    text,
+                    re.IGNORECASE,
+                )
+                if branch_match:
+                    parsed.warehouse_number = int(branch_match.group(1))
+                    parsed.is_postomat = False
+                else:
+                    # Check generic "НП 24991" or "№ 24991"
+                    generic_match = re.search(r'(?:нп|№|номер)\s*(\d{1,6})', text, re.IGNORECASE)
+                    if generic_match:
+                        num = int(generic_match.group(1))
+                        parsed.warehouse_number = num
+                        if num > 1000:
+                            parsed.is_postomat = True
+
+        # 3. City extraction
+        if not parsed.city_name:
+            for city in UKRAINIAN_CITIES_REFERENCE:
+                if re.search(rf'\b{re.escape(city)}\b', text, re.IGNORECASE):
+                    parsed.city_name = city
+                    break
+            if not parsed.city_name:
+                city_prefix_match = re.search(
+                    r'(?:м\.|місто|смт|с\.)\s*([А-ЯЄІЇҐ][а-яєіїґ\'-]+)', text, re.IGNORECASE
+                )
+                if city_prefix_match:
+                    parsed.city_name = city_prefix_match.group(1)
+
+        # 4. Name with initials or full name
+        if not parsed.last_name:
+            clean_lines = [
+                line
+                for line in text.splitlines()
+                if not re.search(
+                    r'(?:переслано від|forwarded from|переслане повідомлення)', line, re.IGNORECASE
+                )
+            ]
+            clean_body = "\n".join(clean_lines)
+
+            # Check initials format: "Мартинюк Є.В." or "Мартинюк Є. В."
+            initials_match = re.search(
+                r'\b([А-ЯЄІЇҐ][а-яєіїґ\']+)\s+([А-ЯЄІЇҐ]\.(?:\s*[А-ЯЄІЇҐ]\.)?)', clean_body
+            )
+            if initials_match:
+                parsed.last_name = initials_match.group(1)
+                raw_initials = initials_match.group(2).replace(" ", "").split(".")
+                parsed.first_name = (
+                    raw_initials[0] + "." if len(raw_initials) > 0 and raw_initials[0] else None
+                )
+                parsed.middle_name = (
+                    raw_initials[1] + "." if len(raw_initials) > 1 and raw_initials[1] else None
+                )
+            else:
+                # Check 2 or 3 word name: "Мартинюк Євген Васильович"
+                name_match = re.search(
+                    r'\b([А-ЯЄІЇҐ][а-яєіїґ\']+)\s+([А-ЯЄІЇҐ][а-яєіїґ\']+)(?:\s+([А-ЯЄІЇҐ][а-яєіїґ\']+))?\b',
+                    clean_body,
+                )
+                if name_match:
+                    candidate_last = name_match.group(1)
+                    candidate_first = name_match.group(2)
+                    if (
+                        candidate_last not in UKRAINIAN_CITIES_REFERENCE
+                        and candidate_first not in UKRAINIAN_CITIES_REFERENCE
+                    ):
+                        parsed.last_name = candidate_last
+                        parsed.first_name = candidate_first
+                        if name_match.group(3):
+                            parsed.middle_name = name_match.group(3)
+
+        # 5. Prevent false address delivery suspicion if postomat/branch number was detected
+        if parsed.warehouse_number:
+            parsed.has_address_suspicion = False
+            parsed.is_address_delivery = False
+
+        # If essential recipient details exist, ensure is_recipient_info is True
+        if parsed.phone or parsed.city_name or parsed.warehouse_number or parsed.last_name:
+            parsed.is_recipient_info = True
+
+        return parsed
 
     async def parse_text(
         self, text: str, previous_info: Optional[ParsedRecipientInfo] = None
@@ -150,13 +311,15 @@ class AIExtractor:
             content = response.choices[0].message.content
             if not content:
                 logger.warning("Empty response from AI model")
-                return ParsedRecipientInfo(
+                empty_res = ParsedRecipientInfo(
                     is_recipient_info=False,
                     conversational_response="Я не зміг розпізнати повідомлення. Будь ласка, надішліть реквізити отримувача (ПІБ, телефон, місто, номер відділення) або скористайтеся кнопками нижче.",
                 )
+                return self.heal_parsed_recipient_info(text, empty_res)
 
             data = json.loads(content)
-            return ParsedRecipientInfo(**data)
+            parsed_res = ParsedRecipientInfo(**data)
+            return self.heal_parsed_recipient_info(text, parsed_res)
         except Exception as e:
             logger.error(f"Error parsing recipient text with AI: {e}")
             try:
@@ -171,13 +334,23 @@ class AIExtractor:
                 raw_text = response.choices[0].message.content or ""
                 clean_text = raw_text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(clean_text)
-                return ParsedRecipientInfo(**data)
+                parsed_res = ParsedRecipientInfo(**data)
+                return self.heal_parsed_recipient_info(text, parsed_res)
             except Exception as fallback_err:
                 logger.error(f"Fallback AI parsing failed: {fallback_err}")
-                return ParsedRecipientInfo(
+                empty_res = ParsedRecipientInfo(
                     is_recipient_info=False,
                     conversational_response="Привіт! Я AI-бот для автоматичного створення накладних Нової Пошти (ТТН). Надішліть мені ПІБ отримувача, телефон, місто та номер відділення/поштомату!",
                 )
+                healed_fallback = self.heal_parsed_recipient_info(text, empty_res)
+                if (
+                    healed_fallback.phone
+                    or healed_fallback.city_name
+                    or healed_fallback.warehouse_number
+                    or healed_fallback.last_name
+                ):
+                    return healed_fallback
+                return empty_res
 
     async def filter_drafts_for_register(
         self, user_prompt: str, drafts: List[Dict[str, Any]]

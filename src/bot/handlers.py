@@ -48,10 +48,11 @@ USER_LAST_MESSAGES: Dict[int, Message] = {}
 
 
 def clear_user_active_session(user_id: int):
-    """Clear active waybill session for a given user."""
+    """Clear active waybill session and recent parsed info for a given user."""
     session_id = USER_ACTIVE_SESSIONS.pop(user_id, None)
     if session_id:
         PENDING_SESSIONS.pop(session_id, None)
+    USER_LAST_PARSED_INFO.pop(user_id, None)
 
 
 def _parse_draft_date(date_str: str) -> Optional[datetime.datetime]:
@@ -1570,8 +1571,7 @@ def register_handlers(
         user_id = session["user_id"]
 
         if action == "cancel":
-            PENDING_SESSIONS.pop(session_id, None)
-            USER_ACTIVE_SESSIONS.pop(user_id, None)
+            clear_user_active_session(user_id)
             await callback.message.edit_text("❌ *Створення накладної скасовано.*", parse_mode="Markdown")
             await callback.answer()
             return
@@ -1895,6 +1895,7 @@ def register_handlers(
                     f"🔗 [Відстежити ТТН на сайті Нової Пошти]({tracking_url})"
                 )
 
+                clear_user_active_session(user_id)
                 await callback.message.edit_text(
                     success_card,
                     parse_mode="Markdown",

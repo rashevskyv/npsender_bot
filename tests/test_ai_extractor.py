@@ -220,3 +220,60 @@ async def test_filter_drafts_for_register_fallback(monkeypatch):
 
     assert result.action == "create"
     assert result.selected_doc_numbers == ["204501", "204502"]
+
+
+def test_heal_parsed_recipient_info_forwarded_postomat():
+    """Verify healing of forwarded message with postomat address and initials."""
+    from src.ai.extractor import AIExtractor
+
+    sample_text = """Переслано від Vlad Martyniuk
+Одеса, почтомат НП 24991 (просп Князя Володимира Великого 75А, 3 під'їзд)
+Мартинюк Є.В.
+Тел. 0674840376"""
+
+    empty_parsed = ParsedRecipientInfo()
+    healed = AIExtractor.heal_parsed_recipient_info(sample_text, empty_parsed)
+
+    assert healed.is_recipient_info is True
+    assert healed.last_name == "Мартинюк"
+    assert healed.first_name == "Є."
+    assert healed.middle_name == "В."
+    assert healed.phone == "0674840376"
+    assert healed.city_name == "Одеса"
+    assert healed.warehouse_number == 24991
+    assert healed.is_postomat is True
+    assert healed.has_address_suspicion is False
+    assert healed.is_address_delivery is False
+    assert healed.full_name == "Мартинюк Є. В."
+
+
+@pytest.mark.asyncio
+async def test_parse_text_heals_when_ai_returns_empty(monkeypatch):
+    """Verify that when AI returns empty or fails, parse_text heals entities from raw text."""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.config import Settings
+    from src.ai.extractor import AIExtractor
+
+    settings = Settings(
+        telegram_bot_token="fake_bot_token",
+        nova_poshta_api_key="fake_np_key",
+        ai_api_key="fake_ai_key",
+    )
+    extractor = AIExtractor(settings)
+
+    mock_chat = MagicMock()
+    # Simulate AI returning empty response or failing
+    mock_chat.completions.create = AsyncMock(side_effect=RuntimeError("AI error"))
+    monkeypatch.setattr(extractor, "client", MagicMock(chat=mock_chat))
+
+    text = "Київ, відділення 12, Шевченко Тарас, 0971234567"
+    result = await extractor.parse_text(text)
+
+    assert result.is_recipient_info is True
+    assert result.city_name == "Київ"
+    assert result.warehouse_number == 12
+    assert result.is_postomat is False
+    assert result.last_name == "Шевченко"
+    assert result.first_name == "Тарас"
+    assert result.phone == "0971234567"
+
