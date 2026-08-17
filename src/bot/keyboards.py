@@ -135,14 +135,20 @@ def get_confirmation_keyboard(
 class DraftActionCallback(CallbackData, prefix="draft"):
     """Callback data schema for draft management."""
 
-    action: str  # "delete", "edit"
-    ref: str  # Nova Poshta Ref GUID
+    action: str  # "delete", "edit", "barcode"
+    ref: str  # Nova Poshta Ref GUID or TTN Number
 
 
 def get_draft_keyboard(ref: str) -> InlineKeyboardMarkup:
     """Build inline keyboard for a specific draft item."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📱 Показати штрихкод",
+                    callback_data=DraftActionCallback(action="barcode", ref=ref).pack(),
+                ),
+            ],
             [
                 InlineKeyboardButton(
                     text="✏️ Редагувати ТТН",
@@ -152,7 +158,21 @@ def get_draft_keyboard(ref: str) -> InlineKeyboardMarkup:
                     text="🗑 Видалити ТТН",
                     callback_data=DraftActionCallback(action="delete", ref=ref).pack(),
                 ),
-            ]
+            ],
+        ]
+    )
+
+
+def get_waybill_keyboard(doc_number: str) -> InlineKeyboardMarkup:
+    """Build inline keyboard with barcode button for outgoing/incoming waybills."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📱 Показати штрихкод",
+                    callback_data=DraftActionCallback(action="barcode", ref=doc_number).pack(),
+                ),
+            ],
         ]
     )
 

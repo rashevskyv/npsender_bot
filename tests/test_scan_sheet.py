@@ -319,3 +319,61 @@ async def test_process_register_callback_deletes_caption_or_text(tmp_path):
             mock_delete_ss.assert_called_once_with("sheet-to-delete")
             assert len(manager.get_user_scansheets(999)) == 0
 
+
+@pytest.mark.asyncio
+async def test_process_draft_callback_barcode(tmp_path):
+    import os
+    from unittest.mock import AsyncMock, MagicMock
+    from src.config import Settings
+    from src.storage import UserSettingsManager, SavedDraft
+    from src.bot.keyboards import DraftActionCallback
+    from src.bot.handlers import register_handlers, router
+
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    drafts_file = os.path.join(tmp_path, "user_drafts.json")
+    scansheets_file = os.path.join(tmp_path, "user_scansheets.json")
+    manager = UserSettingsManager(
+        filepath=storage_file,
+        drafts_filepath=drafts_file,
+        scansheets_filepath=scansheets_file,
+    )
+
+    d1 = SavedDraft(
+        ref="ref-barcode-test",
+        int_doc_number="20451512966104",
+        recipient_name="Кузло Антон",
+        recipient_phone="380986026819",
+        city_description="Рівне",
+        warehouse_description="Відділення 13",
+        payer_type="Recipient",
+        cargo_description="Приставка",
+        declared_value=8000.0,
+        cost=90.0,
+        created_at="2026-08-17 11:30:10",
+    )
+    manager.add_user_draft(111, d1)
+
+    mock_callback = MagicMock()
+    mock_callback.from_user.id = 111
+    mock_callback.answer = AsyncMock()
+    mock_callback.message.reply_photo = AsyncMock()
+
+    register_handlers(
+        settings=Settings(TELEGRAM_BOT_TOKEN="dummy"),
+        ai_extractor=MagicMock(),
+        np_client=MagicMock(),
+        storage_manager=manager,
+    )
+
+    matching_handlers = [h.callback for h in router.callback_query.handlers if "process_draft_callback" in str(h.callback)]
+    handler = matching_handlers[-1] if matching_handlers else None
+    assert handler is not None
+
+    callback_data = DraftActionCallback(action="barcode", ref="20451512966104")
+    await handler(mock_callback, callback_data)
+
+    mock_callback.message.reply_photo.assert_called_once()
+    call_args = mock_callback.message.reply_photo.call_args
+    assert "20451512966104" in call_args.kwargs["caption"]
+
+

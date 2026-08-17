@@ -30,6 +30,7 @@ from src.bot.keyboards import (
     get_register_keyboard,
     AddressConfirmCallback,
     get_address_confirmation_keyboard,
+    get_waybill_keyboard,
 )
 
 logger = logging.getLogger(__name__)
@@ -755,6 +756,7 @@ def register_handlers(
                     card,
                     parse_mode="Markdown",
                     disable_web_page_preview=True,
+                    reply_markup=get_waybill_keyboard(doc_number=item.int_doc_number),
                 )
         except Exception as e:
             logger.error(f"Error fetching outgoing parcels: {e}", exc_info=True)
@@ -818,6 +820,7 @@ def register_handlers(
                     card,
                     parse_mode="Markdown",
                     disable_web_page_preview=True,
+                    reply_markup=get_waybill_keyboard(doc_number=item.int_doc_number),
                 )
         except Exception as e:
             logger.error(f"Error fetching incoming parcels: {e}", exc_info=True)
@@ -2042,6 +2045,51 @@ def register_handlers(
                 parsed_info=parsed_info,
                 status_msg=status_msg,
             )
+
+        elif action == "barcode":
+            doc_number = None
+            if ref.isdigit() and len(ref) >= 10:
+                doc_number = ref
+            else:
+                drafts = storage_manager.get_user_drafts(user_id)
+                target = next((d for d in drafts if d.ref == ref or d.int_doc_number == ref), None)
+                if target:
+                    doc_number = target.int_doc_number
+                else:
+                    try:
+                        live_drafts = await fetch_user_active_drafts(user_id, user_np_client, storage_manager)
+                        live_target = next((d for d in live_drafts if d.get("ref") == ref or d.get("int_doc_number") == ref), None)
+                        if live_target:
+                            doc_number = live_target.get("int_doc_number")
+                    except Exception as e:
+                        logger.error(f"Error fetching live drafts for barcode: {e}")
+
+            if not doc_number:
+                if ref and len(ref) >= 10:
+                    doc_number = ref
+                else:
+                    await callback.answer("Номер накладної не знайдено.", show_alert=True)
+                    return
+
+            await callback.answer("Генерація штрихкоду ТТН...")
+            try:
+                barcode_bytes = generate_code128_barcode(doc_number)
+                photo_file = BufferedInputFile(barcode_bytes, filename=f"ttn_{doc_number}.png")
+                caption = (
+                    f"📱 *Штрихкод накладної ТТН №* `{doc_number}`\n\n"
+                    f"_Покажіть цей штрихкод оператору або відскануйте у відділенні чи поштоматі Нової Пошти._"
+                )
+                await callback.message.reply_photo(
+                    photo=photo_file,
+                    caption=caption,
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.error(f"Error generating waybill barcode photo: {e}", exc_info=True)
+                await callback.message.reply(
+                    f"❌ *Помилка створення штрихкоду для ТТН {doc_number}:* {str(e)}",
+                    parse_mode="Markdown",
+                )
 
     @router.callback_query(CitySelectCallback.filter())
     async def process_city_select_callback(
