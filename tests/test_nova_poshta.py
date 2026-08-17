@@ -464,3 +464,25 @@ async def test_create_waybill_with_address_delivery():
     assert recorded_calls[0][2]["ServiceType"] == "WarehouseDoors"
     assert recorded_calls[0][2]["RecipientAddress"] == "addr-guid-789"
 
+
+def test_check_is_light_return():
+    from src.nova_poshta.client import check_is_light_return
+
+    # Case 1: LightReturnNumber present
+    assert check_is_light_return({"LightReturnNumber": "20450000000001"}) is True
+
+    # Case 2: ServiceType or CargoType
+    assert check_is_light_return({"ServiceType": "WarehouseDoorsLightReturn"}) is True
+    assert check_is_light_return({"CargoType": "EasyReturn"}) is True
+
+    # Case 3: Description / AdditionalInformation / Status
+    assert check_is_light_return({"Description": "Легке повернення товару"}) is True
+    assert check_is_light_return({"CargoDescriptionString": "Повернення: легке повернення"}) is True
+    assert check_is_light_return({"AdditionalInformationEW": "Легке повернення"}) is True
+    assert check_is_light_return({"Status": "Легке повернення"}) is True
+
+    # Case 4: Normal waybill
+    assert check_is_light_return({"Description": "Одяг", "ServiceType": "WarehouseWarehouse", "LightReturnNumber": ""}) is False
+    assert check_is_light_return({}) is False
+
+

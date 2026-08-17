@@ -179,6 +179,12 @@ async def fetch_user_active_drafts(
         if st and not st.get("is_draft"):
             continue
 
+        is_lr = (
+            getattr(d, "is_light_return", False)
+            or (st.get("is_light_return", False) if st else False)
+            or "легке повернення" in d.cargo_description.lower()
+        )
+
         combined_drafts_map[d.int_doc_number] = {
             "ref": d.ref,
             "int_doc_number": d.int_doc_number,
@@ -193,6 +199,7 @@ async def fetch_user_active_drafts(
             "cod_payment_type": getattr(d, "cod_payment_type", "cash"),
             "cost": d.cost,
             "created_at": d.created_at,
+            "is_light_return": is_lr,
         }
 
     for live_item in np_live_drafts:
@@ -200,6 +207,12 @@ async def fetch_user_active_drafts(
         st = statuses.get(doc_num)
         if st and not st.get("is_draft"):
             continue
+
+        is_lr = (
+            getattr(live_item, "is_light_return", False)
+            or (st.get("is_light_return", False) if st else False)
+            or "легке повернення" in (live_item.description or "").lower()
+        )
 
         if doc_num not in combined_drafts_map:
             combined_drafts_map[doc_num] = {
@@ -216,6 +229,7 @@ async def fetch_user_active_drafts(
                 "cod_payment_type": live_item.cod_payment_type,
                 "cost": live_item.cost,
                 "created_at": live_item.date_created or "Нещодавно",
+                "is_light_return": is_lr,
             }
 
     return list(combined_drafts_map.values())
@@ -673,8 +687,15 @@ def register_handlers(
                 else:
                     cod_line = ""
 
+                light_return_line = (
+                    "\n🔄 *Легке повернення*"
+                    if item.get("is_light_return")
+                    or "легке повернення" in item.get("cargo_description", "").lower()
+                    else ""
+                )
+
                 card = (
-                    f"🎫 *ТТН:* `{doc_num}`\n"
+                    f"🎫 *ТТН:* `{doc_num}`{light_return_line}\n"
                     f"👤 *Отримувач:* {item['recipient_name']}\n"
                     f"📞 *Телефон:* `{item['recipient_phone']}`\n"
                     f"🏙 *Місто:* {item['city_description']}\n"
@@ -743,8 +764,14 @@ def register_handlers(
                     f"https://novaposhta.ua/tracking/?cargo_number={item.int_doc_number}"
                 )
                 est_date = format_relative_delivery_date(item.estimated_delivery_date)
+                light_return_line = (
+                    "\n🔄 *Легке повернення*"
+                    if getattr(item, "is_light_return", False)
+                    or "легке повернення" in (item.description or "").lower()
+                    else ""
+                )
                 card = (
-                    f"📤 *Вихідна ТТН №{idx}:* `{item.int_doc_number}`\n"
+                    f"📤 *Вихідна ТТН №{idx}:* `{item.int_doc_number}`{light_return_line}\n"
                     f"👤 *Отримувач:* {item.recipient_name}\n"
                     f"🏙 *Пункт призначення:* {item.city_recipient}, {item.address_recipient}\n"
                     f"📝 *Опис:* {item.description}\n"
@@ -807,8 +834,14 @@ def register_handlers(
                 )
                 est_date = format_relative_delivery_date(item.estimated_delivery_date)
                 sender_info = item.sender_name or "Нова Пошта"
+                light_return_line = (
+                    "\n🔄 *Легке повернення*"
+                    if getattr(item, "is_light_return", False)
+                    or "легке повернення" in (item.description or "").lower()
+                    else ""
+                )
                 card = (
-                    f"📥 *Вхідна ТТН №{idx}:* `{item.int_doc_number}`\n"
+                    f"📥 *Вхідна ТТН №{idx}:* `{item.int_doc_number}`{light_return_line}\n"
                     f"🚚 *Відправник:* {sender_info}\n"
                     f"📅 *Очікуване прибуття:* **{est_date}**\n"
                     f"🏙 *Пункт призначення:* {item.city_recipient}, {item.address_recipient}\n"
@@ -1101,8 +1134,15 @@ def register_handlers(
                     else:
                         cod_line = ""
 
+                    light_return_line = (
+                        "\n🔄 *Легке повернення*"
+                        if draft.get("is_light_return")
+                        or "легке повернення" in draft.get("cargo_description", "").lower()
+                        else ""
+                    )
+
                     card = (
-                        f"🎫 *{idx}. ТТН:* `{doc_num}`\n"
+                        f"🎫 *{idx}. ТТН:* `{doc_num}`{light_return_line}\n"
                         f"👤 *Отримувач:* {draft['recipient_name']}\n"
                         f"📞 *Телефон:* `{draft['recipient_phone']}`\n"
                         f"🏙 *Місто:* {draft['city_description']}\n"

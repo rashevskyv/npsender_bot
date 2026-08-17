@@ -61,6 +61,7 @@ class WaybillItemInfo(BaseModel):
     description: str
     estimated_delivery_date: Optional[str] = None
     date_created: Optional[str] = None
+    is_light_return: bool = False
 
 
 class ScanSheetInfo(BaseModel):

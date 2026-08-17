@@ -50,6 +50,7 @@ class SavedDraft(BaseModel):
     cod_payment_type: Optional[str] = None
     cost: float
     created_at: str
+    is_light_return: bool = False
 
 
 class SavedScanSheet(BaseModel):

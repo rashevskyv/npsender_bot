@@ -40,6 +40,54 @@ def _name_matches(user_name: Optional[str], target_name: Optional[str]) -> bool:
     return any(w in t_lower for w in u_words)
 
 
+def check_is_light_return(doc: Dict[str, Any]) -> bool:
+    """Check if a document dictionary represents a Nova Poshta Light Return ('Легке повернення')."""
+    if not isinstance(doc, dict):
+        return False
+
+    # 1. Check LightReturnNumber
+    lr_num = str(doc.get("LightReturnNumber", "") or "").strip()
+    if lr_num and lr_num not in ("0", "False", "false", "None"):
+        return True
+
+    # 2. Check ServiceType / CargoType / TypeOfService
+    service_type = str(
+        doc.get("ServiceType", "")
+        or doc.get("TypeOfService", "")
+        or doc.get("CargoType", "")
+        or ""
+    ).lower()
+    if any(k in service_type for k in ["lightreturn", "easyreturn", "легкеповернення"]):
+        return True
+
+    # 3. Check Description / CargoDescription / AdditionalInformation / Status / StateName
+    text_fields = [
+        str(doc.get("Description", "") or ""),
+        str(doc.get("CargoDescriptionString", "") or ""),
+        str(doc.get("AdditionalInformation", "") or ""),
+        str(doc.get("AdditionalInformationEW", "") or ""),
+        str(doc.get("StateName", "") or ""),
+        str(doc.get("StateDescription", "") or ""),
+        str(doc.get("Status", "") or ""),
+        str(doc.get("UndeliveryReasons", "") or ""),
+    ]
+    for text in text_fields:
+        lower_t = text.lower()
+        if any(
+            phrase in lower_t
+            for phrase in [
+                "легке повернення",
+                "легкеповернення",
+                "light return",
+                "easy return",
+                "повернення за програмою легке повернення",
+            ]
+        ):
+            return True
+
+    return False
+
+
 class NovaPoshtaClient:
     """Nova Poshta API 2.0 client."""
 
@@ -548,6 +596,7 @@ class NovaPoshtaClient:
                     description=str(doc.get("Description", "Посилка")),
                     estimated_delivery_date=doc.get("EstimatedDeliveryDate"),
                     date_created=doc.get("DateTime"),
+                    is_light_return=check_is_light_return(doc),
                 )
             )
         return items
@@ -615,6 +664,7 @@ class NovaPoshtaClient:
                     description=str(doc.get("Description", "Посилка")),
                     estimated_delivery_date=doc.get("EstimatedDeliveryDate"),
                     date_created=doc.get("DateTime"),
+                    is_light_return=check_is_light_return(doc),
                 )
             )
         return items
@@ -630,6 +680,7 @@ class NovaPoshtaClient:
             'is_shipped': bool,
             'is_deleted': bool,
             'is_draft': bool,
+            'is_light_return': bool,
         }
         """
         if not document_numbers:
@@ -700,6 +751,7 @@ class NovaPoshtaClient:
                 "is_shipped": is_shipped,
                 "is_deleted": is_deleted,
                 "is_draft": is_draft,
+                "is_light_return": check_is_light_return(item),
             }
 
         return results
@@ -811,6 +863,7 @@ class NovaPoshtaClient:
                     description=str(doc.get("Description", "Посилка")),
                     estimated_delivery_date=doc.get("EstimatedDeliveryDate"),
                     date_created=doc.get("DateTime"),
+                    is_light_return=check_is_light_return(doc),
                 )
             )
         return items
