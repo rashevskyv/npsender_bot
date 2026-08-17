@@ -624,7 +624,13 @@ class NovaPoshtaClient:
     ) -> Dict[str, Dict[str, Any]]:
         """Fetch tracking status for a list of TTN document numbers.
         
-        Returns a dict mapping document_number -> {'status_code': str, 'status_name': str, 'is_shipped': bool}
+        Returns a dict mapping document_number -> {
+            'status_code': str,
+            'status_name': str,
+            'is_shipped': bool,
+            'is_deleted': bool,
+            'is_draft': bool,
+        }
         """
         if not document_numbers:
             return {}
@@ -646,32 +652,45 @@ class NovaPoshtaClient:
 
         results = {}
         shipped_codes = {"4", "41", "5", "6", "7", "8", "9", "10", "11", "12", "14", "104", "105", "106"}
+        deleted_codes = {"2", "3"}
         for item in res.get("data", []):
             doc_num = str(item.get("Number", item.get("DocumentNumber", "")))
             status_code = str(item.get("StatusCode", ""))
             status_name = str(item.get("Status", item.get("StateName", "")))
 
             is_shipped = False
-            if status_code in shipped_codes:
+            is_deleted = False
+
+            if status_code in deleted_codes:
+                is_deleted = True
+            elif status_code in shipped_codes:
                 is_shipped = True
             else:
                 try:
                     code_int = int(status_code)
-                    if code_int >= 4 and code_int not in (101, 102, 103, 108):
+                    if code_int in (2, 3):
+                        is_deleted = True
+                    elif code_int >= 4 and code_int not in (101, 102, 103, 108):
                         is_shipped = True
                 except ValueError:
                     pass
 
             lower_name = status_name.lower()
-            if any(w in lower_name for w in ["прямує", "прибув", "отримано", "відправлено", "у відділенні", "доставлено", "видано"]):
+            if any(w in lower_name for w in ["видалено", "скасовано", "не знайдено", "не знайдена", "не існує", "помилка"]):
+                is_deleted = True
+            elif any(w in lower_name for w in ["прямує", "прибув", "отримано", "відправлено", "у відділенні", "доставлено", "видано"]):
                 is_shipped = True
-            elif any(w in lower_name for w in ["очікує посилку", "створено", "чернетка"]):
+            elif any(w in lower_name for w in ["очікує посилку", "очікує надходження", "створено", "чернетка"]):
                 is_shipped = False
+
+            is_draft = not is_shipped and not is_deleted and (status_code == "1" or any(w in lower_name for w in ["очікує", "створено", "чернетка"]))
 
             results[doc_num] = {
                 "status_code": status_code,
                 "status_name": status_name,
                 "is_shipped": is_shipped,
+                "is_deleted": is_deleted,
+                "is_draft": is_draft,
             }
 
         return results
@@ -705,6 +724,19 @@ class NovaPoshtaClient:
         for doc in data:
             doc_num = str(doc.get("IntDocNumber", doc.get("Number", "")))
             if not doc_num:
+                continue
+
+            # Skip deleted or marked for deletion documents
+            deletion_mark = doc.get("DeletionMark")
+            if deletion_mark in (True, 1, "1", "true", "True"):
+                continue
+
+            state_id = str(doc.get("StateId", doc.get("StatusCode", "")))
+            if state_id in ("2", "3"):
+                continue
+
+            state_name_lower = str(doc.get("StateName", doc.get("StateDescription", ""))).lower()
+            if any(w in state_name_lower for w in ["видалено", "скасовано", "не знайдено"]):
                 continue
 
             delivery_cost = float(doc.get("CostOnSite", 0) or 0)

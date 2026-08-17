@@ -40,19 +40,6 @@
       "created_at": "07.08.2026"
     },
     {
-      "ref": "019fdce8-73a2-7bc5-9a34-c9f711b27633",
-      "int_doc_number": "20451506125831",
-      "recipient_name": "Ковальчук Р О",
-      "recipient_phone": "380631344371",
-      "city_description": "Житомир",
-      "warehouse_description": "Відділення №19 (до 10 кг): вул. Чуднівська (ран. Черняховського), 92 (ТЦ\"Океан\")",
-      "payer_type": "Recipient",
-      "cargo_description": "сувенір",
-      "declared_value": 500.0,
-      "cost": 90.0,
-      "created_at": "07.08.2026"
-    },
-    {
       "ref": "019fdce7-bba2-738b-bd19-4dbe3c81dab0",
       "int_doc_number": "20451506125433",
       "recipient_name": "Кравченко Іванна",

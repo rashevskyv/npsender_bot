@@ -248,12 +248,13 @@ class UserSettingsManager:
         return self.drafts.get(str(user_id), [])
 
     def delete_user_draft(self, user_id: int, ref: str) -> bool:
-        """Delete a draft by its Ref GUID for user ID."""
+        """Delete a draft by its Ref GUID or int_doc_number for user ID."""
         uid_str = str(user_id)
         if uid_str in self.drafts:
             initial_len = len(self.drafts[uid_str])
             self.drafts[uid_str] = [
-                d for d in self.drafts[uid_str] if d.ref != ref
+                d for d in self.drafts[uid_str]
+                if d.ref != ref and d.int_doc_number != ref
             ]
             if len(self.drafts[uid_str]) < initial_len:
                 self.save_drafts()

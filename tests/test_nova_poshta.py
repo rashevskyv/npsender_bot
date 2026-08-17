@@ -74,15 +74,38 @@ async def test_get_documents_status_parsing():
                     "StatusCode": "4",
                     "Status": "Відправлення у місті Київ",
                 },
+                {
+                    "Number": "204503",
+                    "StatusCode": "2",
+                    "Status": "Видалено",
+                },
+                {
+                    "Number": "204504",
+                    "StatusCode": "3",
+                    "Status": "Номер не знайдено",
+                },
             ],
         }
 
     client._post = mock_post
-    res = await client.get_documents_status(["204501", "204502"])
+    res = await client.get_documents_status(["204501", "204502", "204503", "204504"])
 
-    assert len(res) == 2
+    assert len(res) == 4
     assert res["204501"]["is_shipped"] is False
+    assert res["204501"]["is_deleted"] is False
+    assert res["204501"]["is_draft"] is True
+
     assert res["204502"]["is_shipped"] is True
+    assert res["204502"]["is_deleted"] is False
+    assert res["204502"]["is_draft"] is False
+
+    assert res["204503"]["is_shipped"] is False
+    assert res["204503"]["is_deleted"] is True
+    assert res["204503"]["is_draft"] is False
+
+    assert res["204504"]["is_shipped"] is False
+    assert res["204504"]["is_deleted"] is True
+    assert res["204504"]["is_draft"] is False
 
 
 def test_format_relative_delivery_date():

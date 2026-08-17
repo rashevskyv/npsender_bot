@@ -179,8 +179,8 @@ async def test_fetch_user_active_drafts_combines_and_filters(tmp_path):
         scansheets_filepath=scansheets_file,
     )
 
-    # Local draft
-    local_draft = SavedDraft(
+    # Local draft 1: active
+    local_draft1 = SavedDraft(
         ref="local-ref-1",
         int_doc_number="20451506611097",
         recipient_name="Залужна Юлія",
@@ -193,7 +193,22 @@ async def test_fetch_user_active_drafts_combines_and_filters(tmp_path):
         cost=90.0,
         created_at="2026-08-08 16:51:27",
     )
-    manager.add_user_draft(12345, local_draft)
+    # Local draft 2: deleted on NP
+    local_draft2 = SavedDraft(
+        ref="local-ref-2",
+        int_doc_number="20451506125831",
+        recipient_name="Ковальчук Р О",
+        recipient_phone="380631344371",
+        city_description="Житомир",
+        warehouse_description="Відділення №19",
+        payer_type="Recipient",
+        cargo_description="Сувенір",
+        declared_value=500.0,
+        cost=90.0,
+        created_at="07.08.2026",
+    )
+    manager.add_user_draft(12345, local_draft1)
+    manager.add_user_draft(12345, local_draft2)
 
     # Mock NP client
     mock_np_client = MagicMock()
@@ -227,8 +242,9 @@ async def test_fetch_user_active_drafts_combines_and_filters(tmp_path):
     ])
 
     mock_np_client.get_documents_status = AsyncMock(return_value={
-        "20451506611097": {"is_shipped": False, "status": "Чернетка"},
-        "20451506619999": {"is_shipped": True, "status": "У дорозі"},
+        "20451506611097": {"is_shipped": False, "is_deleted": False, "status": "Чернетка"},
+        "20451506619999": {"is_shipped": True, "is_deleted": False, "status": "У дорозі"},
+        "20451506125831": {"is_shipped": False, "is_deleted": True, "status": "Видалено"},
     })
 
     active = await fetch_user_active_drafts(12345, mock_np_client, manager)
@@ -236,6 +252,11 @@ async def test_fetch_user_active_drafts_combines_and_filters(tmp_path):
     assert active[0]["int_doc_number"] == "20451506611097"
     assert active[0]["recipient_name"] == "Залужна Юлія"
     assert active[0]["city_description"] == "Кривий Ріг"
+
+    # Verify that deleted draft was purged from storage manager
+    saved_drafts = manager.get_user_drafts(12345)
+    assert len(saved_drafts) == 1
+    assert saved_drafts[0].int_doc_number == "20451506611097"
 
 
 @pytest.mark.asyncio

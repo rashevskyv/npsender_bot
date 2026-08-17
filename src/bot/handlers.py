@@ -162,38 +162,42 @@ async def fetch_user_active_drafts(
         except Exception as e:
             logger.error(f"Error checking tracking statuses for drafts: {e}")
 
-    # Purge local drafts that are physically shipped
-    sent_local_ids = [
+    # Purge local drafts that are physically shipped OR deleted on Nova Poshta
+    purge_local_ids = [
         d_num for d_num in all_doc_numbers
-        if statuses.get(d_num, {}).get("is_shipped")
+        if statuses.get(d_num, {}).get("is_shipped") or statuses.get(d_num, {}).get("is_deleted")
     ]
-    if sent_local_ids:
-        storage_manager.purge_sent_drafts(user_id, sent_local_ids)
+    if purge_local_ids:
+        storage_manager.purge_sent_drafts(user_id, purge_local_ids)
         local_drafts = storage_manager.get_user_drafts(user_id)
 
-    # Build combined strictly un-shipped drafts map
+    # Build combined strictly un-shipped and non-deleted drafts map
     combined_drafts_map = {}
     for d in local_drafts:
-        if not statuses.get(d.int_doc_number, {}).get("is_shipped"):
-            combined_drafts_map[d.int_doc_number] = {
-                "ref": d.ref,
-                "int_doc_number": d.int_doc_number,
-                "recipient_name": d.recipient_name,
-                "recipient_phone": d.recipient_phone,
-                "city_description": d.city_description,
-                "warehouse_description": d.warehouse_description,
-                "cargo_description": d.cargo_description,
-                "payer_type": d.payer_type,
-                "declared_value": d.declared_value,
-                "cod_amount": getattr(d, "cod_amount", 0.0) or 0.0,
-                "cod_payment_type": getattr(d, "cod_payment_type", "cash"),
-                "cost": d.cost,
-                "created_at": d.created_at,
-            }
+        st = statuses.get(d.int_doc_number, {})
+        if st.get("is_shipped") or st.get("is_deleted"):
+            continue
+
+        combined_drafts_map[d.int_doc_number] = {
+            "ref": d.ref,
+            "int_doc_number": d.int_doc_number,
+            "recipient_name": d.recipient_name,
+            "recipient_phone": d.recipient_phone,
+            "city_description": d.city_description,
+            "warehouse_description": d.warehouse_description,
+            "cargo_description": d.cargo_description,
+            "payer_type": d.payer_type,
+            "declared_value": d.declared_value,
+            "cod_amount": getattr(d, "cod_amount", 0.0) or 0.0,
+            "cod_payment_type": getattr(d, "cod_payment_type", "cash"),
+            "cost": d.cost,
+            "created_at": d.created_at,
+        }
 
     for live_item in np_live_drafts:
         doc_num = live_item.int_doc_number
-        if statuses.get(doc_num, {}).get("is_shipped"):
+        st = statuses.get(doc_num, {})
+        if st.get("is_shipped") or st.get("is_deleted"):
             continue
 
         if doc_num not in combined_drafts_map:
@@ -1925,7 +1929,7 @@ def register_handlers(
                 # Check if TTN is part of any active scan sheet (register) in user's saved lists
                 user_scansheets = storage_manager.get_user_scansheets(user_id)
                 user_drafts = storage_manager.get_user_drafts(user_id)
-                current_draft = next((d for d in user_drafts if d.ref == ref), None)
+                current_draft = next((d for d in user_drafts if d.ref == ref or d.int_doc_number == ref), None)
                 if current_draft:
                     for s in user_scansheets:
                         if current_draft.int_doc_number in s.document_numbers:
@@ -1937,6 +1941,10 @@ def register_handlers(
 
                 deleted = await user_np_client.delete_waybill(ref)
                 storage_manager.delete_user_draft(user_id, ref)
+                if current_draft:
+                    storage_manager.delete_user_draft(user_id, current_draft.ref)
+                    storage_manager.delete_user_draft(user_id, current_draft.int_doc_number)
+
                 if deleted:
                     await callback.message.edit_text(
                         "🗑 *Express-накладну успішно видалено з бази Нової Пошти.*",
@@ -1957,6 +1965,9 @@ def register_handlers(
                     )
                     return
                 storage_manager.delete_user_draft(user_id, ref)
+                if current_draft:
+                    storage_manager.delete_user_draft(user_id, current_draft.ref)
+                    storage_manager.delete_user_draft(user_id, current_draft.int_doc_number)
                 await callback.message.edit_text(
                     "🗑 *Накладну видалено з локальної бази.*",
                     parse_mode="Markdown",
@@ -1964,7 +1975,7 @@ def register_handlers(
 
         elif action == "copy":
             drafts = storage_manager.get_user_drafts(user_id)
-            target = next((d for d in drafts if d.ref == ref), None)
+            target = next((d for d in drafts if d.ref == ref or d.int_doc_number == ref), None)
             if target:
                 text_to_copy = f"`{target.int_doc_number}`"
                 await callback.answer(f"ТТН: {target.int_doc_number}", show_alert=False)
@@ -1977,19 +1988,39 @@ def register_handlers(
 
         elif action == "edit":
             drafts = storage_manager.get_user_drafts(user_id)
-            target = next((d for d in drafts if d.ref == ref), None)
-            if not target:
+            target = next((d for d in drafts if d.ref == ref or d.int_doc_number == ref), None)
+            
+            target_dict = None
+            if target:
+                target_dict = {
+                    "ref": target.ref,
+                    "city_description": target.city_description,
+                    "warehouse_description": target.warehouse_description,
+                    "recipient_name": target.recipient_name,
+                    "recipient_phone": target.recipient_phone,
+                    "cargo_description": target.cargo_description,
+                    "declared_value": target.declared_value,
+                    "cod_amount": target.cod_amount,
+                }
+            else:
+                live_drafts = await fetch_user_active_drafts(user_id, user_np_client, storage_manager)
+                live_target = next((d for d in live_drafts if d["ref"] == ref or d["int_doc_number"] == ref), None)
+                if live_target:
+                    target_dict = live_target
+
+            if not target_dict:
                 await callback.answer("Дані чернетки не знайдено.", show_alert=True)
                 return
 
             await callback.answer("Завантаження даних для редагування...")
             dummy_text = (
-                f"Місто {target.city_description}, {target.warehouse_description}. "
-                f"Отримувач {target.recipient_name}, {target.recipient_phone}. "
-                f"{target.cargo_description}. Оцінка {int(target.declared_value)} грн."
+                f"Місто {target_dict['city_description']}, {target_dict['warehouse_description']}. "
+                f"Отримувач {target_dict['recipient_name']}, {target_dict['recipient_phone']}. "
+                f"{target_dict['cargo_description']}. Оцінка {int(target_dict['declared_value'])} грн."
             )
-            if target.cod_amount and target.cod_amount > 0:
-                dummy_text += f" Накладений платіж {int(target.cod_amount)} грн."
+            cod_val = target_dict.get("cod_amount")
+            if cod_val and float(cod_val) > 0:
+                dummy_text += f" Накладений платіж {int(float(cod_val))} грн."
 
             status_msg = await callback.message.reply("⏳ *Завантаження чернетки накладної для редагування...*", parse_mode="Markdown")
 
@@ -1999,7 +2030,7 @@ def register_handlers(
             session_id = str(uuid.uuid4())[:8]
             PENDING_SESSIONS[session_id] = {
                 "parsed_info": parsed_info,
-                "editing_draft_ref": target.ref,
+                "editing_draft_ref": target_dict["ref"],
                 "user_id": user_id,
             }
             USER_ACTIVE_SESSIONS[user_id] = session_id

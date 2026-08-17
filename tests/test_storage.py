@@ -82,7 +82,14 @@ def test_drafts_management(tmp_path):
     assert drafts[0].ref == "ref-123-abc"
     assert drafts[0].int_doc_number == "20451506103956"
 
-    # Delete draft
+    # Delete draft by int_doc_number
+    success = manager.delete_user_draft(999, "20451506103956")
+    assert success is True
+    assert len(manager.get_user_drafts(999)) == 0
+
+    # Add again and delete by ref
+    manager.add_user_draft(999, draft)
+    assert len(manager.get_user_drafts(999)) == 1
     success = manager.delete_user_draft(999, "ref-123-abc")
     assert success is True
     assert len(manager.get_user_drafts(999)) == 0
