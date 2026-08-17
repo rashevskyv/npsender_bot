@@ -19,10 +19,11 @@ def generate_code128_barcode(barcode_data: str) -> bytes:
             rv,
             options={
                 "module_height": 18.0,
-                "font_size": 12,
-                "text_distance": 5.0,
+                "module_width": 0.35,
+                "font_size": 9,
+                "text_distance": 4.0,
                 "dpi": 300,
-                "quiet_zone": 3.0,
+                "quiet_zone": 6.5,
             },
         )
         return rv.getvalue()
