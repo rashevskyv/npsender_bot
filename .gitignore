@@ -24,3 +24,7 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Runtime Data Storage
+data/*.json
+data/

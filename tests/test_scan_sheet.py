@@ -242,9 +242,9 @@ async def test_fetch_user_active_drafts_combines_and_filters(tmp_path):
     ])
 
     mock_np_client.get_documents_status = AsyncMock(return_value={
-        "20451506611097": {"is_shipped": False, "is_deleted": False, "status": "Чернетка"},
-        "20451506619999": {"is_shipped": True, "is_deleted": False, "status": "У дорозі"},
-        "20451506125831": {"is_shipped": False, "is_deleted": True, "status": "Видалено"},
+        "20451506611097": {"is_shipped": False, "is_deleted": False, "is_draft": True, "status": "Чернетка"},
+        "20451506619999": {"is_shipped": True, "is_deleted": False, "is_draft": False, "status": "У дорозі"},
+        "20451506125831": {"is_shipped": True, "is_deleted": False, "is_draft": False, "status": "Відмова від отримання"},
     })
 
     active = await fetch_user_active_drafts(12345, mock_np_client, manager)

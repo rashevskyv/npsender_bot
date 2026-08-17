@@ -162,20 +162,20 @@ async def fetch_user_active_drafts(
         except Exception as e:
             logger.error(f"Error checking tracking statuses for drafts: {e}")
 
-    # Purge local drafts that are physically shipped OR deleted on Nova Poshta
+    # Purge local drafts that are not active drafts (physically shipped, refused, returned or deleted)
     purge_local_ids = [
         d_num for d_num in all_doc_numbers
-        if statuses.get(d_num, {}).get("is_shipped") or statuses.get(d_num, {}).get("is_deleted")
+        if statuses.get(d_num) and not statuses.get(d_num, {}).get("is_draft")
     ]
     if purge_local_ids:
         storage_manager.purge_sent_drafts(user_id, purge_local_ids)
         local_drafts = storage_manager.get_user_drafts(user_id)
 
-    # Build combined strictly un-shipped and non-deleted drafts map
+    # Build combined strictly active un-shipped drafts map
     combined_drafts_map = {}
     for d in local_drafts:
-        st = statuses.get(d.int_doc_number, {})
-        if st.get("is_shipped") or st.get("is_deleted"):
+        st = statuses.get(d.int_doc_number)
+        if st and not st.get("is_draft"):
             continue
 
         combined_drafts_map[d.int_doc_number] = {
@@ -196,8 +196,8 @@ async def fetch_user_active_drafts(
 
     for live_item in np_live_drafts:
         doc_num = live_item.int_doc_number
-        st = statuses.get(doc_num, {})
-        if st.get("is_shipped") or st.get("is_deleted"):
+        st = statuses.get(doc_num)
+        if st and not st.get("is_draft"):
             continue
 
         if doc_num not in combined_drafts_map:

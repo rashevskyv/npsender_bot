@@ -651,7 +651,6 @@ class NovaPoshtaClient:
             return {}
 
         results = {}
-        shipped_codes = {"4", "41", "5", "6", "7", "8", "9", "10", "11", "12", "14", "104", "105", "106"}
         deleted_codes = {"2", "3"}
         for item in res.get("data", []):
             doc_num = str(item.get("Number", item.get("DocumentNumber", "")))
@@ -660,17 +659,20 @@ class NovaPoshtaClient:
 
             is_shipped = False
             is_deleted = False
+            is_draft = False
 
             if status_code in deleted_codes:
                 is_deleted = True
-            elif status_code in shipped_codes:
-                is_shipped = True
+            elif status_code == "1":
+                is_draft = True
             else:
                 try:
                     code_int = int(status_code)
                     if code_int in (2, 3):
                         is_deleted = True
-                    elif code_int >= 4 and code_int not in (101, 102, 103, 108):
+                    elif code_int == 1:
+                        is_draft = True
+                    elif code_int >= 4 or code_int in (101, 102, 103, 104, 105, 106, 108):
                         is_shipped = True
                 except ValueError:
                     pass
@@ -678,12 +680,19 @@ class NovaPoshtaClient:
             lower_name = status_name.lower()
             if any(w in lower_name for w in ["видалено", "скасовано", "не знайдено", "не знайдена", "не існує", "помилка"]):
                 is_deleted = True
-            elif any(w in lower_name for w in ["прямує", "прибув", "отримано", "відправлено", "у відділенні", "доставлено", "видано"]):
+                is_draft = False
+                is_shipped = False
+            elif any(w in lower_name for w in ["прямує", "прибув", "отримано", "відправлено", "у відділенні", "доставлено", "видано", "відмова", "повернення", "зміна адреси"]):
                 is_shipped = True
-            elif any(w in lower_name for w in ["очікує посилку", "очікує надходження", "створено", "чернетка"]):
+                is_draft = False
+            elif any(w in lower_name for w in ["очікує посилку", "очікує надходження", "створено", "чернетка", "ще не надав до відправки"]) and not is_deleted:
+                is_draft = True
                 is_shipped = False
 
-            is_draft = not is_shipped and not is_deleted and (status_code == "1" or any(w in lower_name for w in ["очікує", "створено", "чернетка"]))
+            if not is_deleted and not is_shipped and (status_code == "1" or is_draft):
+                is_draft = True
+            else:
+                is_draft = False
 
             results[doc_num] = {
                 "status_code": status_code,
