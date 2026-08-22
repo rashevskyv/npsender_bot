@@ -41,11 +41,39 @@ PENDING_SESSIONS: Dict[str, Dict[str, Any]] = {}
 USER_ACTIVE_SESSIONS: Dict[int, str] = {}  # user_id -> active session_id
 USER_LAST_PARSED_INFO: Dict[int, ParsedRecipientInfo] = {}  # user_id -> last parsed recipient info for natural language follow-up edits
 VALUE_OPTIONS = [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
+SESSION_TIMEOUT_SECONDS: float = 15 * 60  # 15 minutes TTL for active parcel creation sessions
 
 # Debouncer buffers for multi-part forwarded messages
 USER_MESSAGE_BUFFERS: Dict[int, List[str]] = {}
 USER_DEBOUNCE_TASKS: Dict[int, asyncio.Task] = {}
 USER_LAST_MESSAGES: Dict[int, Message] = {}
+
+
+def _cleanup_expired_sessions():
+    """Remove expired sessions older than SESSION_TIMEOUT_SECONDS (15 minutes)."""
+    now = datetime.datetime.now().timestamp()
+    expired_sessions = [
+        s_id
+        for s_id, s_data in PENDING_SESSIONS.items()
+        if now - s_data.get("updated_at", now) > SESSION_TIMEOUT_SECONDS
+    ]
+    for s_id in expired_sessions:
+        s_data = PENDING_SESSIONS.pop(s_id, None)
+        if s_data:
+            u_id = s_data.get("user_id")
+            if u_id and USER_ACTIVE_SESSIONS.get(u_id) == s_id:
+                USER_ACTIVE_SESSIONS.pop(u_id, None)
+                USER_LAST_PARSED_INFO.pop(u_id, None)
+
+
+def get_user_active_session_id(user_id: int) -> Optional[str]:
+    """Get active session ID for user if not expired and refresh timestamp."""
+    _cleanup_expired_sessions()
+    session_id = USER_ACTIVE_SESSIONS.get(user_id)
+    if not session_id or session_id not in PENDING_SESSIONS:
+        return None
+    PENDING_SESSIONS[session_id]["updated_at"] = datetime.datetime.now().timestamp()
+    return session_id
 
 
 def clear_user_active_session(user_id: int):
@@ -987,9 +1015,9 @@ def register_handlers(
         user_ai_extractor = AIExtractor(eff_settings)
         user_np_client = NovaPoshtaClient(eff_settings)
 
-        # Check if there is an active pending verification session or recent parsed info for this user
+        _cleanup_expired_sessions()
+        active_session_id = get_user_active_session_id(actual_user_id)
         prev_parsed_info = None
-        active_session_id = USER_ACTIVE_SESSIONS.get(actual_user_id)
         if active_session_id and active_session_id in PENDING_SESSIONS:
             prev_parsed_info = PENDING_SESSIONS[active_session_id].get("parsed_info")
         if not prev_parsed_info:
@@ -1183,6 +1211,7 @@ def register_handlers(
                 PENDING_SESSIONS[session_id] = {
                     "parsed_info": parsed_info,
                     "user_id": actual_user_id,
+                    "updated_at": datetime.datetime.now().timestamp(),
                 }
                 USER_ACTIVE_SESSIONS[actual_user_id] = session_id
 
@@ -1221,7 +1250,9 @@ def register_handlers(
         """Resolve city, warehouse or street address, and display verification confirmation card."""
         eff_settings = storage_manager.get_effective_settings(user_id, settings)
         user_np_client = NovaPoshtaClient(eff_settings)
+        now_ts = datetime.datetime.now().timestamp()
 
+        existing_session = PENDING_SESSIONS.get(session_id, {})
         is_address_deliv = bool(parsed_info.is_address_delivery)
 
         # Check missing required fields
@@ -1247,6 +1278,7 @@ def register_handlers(
                 "parsed_info": parsed_info,
                 "user_id": user_id,
                 "is_address_delivery": is_address_deliv,
+                "updated_at": now_ts,
             }
             USER_ACTIVE_SESSIONS[user_id] = session_id
 
@@ -1274,184 +1306,224 @@ def register_handlers(
             )
             return
 
-        # Lookup City in Nova Poshta
-        await status_msg.edit_text(
-            "🔍 *Пошук населеного пункту та адреси у базі Нової Пошти...*", parse_mode="Markdown"
-        )
-        cities = await user_np_client.search_city(parsed_info.city_name)
-        if not cities:
-            await status_msg.edit_text(
-                f"❌ Населений пункт *'{parsed_info.city_name}'* не знайдено у базі Нової Пошти. Перевірте написання.",
-                parse_mode="Markdown",
-            )
-            return
+        # Check if existing session already has resolved city and destination, and user didn't change them
+        existing_city = existing_session.get("city")
+        existing_wh = existing_session.get("warehouse")
+        existing_street_ref = existing_session.get("street_ref")
+        existing_is_addr = existing_session.get("is_address_delivery", False)
 
-        # Filter cities by region_name (Oblast) or district_name if specified by user
-        if parsed_info.region_name:
-            reg_lower = parsed_info.region_name.lower()
-            filtered = [
-                c for c in cities
-                if (c.area and reg_lower in c.area.lower()) or (reg_lower in c.description.lower())
-            ]
-            if filtered:
-                cities = filtered
+        def _is_city_matched(p_city: Optional[str], e_city: Optional[str]) -> bool:
+            if not p_city or not e_city:
+                return False
+            p_clean = p_city.strip().lower()
+            e_clean = e_city.strip().lower()
+            return p_clean == e_clean or p_clean in e_clean or e_clean in p_clean
 
-        matched_city = cities[0]
+        matched_city = None
         warehouse = None
         dest_desc = ""
         street_ref = ""
 
-        if is_address_deliv:
-            # Search street in NP database
-            street_query = parsed_info.street_name or ""
-            streets = await user_np_client.search_street(city_ref=matched_city.ref, street_name=street_query)
-            if not streets:
-                await status_msg.edit_text(
-                    f"❌ Вулицю *'{street_query}'* у населеному пункті *{matched_city.description}* не знайдено в базі Нової Пошти.\n"
-                    "Будь ласка, перевірте правильність назви вулиці або вкажіть номер відділення/поштомату.",
-                    parse_mode="Markdown",
-                )
-                return
-
-            if len(streets) == 1:
-                matched_street = streets[0]
-                street_ref = matched_street.ref
-                street_display = f"{matched_street.streets_type} {matched_street.description}"
-
-                addr_parts = [f"{street_display}, буд. {parsed_info.building_number}"]
-                if parsed_info.flat_number:
-                    addr_parts.append(f"кв. {parsed_info.flat_number}")
-                dest_desc = f"🏡 Адресна доставка: {', '.join(addr_parts)}"
-            else:
-                # Multiple matching streets/lanes found -> present disambiguation keyboard
-                existing_session = PENDING_SESSIONS.get(session_id, {})
-                payer_type = parsed_info.payer_type or existing_session.get("payer_type") or eff_settings.default_payer_type
-                cargo_type = parsed_info.cargo_type or existing_session.get("cargo_type") or eff_settings.default_cargo_type
-
-                if parsed_info.cod_amount is not None:
-                    cod_val = parsed_info.cod_amount
-                elif "cod_amount" in existing_session:
-                    cod_val = existing_session["cod_amount"]
-                else:
-                    cod_val = 0.0
-
-                if parsed_info.cod_payment_type:
-                    cod_type = parsed_info.cod_payment_type
-                elif "cod_payment_type" in existing_session:
-                    cod_type = existing_session["cod_payment_type"]
-                else:
-                    cod_type = "cash"
-
-                if parsed_info.declared_value is not None:
-                    raw_decl = parsed_info.declared_value
-                elif "declared_value" in existing_session:
-                    raw_decl = existing_session["declared_value"]
-                else:
-                    raw_decl = eff_settings.default_declared_value
-                declared_val = max(raw_decl, 500.0, cod_val)
-
-                if parsed_info.cargo_description:
-                    cargo_desc = parsed_info.cargo_description
-                elif "cargo_description" in existing_session:
-                    cargo_desc = existing_session["cargo_description"]
-                else:
-                    cargo_desc = "Посилка"
-
-                session_payload = {
-                    "parsed_info": parsed_info,
-                    "city": matched_city,
-                    "street_candidates": streets,
-                    "is_address_delivery": True,
-                    "building_number": parsed_info.building_number,
-                    "flat_number": parsed_info.flat_number,
-                    "payer_type": payer_type,
-                    "cargo_type": cargo_type,
-                    "declared_value": declared_val,
-                    "cargo_description": cargo_desc,
-                    "cod_amount": cod_val,
-                    "cod_payment_type": cod_type,
-                    "user_id": user_id,
-                }
-                editing_ref = existing_session.get("editing_draft_ref")
-                if editing_ref:
-                    session_payload["editing_draft_ref"] = editing_ref
-
-                PENDING_SESSIONS[session_id] = session_payload
-                USER_ACTIVE_SESSIONS[user_id] = session_id
-
-                candidate_lines = [
-                    f"⚠️ *Знайдено декілька варіантів вулиці для запиту '{street_query}' у м. {matched_city.description}:*\n"
-                ]
-                for idx, s in enumerate(streets[:8], 1):
-                    candidate_lines.append(f"*{idx}.* 🏡 `{s.streets_type} {s.description}`\n")
-                candidate_lines.append("Будь ласка, оберіть потрібну вулицю / провулок нижче:")
-
-                await status_msg.edit_text(
-                    "\n".join(candidate_lines),
-                    parse_mode="Markdown",
-                    reply_markup=get_street_selection_keyboard(streets, session_id),
-                )
-                return
-        else:
-            # Find matching (city, warehouse) pairs across candidate cities
-            matching_candidates = []
-            for c in cities:
-                try:
-                    wh = await user_np_client.get_warehouse(
-                        city_ref=c.ref,
-                        warehouse_number=parsed_info.warehouse_number,
-                        is_postomat=parsed_info.is_postomat,
+        # Check if we can reuse the already chosen city and destination from active session
+        can_reuse_destination = False
+        if existing_city and _is_city_matched(parsed_info.city_name, existing_city.description):
+            if not is_address_deliv and not existing_is_addr and existing_wh:
+                if (
+                    parsed_info.warehouse_number is not None
+                    and (
+                        str(parsed_info.warehouse_number) == str(existing_wh.number)
+                        or parsed_info.warehouse_number == getattr(existing_wh, "warehouse_number", None)
                     )
-                    if wh:
-                        matching_candidates.append((c, wh))
-                except Exception as e:
-                    logger.warning(f"Error checking warehouse for city {c.description}: {e}")
-                await asyncio.sleep(0.25)
+                    and bool(parsed_info.is_postomat) == bool(existing_wh.is_postomat)
+                ):
+                    matched_city = existing_city
+                    warehouse = existing_wh
+                    dest_desc = existing_session.get("destination_description") or existing_wh.description
+                    can_reuse_destination = True
+            elif is_address_deliv and existing_is_addr and existing_street_ref:
+                matched_city = existing_city
+                street_ref = existing_street_ref
+                dest_desc = existing_session.get("destination_description") or f"🏡 Адресна доставка: {parsed_info.street_name}, {parsed_info.building_number}"
+                can_reuse_destination = True
 
-            w_type = "Поштомат" if parsed_info.is_postomat else "Відділення"
-
-            if not matching_candidates:
+        if not can_reuse_destination:
+            # Lookup City in Nova Poshta
+            await status_msg.edit_text(
+                "🔍 *Пошук населеного пункту та адреси у базі Нової Пошти...*", parse_mode="Markdown"
+            )
+            cities = await user_np_client.search_city(parsed_info.city_name)
+            if not cities:
                 await status_msg.edit_text(
-                    f"❌ {w_type} *№ {parsed_info.warehouse_number}* у населеному пункті *{parsed_info.city_name}* не знайдено.",
+                    f"❌ Населений пункт *'{parsed_info.city_name}'* не знайдено у базі Нової Пошти. Перевірте написання.",
                     parse_mode="Markdown",
                 )
                 return
 
-            if len(matching_candidates) == 1:
-                matched_city, warehouse = matching_candidates[0]
-                dest_desc = warehouse.description
-            else:
-                # Save candidates in session and present city disambiguation keyboard
-                existing_session = PENDING_SESSIONS.get(session_id, {})
-                session_payload = {
-                    "parsed_info": parsed_info,
-                    "candidates": matching_candidates,
-                    "user_id": user_id,
-                }
-                editing_ref = existing_session.get("editing_draft_ref")
-                if editing_ref:
-                    session_payload["editing_draft_ref"] = editing_ref
-                for k in ["payer_type", "cargo_type", "declared_value", "cargo_description", "cod_amount", "cod_payment_type"]:
-                    if k in existing_session:
-                        session_payload[k] = existing_session[k]
-
-                PENDING_SESSIONS[session_id] = session_payload
-                USER_ACTIVE_SESSIONS[user_id] = session_id
-
-                candidate_text_lines = [
-                    f"⚠️ *Знайдено декілька населених пунктів з назвою '{parsed_info.city_name}', де є {w_type} № {parsed_info.warehouse_number}:*\n"
+            # Filter cities by region_name (Oblast) or district_name if specified by user
+            if parsed_info.region_name:
+                reg_lower = parsed_info.region_name.lower()
+                filtered = [
+                    c for c in cities
+                    if (c.area and reg_lower in c.area.lower()) or (reg_lower in c.description.lower())
                 ]
-                for idx, (c, w) in enumerate(matching_candidates, 1):
-                    area_info = f" ({c.area})" if c.area else ""
-                    candidate_text_lines.append(f"*{idx}.* {c.description}{area_info}\n📍 `{w.description}`\n")
-                candidate_text_lines.append("Будь ласка, оберіть потрібний населений пункт нижче:")
+                if filtered:
+                    cities = filtered
 
-                await status_msg.edit_text(
-                    "\n".join(candidate_text_lines),
-                    parse_mode="Markdown",
-                    reply_markup=get_city_selection_keyboard(matching_candidates, session_id),
-                )
-                return
+            matched_city = cities[0]
+
+            if is_address_deliv:
+                # Search street in NP database
+                street_query = parsed_info.street_name or ""
+                streets = await user_np_client.search_street(city_ref=matched_city.ref, street_name=street_query)
+                if not streets:
+                    await status_msg.edit_text(
+                        f"❌ Вулицю *'{street_query}'* у населеному пункті *{matched_city.description}* не знайдено в базі Нової Пошти.\n"
+                        "Будь ласка, перевірте правильність назви вулиці або вкажіть номер відділення/поштомату.",
+                        parse_mode="Markdown",
+                    )
+                    return
+
+                if len(streets) == 1:
+                    matched_street = streets[0]
+                    street_ref = matched_street.ref
+                    street_display = f"{matched_street.streets_type} {matched_street.description}"
+
+                    addr_parts = [f"{street_display}, буд. {parsed_info.building_number}"]
+                    if parsed_info.flat_number:
+                        addr_parts.append(f"кв. {parsed_info.flat_number}")
+                    dest_desc = f"🏡 Адресна доставка: {', '.join(addr_parts)}"
+                else:
+                    # Multiple matching streets/lanes found -> present disambiguation keyboard
+                    existing_session = PENDING_SESSIONS.get(session_id, {})
+                    payer_type = parsed_info.payer_type or existing_session.get("payer_type") or eff_settings.default_payer_type
+                    cargo_type = parsed_info.cargo_type or existing_session.get("cargo_type") or eff_settings.default_cargo_type
+
+                    if parsed_info.cod_amount is not None:
+                        cod_val = parsed_info.cod_amount
+                    elif "cod_amount" in existing_session:
+                        cod_val = existing_session["cod_amount"]
+                    else:
+                        cod_val = 0.0
+
+                    if parsed_info.cod_payment_type:
+                        cod_type = parsed_info.cod_payment_type
+                    elif "cod_payment_type" in existing_session:
+                        cod_type = existing_session["cod_payment_type"]
+                    else:
+                        cod_type = "cash"
+
+                    if parsed_info.declared_value is not None:
+                        raw_decl = parsed_info.declared_value
+                    elif "declared_value" in existing_session:
+                        raw_decl = existing_session["declared_value"]
+                    else:
+                        raw_decl = eff_settings.default_declared_value
+                    declared_val = max(raw_decl, 500.0, cod_val)
+
+                    if parsed_info.cargo_description:
+                        cargo_desc = parsed_info.cargo_description
+                    elif "cargo_description" in existing_session:
+                        cargo_desc = existing_session["cargo_description"]
+                    else:
+                        cargo_desc = "Посилка"
+
+                    session_payload = {
+                        "parsed_info": parsed_info,
+                        "city": matched_city,
+                        "street_candidates": streets,
+                        "is_address_delivery": True,
+                        "building_number": parsed_info.building_number,
+                        "flat_number": parsed_info.flat_number,
+                        "payer_type": payer_type,
+                        "cargo_type": cargo_type,
+                        "declared_value": declared_val,
+                        "cargo_description": cargo_desc,
+                        "cod_amount": cod_val,
+                        "cod_payment_type": cod_type,
+                        "user_id": user_id,
+                        "updated_at": now_ts,
+                    }
+                    editing_ref = existing_session.get("editing_draft_ref")
+                    if editing_ref:
+                        session_payload["editing_draft_ref"] = editing_ref
+
+                    PENDING_SESSIONS[session_id] = session_payload
+                    USER_ACTIVE_SESSIONS[user_id] = session_id
+
+                    candidate_lines = [
+                        f"⚠️ *Знайдено декілька варіантів вулиці для запиту '{street_query}' у м. {matched_city.description}:*\n"
+                    ]
+                    for idx, s in enumerate(streets[:8], 1):
+                        candidate_lines.append(f"*{idx}.* 🏡 `{s.streets_type} {s.description}`\n")
+                    candidate_lines.append("Будь ласка, оберіть потрібну вулицю / провулок нижче:")
+
+                    await status_msg.edit_text(
+                        "\n".join(candidate_lines),
+                        parse_mode="Markdown",
+                        reply_markup=get_street_selection_keyboard(streets, session_id),
+                    )
+                    return
+            else:
+                # Find matching (city, warehouse) pairs across candidate cities
+                matching_candidates = []
+                for c in cities:
+                    try:
+                        wh = await user_np_client.get_warehouse(
+                            city_ref=c.ref,
+                            warehouse_number=parsed_info.warehouse_number,
+                            is_postomat=parsed_info.is_postomat,
+                        )
+                        if wh:
+                            matching_candidates.append((c, wh))
+                    except Exception as e:
+                        logger.warning(f"Error checking warehouse for city {c.description}: {e}")
+                    await asyncio.sleep(0.25)
+
+                w_type = "Поштомат" if parsed_info.is_postomat else "Відділення"
+
+                if not matching_candidates:
+                    await status_msg.edit_text(
+                        f"❌ {w_type} *№ {parsed_info.warehouse_number}* у населеному пункті *{parsed_info.city_name}* не знайдено.",
+                        parse_mode="Markdown",
+                    )
+                    return
+
+                if len(matching_candidates) == 1:
+                    matched_city, warehouse = matching_candidates[0]
+                    dest_desc = warehouse.description
+                else:
+                    # Save candidates in session and present city disambiguation keyboard
+                    existing_session = PENDING_SESSIONS.get(session_id, {})
+                    session_payload = {
+                        "parsed_info": parsed_info,
+                        "candidates": matching_candidates,
+                        "user_id": user_id,
+                        "updated_at": now_ts,
+                    }
+                    editing_ref = existing_session.get("editing_draft_ref")
+                    if editing_ref:
+                        session_payload["editing_draft_ref"] = editing_ref
+                    for k in ["payer_type", "cargo_type", "declared_value", "cargo_description", "cod_amount", "cod_payment_type"]:
+                        if k in existing_session:
+                            session_payload[k] = existing_session[k]
+
+                    PENDING_SESSIONS[session_id] = session_payload
+                    USER_ACTIVE_SESSIONS[user_id] = session_id
+
+                    candidate_text_lines = [
+                        f"⚠️ *Знайдено декілька населених пунктів з назвою '{parsed_info.city_name}', де є {w_type} № {parsed_info.warehouse_number}:*\n"
+                    ]
+                    for idx, (c, w) in enumerate(matching_candidates, 1):
+                        area_info = f" ({c.area})" if c.area else ""
+                        candidate_text_lines.append(f"*{idx}.* {c.description}{area_info}\n📍 `{w.description}`\n")
+                    candidate_text_lines.append("Будь ласка, оберіть потрібний населений пункт нижче:")
+
+                    await status_msg.edit_text(
+                        "\n".join(candidate_text_lines),
+                        parse_mode="Markdown",
+                        reply_markup=get_city_selection_keyboard(matching_candidates, session_id),
+                    )
+                    return
 
         existing_session = PENDING_SESSIONS.get(session_id, {})
 
@@ -1493,6 +1565,20 @@ def register_handlers(
         else:
             cargo_desc = "Посилка"
 
+        # Keep parsed_info strictly synchronized with current state
+        parsed_info.city_name = matched_city.description
+        if matched_city.area:
+            parsed_info.region_name = matched_city.area
+        if warehouse:
+            parsed_info.warehouse_number = warehouse.warehouse_number or int(warehouse.number)
+            parsed_info.is_postomat = warehouse.is_postomat
+        parsed_info.payer_type = payer_type
+        parsed_info.cargo_type = cargo_type
+        parsed_info.declared_value = declared_val
+        parsed_info.cargo_description = cargo_desc
+        parsed_info.cod_amount = cod_val
+        parsed_info.cod_payment_type = cod_type
+
         editing_ref = existing_session.get("editing_draft_ref")
 
         session_payload = {
@@ -1512,12 +1598,14 @@ def register_handlers(
             "cod_amount": cod_val,
             "cod_payment_type": cod_type,
             "user_id": user_id,
+            "updated_at": now_ts,
         }
         if editing_ref:
             session_payload["editing_draft_ref"] = editing_ref
 
         PENDING_SESSIONS[session_id] = session_payload
         USER_ACTIVE_SESSIONS[user_id] = session_id
+        USER_LAST_PARSED_INFO[user_id] = parsed_info
 
         cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
@@ -1614,6 +1702,7 @@ def register_handlers(
             )
             return
 
+        session["updated_at"] = datetime.datetime.now().timestamp()
         action = callback_data.action
         user_id = session["user_id"]
 
@@ -2169,13 +2258,29 @@ def register_handlers(
 
         session["city"] = matched_city
         session["warehouse"] = warehouse
+        session["destination_description"] = warehouse.description
         session["payer_type"] = payer_type
         session["cargo_type"] = cargo_type
         session["declared_value"] = declared_val
         session["cargo_description"] = cargo_desc
         session["cod_amount"] = cod_val
         session["cod_payment_type"] = cod_type
+        session["updated_at"] = datetime.datetime.now().timestamp()
         session.pop("candidates", None)
+
+        parsed_info.city_name = matched_city.description
+        if matched_city.area:
+            parsed_info.region_name = matched_city.area
+        parsed_info.warehouse_number = warehouse.warehouse_number or int(warehouse.number)
+        parsed_info.is_postomat = warehouse.is_postomat
+        parsed_info.payer_type = payer_type
+        parsed_info.cargo_type = cargo_type
+        parsed_info.declared_value = declared_val
+        parsed_info.cargo_description = cargo_desc
+        parsed_info.cod_amount = cod_val
+        parsed_info.cod_payment_type = cod_type
+        session["parsed_info"] = parsed_info
+        USER_LAST_PARSED_INFO[user_id] = parsed_info
 
         cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
@@ -2256,7 +2361,20 @@ def register_handlers(
         session["street_name"] = selected_street.description
         session["destination_description"] = dest_desc
         session["is_address_delivery"] = True
+        session["updated_at"] = datetime.datetime.now().timestamp()
         session.pop("street_candidates", None)
+
+        parsed_info.city_name = city.description
+        if city.area:
+            parsed_info.region_name = city.area
+        parsed_info.street_name = selected_street.description
+        parsed_info.is_address_delivery = True
+        parsed_info.declared_value = declared_val
+        parsed_info.cargo_description = cargo_desc
+        parsed_info.cod_amount = cod_val
+        parsed_info.cod_payment_type = cod_type
+        session["parsed_info"] = parsed_info
+        USER_LAST_PARSED_INFO[user_id] = parsed_info
 
         cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
@@ -2375,6 +2493,7 @@ def register_handlers(
         parsed_info: ParsedRecipientInfo = session["parsed_info"]
         session["address_choice_made"] = True
         session["user_id"] = user_id
+        session["updated_at"] = datetime.datetime.now().timestamp()
 
         if choice == "courier":
             parsed_info.is_address_delivery = True

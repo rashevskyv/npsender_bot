@@ -23,6 +23,21 @@ class WarehouseInfo(BaseModel):
     city_ref: str = Field(..., alias="CityRef")
     city_description: Optional[str] = Field(default=None, alias="CityDescription")
 
+    @property
+    def is_postomat(self) -> bool:
+        """Check if warehouse is a postomat."""
+        desc = (self.description or "").lower()
+        t_type = (self.type_of_warehouse or "").lower()
+        return "поштомат" in desc or "postomat" in desc or "f9316480" in t_type or "841339c7" in t_type
+
+    @property
+    def warehouse_number(self) -> Optional[int]:
+        """Parse warehouse number as integer."""
+        if not self.number:
+            return None
+        digits = "".join(filter(str.isdigit, str(self.number)))
+        return int(digits) if digits else None
+
 
 class CounterpartyRecipientResult(BaseModel):
     """Result of Counterparty/save operation."""

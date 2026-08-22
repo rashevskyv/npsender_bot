@@ -280,8 +280,99 @@ class AIExtractor:
             parsed.has_address_suspicion = False
             parsed.is_address_delivery = False
 
-        # If essential recipient details exist, ensure is_recipient_info is True
-        if parsed.phone or parsed.city_name or parsed.warehouse_number or parsed.last_name:
+        # 6. Declared value extraction
+        if parsed.declared_value is None:
+            decl_match = re.search(
+                r'(?:оцінка|оціночна\s+вартість|оцінити|цінність|вартість)\s*(?:на|:)?\s*(\d+(?:[.,]\d+)?)\s*(?:грн|uah)?',
+                text,
+                re.IGNORECASE,
+            )
+            if not decl_match:
+                decl_match = re.search(
+                    r'(\d+(?:[.,]\d+)?)\s*(?:грн|uah)?\s*(?:оцінка|оціночна\s+вартість)',
+                    text,
+                    re.IGNORECASE,
+                )
+            if decl_match:
+                try:
+                    parsed.declared_value = float(decl_match.group(1).replace(",", "."))
+                except (ValueError, TypeError):
+                    pass
+
+        # 7. Cargo description extraction
+        if not parsed.cargo_description:
+            desc_match = re.search(
+                r'(?:в\s+посилці|в\s+посилкі|опис\s+вантажу|опис|вміст|товар|що\s+всередині)\s*(?:на|:)?\s*([^\n\r]+)',
+                text,
+                re.IGNORECASE,
+            )
+            if desc_match:
+                raw_desc = desc_match.group(1).strip()
+                raw_desc = re.sub(
+                    r'(?:,?\s*(?:оцінка|оціночна\s+вартість|наложка|накладений\s+платіж)\s*(?:на|:)?\s*\d+.*$)',
+                    '',
+                    raw_desc,
+                    flags=re.IGNORECASE,
+                ).strip()
+                raw_desc = raw_desc.strip(" ,.-:")
+                if raw_desc:
+                    parsed.cargo_description = raw_desc
+
+        # 8. COD amount and payout type extraction
+        if parsed.cod_amount is None:
+            cod_match = re.search(
+                r'(?:наложка|накладений\s+платіж|наложенный\s+платеж|післяплата)\s*(?:на|:)?\s*(\d+(?:[.,]\d+)?)\s*(?:грн)?',
+                text,
+                re.IGNORECASE,
+            )
+            if cod_match:
+                try:
+                    parsed.cod_amount = float(cod_match.group(1).replace(",", "."))
+                except (ValueError, TypeError):
+                    pass
+            elif re.search(r'(?:без\s+наложки|зняти\s+наложку|прибрати\s+наложку|наложка\s*0)', text, re.IGNORECASE):
+                parsed.cod_amount = 0.0
+
+        if not parsed.cod_payment_type:
+            if re.search(r'(?:на\s+картку|на\s+карту|картка|карта)', text, re.IGNORECASE):
+                parsed.cod_payment_type = "card"
+            elif re.search(r'(?:готівка|готівкою)', text, re.IGNORECASE):
+                parsed.cod_payment_type = "cash"
+
+        # 9. Payer type extraction
+        if not parsed.payer_type:
+            payer_match = re.search(
+                r'(?:платник|оплата)\s*(?:за\s*доставку)?\s*(?:на|:)?\s*(відправник|отримувач|я|ми|клієнт)',
+                text,
+                re.IGNORECASE,
+            )
+            if payer_match:
+                p_word = payer_match.group(1).lower()
+                if p_word in ("відправник", "я", "ми"):
+                    parsed.payer_type = "Sender"
+                elif p_word in ("отримувач", "клієнт"):
+                    parsed.payer_type = "Recipient"
+
+        # 10. Cargo type extraction
+        if not parsed.cargo_type:
+            if re.search(r'\bдокументи\b', text, re.IGNORECASE):
+                parsed.cargo_type = "Documents"
+            elif re.search(r'\bпосилка\b', text, re.IGNORECASE):
+                parsed.cargo_type = "Parcel"
+
+        # If essential recipient details or modification details exist, ensure is_recipient_info is True
+        if (
+            parsed.phone
+            or parsed.city_name
+            or parsed.warehouse_number
+            or parsed.last_name
+            or parsed.street_name
+            or parsed.declared_value is not None
+            or parsed.cargo_description
+            or parsed.cod_amount is not None
+            or parsed.payer_type
+            or parsed.cargo_type
+        ):
             parsed.is_recipient_info = True
 
         return parsed
