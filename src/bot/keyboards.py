@@ -21,13 +21,17 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📋 Реєстри (ScanSheet)"),
             ],
             [
+                KeyboardButton(text="💰 Накладений платіж"),
                 KeyboardButton(text="⚙️ Налаштування"),
+            ],
+            [
                 KeyboardButton(text="❓ Допомога"),
             ],
         ],
         resize_keyboard=True,
         persistent=True,
     )
+
 
 
 class WaybillActionCallback(CallbackData, prefix="wb"):
@@ -282,3 +286,165 @@ def get_address_confirmation_keyboard(session_id: str) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+class CODActionCallback(CallbackData, prefix="codact"):
+    """Callback data schema for COD dashboard actions."""
+
+    action: str  # "refresh", "settings", "list", "back"
+    page: int = 0
+
+
+class CODSettingsCallback(CallbackData, prefix="codset"):
+    """Callback data schema for updating COD limits."""
+
+    setting_type: str  # "sum", "count", "toggle_warn"
+    value: str  # e.g., "30000", "50000", "150000", "0" (none), "5", "10", "20"
+
+
+def get_cod_stats_keyboard() -> InlineKeyboardMarkup:
+    """Build inline keyboard for monthly COD statistics dashboard."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Оновити дані",
+                    callback_data=CODActionCallback(action="refresh", page=0).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="📜 Список посилок",
+                    callback_data=CODActionCallback(action="list", page=0).pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⚙️ Налаштувати ліміти",
+                    callback_data=CODActionCallback(action="settings", page=0).pack(),
+                ),
+            ],
+        ]
+    )
+
+
+def get_cod_settings_keyboard(
+    current_sum_limit: Optional[float] = 30000.0,
+    current_count_limit: Optional[int] = 10,
+    warning_enabled: bool = True,
+) -> InlineKeyboardMarkup:
+    """Build inline keyboard for configuring COD monthly limits."""
+    # Sum options
+    s_30k = "✅ 30 тис" if current_sum_limit == 30000.0 else "30 тис"
+    s_50k = "✅ 50 тис" if current_sum_limit == 50000.0 else "50 тис"
+    s_150k = "✅ 150 тис" if current_sum_limit == 150000.0 else "150 тис"
+    s_off = "✅ Без ліміту" if not current_sum_limit or current_sum_limit <= 0 else "Без ліміту"
+
+    # Count options
+    c_5 = "✅ 5 шт" if current_count_limit == 5 else "5 шт"
+    c_10 = "✅ 10 шт" if current_count_limit == 10 else "10 шт"
+    c_20 = "✅ 20 шт" if current_count_limit == 20 else "20 шт"
+    c_off = "✅ Без ліміту" if not current_count_limit or current_count_limit <= 0 else "Без ліміту"
+
+    warn_label = "🔔 Попередження: УВІМКНЕНО" if warning_enabled else "🔕 Попередження: ВИМКНЕНО"
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💰 Ліміт суми на місяць:", callback_data=CODActionCallback(action="noop", page=0).pack()),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=s_30k,
+                    callback_data=CODSettingsCallback(setting_type="sum", value="30000").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=s_50k,
+                    callback_data=CODSettingsCallback(setting_type="sum", value="50000").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=s_150k,
+                    callback_data=CODSettingsCallback(setting_type="sum", value="150000").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=s_off,
+                    callback_data=CODSettingsCallback(setting_type="sum", value="0").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(text="📦 Ліміт кількості посилок:", callback_data=CODActionCallback(action="noop", page=0).pack()),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=c_5,
+                    callback_data=CODSettingsCallback(setting_type="count", value="5").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=c_10,
+                    callback_data=CODSettingsCallback(setting_type="count", value="10").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=c_20,
+                    callback_data=CODSettingsCallback(setting_type="count", value="20").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=c_off,
+                    callback_data=CODSettingsCallback(setting_type="count", value="0").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=warn_label,
+                    callback_data=CODSettingsCallback(
+                        setting_type="toggle_warn",
+                        value="0" if warning_enabled else "1",
+                    ).pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад до статистики",
+                    callback_data=CODActionCallback(action="back", page=0).pack(),
+                ),
+            ],
+        ]
+    )
+
+
+def get_cod_shipments_keyboard(
+    current_page: int,
+    total_pages: int,
+) -> InlineKeyboardMarkup:
+    """Build inline keyboard for paginating COD shipments list."""
+    nav_row = []
+    if current_page > 0:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="⬅️ Попередня",
+                callback_data=CODActionCallback(action="list", page=current_page - 1).pack(),
+            )
+        )
+    nav_row.append(
+        InlineKeyboardButton(
+            text=f"📄 {current_page + 1}/{max(total_pages, 1)}",
+            callback_data=CODActionCallback(action="noop", page=0).pack(),
+        )
+    )
+    if current_page < total_pages - 1:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="➡️ Наступна",
+                callback_data=CODActionCallback(action="list", page=current_page + 1).pack(),
+            )
+        )
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            nav_row,
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад до статистики",
+                    callback_data=CODActionCallback(action="back", page=0).pack(),
+                ),
+            ],
+        ]
+    )
+

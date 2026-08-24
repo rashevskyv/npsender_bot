@@ -1,6 +1,7 @@
 """Async client for interacting with Nova Poshta API 2.0."""
 
 import asyncio
+import calendar
 import datetime
 import time
 import logging
@@ -18,9 +19,27 @@ from src.nova_poshta.models import (
     ScanSheetInfo,
     StreetInfo,
     AddressSaveResult,
+    CODItemInfo,
+    CODMonthlyStats,
 )
 
 logger = logging.getLogger(__name__)
+
+UKRAINIAN_MONTHS = {
+    1: "Січень",
+    2: "Лютий",
+    3: "Березень",
+    4: "Квітень",
+    5: "Травень",
+    6: "Червень",
+    7: "Липень",
+    8: "Серпень",
+    9: "Вересень",
+    10: "Жовтень",
+    11: "Листопад",
+    12: "Грудень",
+}
+
 
 
 def _clean_phone(phone_str: Optional[str]) -> str:
@@ -1048,3 +1067,213 @@ class NovaPoshtaClient:
         except Exception as e:
             logger.warning(f"Failed to fetch payment cards for counterparty {counterparty_ref}: {e}")
             return []
+
+    async def get_monthly_cod_stats(
+        self,
+        year: Optional[int] = None,
+        month: Optional[int] = None,
+        user_phone: Optional[str] = None,
+        user_cp_ref: Optional[str] = None,
+    ) -> CODMonthlyStats:
+        """Fetch and calculate monthly statistics for shipments with Cash On Delivery (накладений платіж)."""
+        now = datetime.date.today()
+        target_year = year or now.year
+        target_month = month or now.month
+
+        last_day = calendar.monthrange(target_year, target_month)[1]
+        from_date = f"01.{target_month:02d}.{target_year}"
+        to_date = f"{last_day:02d}.{target_month:02d}.{target_year}"
+        month_label = f"{UKRAINIAN_MONTHS.get(target_month, str(target_month))} {target_year}"
+
+        eff_phone = user_phone or getattr(self.settings, "sender_phone", None)
+        eff_cp_ref = user_cp_ref or getattr(self.settings, "sender_counterparty_ref", None)
+
+        try:
+            res = await self._post(
+                model_name="InternetDocument",
+                called_method="getDocumentList",
+                method_properties={
+                    "DateTimeFrom": from_date,
+                    "DateTimeTo": to_date,
+                    "GetFullList": "1",
+                },
+            )
+        except Exception as e:
+            logger.error(f"Error fetching monthly document list from Nova Poshta: {e}")
+            return CODMonthlyStats(
+                year=target_year,
+                month=target_month,
+                month_name=month_label,
+                from_date=from_date,
+                to_date=to_date,
+            )
+
+        data = res.get("data", [])
+        if not data:
+            return CODMonthlyStats(
+                year=target_year,
+                month=target_month,
+                month_name=month_label,
+                from_date=from_date,
+                to_date=to_date,
+            )
+
+        items: List[CODItemInfo] = []
+        total_sum = 0.0
+        received_count = 0
+        received_sum = 0.0
+        in_transit_count = 0
+        in_transit_sum = 0.0
+        refused_count = 0
+        refused_sum = 0.0
+        drafts_count = 0
+        drafts_sum = 0.0
+
+        for doc in data:
+            # Skip deleted documents
+            deletion_mark = doc.get("DeletionMark")
+            if deletion_mark in (True, 1, "1", "true", "True"):
+                continue
+
+            state_id = str(doc.get("StateId", doc.get("StatusCode", "")))
+            if state_id in ("2", "3"):
+                continue
+
+            state_name = str(doc.get("StateName", doc.get("StateDescription", doc.get("Status", "Створено"))))
+            state_name_lower = state_name.lower()
+            if any(w in state_name_lower for w in ["видалено", "скасовано", "не знайдено", "не існує"]):
+                continue
+
+            # Filter by sender if info is available
+            doc_sender_cp = str(doc.get("Sender", ""))
+            doc_sender_phone = doc.get("SendersPhone")
+
+            is_sender = False
+            if eff_cp_ref and doc_sender_cp and eff_cp_ref == doc_sender_cp:
+                is_sender = True
+            elif eff_phone and doc_sender_phone and _clean_phone(eff_phone) == _clean_phone(doc_sender_phone):
+                is_sender = True
+            elif not eff_phone and not eff_cp_ref:
+                is_sender = True
+
+            if not is_sender:
+                continue
+
+            # Extract COD details
+            cod_val = 0.0
+            cod_type = "cash"
+
+            bw_data = doc.get("BackwardDeliveryData") or []
+            if isinstance(bw_data, list):
+                for bw in bw_data:
+                    if isinstance(bw, dict):
+                        c_type = str(bw.get("CargoType", ""))
+                        if c_type in ("Money", "Цінні папери", "Грошовий переказ", "TrMax", "Afterpayment"):
+                            try:
+                                cod_val = float(bw.get("RedeliveryString", 0) or 0)
+                            except (ValueError, TypeError):
+                                pass
+                            if bw.get("RedeliveryPaymentCard") or bw.get("PaymentMethod") == "Card":
+                                cod_type = "card"
+
+            if not cod_val:
+                for k in ["AfterpaymentOnGoodsCost", "RedeliveryString", "BackwardDeliveryMoney", "BackwardDeliveryCost", "RedeliverySum"]:
+                    val = doc.get(k)
+                    if val:
+                        try:
+                            cod_val = float(val)
+                            if cod_val > 0:
+                                break
+                        except (ValueError, TypeError):
+                            pass
+
+            if doc.get("RedeliveryPaymentCard") or doc.get("PaymentCard") or doc.get("BackwardDeliveryPaymentType") == "Card":
+                cod_type = "card"
+
+            # Skip shipments without COD
+            if cod_val <= 0:
+                continue
+
+            doc_num = str(doc.get("IntDocNumber", doc.get("Number", "")))
+            date_created = str(doc.get("DateTime", doc.get("CreateTime", "")))
+            rec_name = str(
+                doc.get("RecipientContactPerson")
+                or doc.get("RecipientDescription")
+                or "Отримувач"
+            )
+            rec_phone = str(doc.get("RecipientsPhone", ""))
+            city_recip = str(doc.get("CityRecipientDescription", doc.get("CityRecipient", "N/A")))
+            descr = str(doc.get("Description", "Посилка"))
+            ref_guid = str(doc.get("Ref", doc_num))
+
+            # Categorize status
+            is_rec = False
+            is_tr = False
+            is_ref = False
+            is_dr = False
+
+            if state_id in ("9", "10", "11", "106") or any(
+                w in state_name_lower for w in ["отримано", "забрано", "видано", "виплачено"]
+            ):
+                is_rec = True
+                received_count += 1
+                received_sum += cod_val
+            elif state_id in ("102", "103", "108") or any(
+                w in state_name_lower for w in ["відмова", "повернення", "повернуто"]
+            ):
+                is_ref = True
+                refused_count += 1
+                refused_sum += cod_val
+            elif state_id in ("1", "") or any(
+                w in state_name_lower for w in ["чернетка", "створено", "ще не надав", "очікує надходження", "очікує посилку"]
+            ):
+                is_dr = True
+                drafts_count += 1
+                drafts_sum += cod_val
+            else:
+                # In transit or in branch
+                is_tr = True
+                in_transit_count += 1
+                in_transit_sum += cod_val
+
+            total_sum += cod_val
+
+            items.append(
+                CODItemInfo(
+                    int_doc_number=doc_num,
+                    ref=ref_guid,
+                    date_created=date_created,
+                    cod_amount=cod_val,
+                    cod_payment_type=cod_type,
+                    state_id=state_id,
+                    state_name=state_name,
+                    recipient_name=rec_name,
+                    recipient_phone=rec_phone,
+                    city_recipient=city_recip,
+                    description=descr,
+                    is_received=is_rec,
+                    is_in_transit=is_tr,
+                    is_refused=is_ref,
+                    is_draft=is_dr,
+                )
+            )
+
+        return CODMonthlyStats(
+            year=target_year,
+            month=target_month,
+            month_name=month_label,
+            from_date=from_date,
+            to_date=to_date,
+            total_count=len(items),
+            total_sum=total_sum,
+            received_count=received_count,
+            received_sum=received_sum,
+            in_transit_count=in_transit_count,
+            in_transit_sum=in_transit_sum,
+            refused_count=refused_count,
+            refused_sum=refused_sum,
+            drafts_count=drafts_count,
+            drafts_sum=drafts_sum,
+            items=items,
+        )
+

@@ -6,7 +6,15 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **💰 Monthly Cash On Delivery (COD) Tracking & Limits ("💰 Накладений платіж" / `/cod`)**: Fully tracks monthly Cash On Delivery (післяплата) shipments directly via Nova Poshta API 2.0 (`InternetDocument/getDocumentList`). Features include:
+  - **Live Monthly Calculation**: Computes total COD volume (UAH sum and parcel count) from the 1st day of the current calendar month to today.
+  - **Automatic Monthly Reset**: Statistics automatically reset on the 1st of every new month without requiring manual maintenance.
+  - **Detailed Status Breakdown**: Categorizes shipments into 🟢 Received/Disbursed (Виплачено), 🚚 In Transit / Awaiting Pickup (У дорозі), 📝 Drafts (Чернетки), and 🔴 Refused/Returned (Відмови).
+  - **Configurable Limits & Progress Bar**: Personal monthly limits (defaults: 30,000 UAH / 10 parcels) with visual emoji progress bars (`🟩🟩🟩🟨⬜ 85%`), customizable via quick-preset inline buttons or commands (`/set_cod_limit`, `/set_cod_count`).
+  - **Proactive Threshold Warnings**: Displays timely warnings on parcel creation confirmation cards if creating a COD parcel will exceed or approach (>80%) monthly limits.
+  - **Paginated COD Shipments List**: View all COD parcels sent during the current month with detailed status and payout type (Card vs Cash).
 - **⏱️ 15-Minute Session TTL & Continuous Parcel Editing**: Active parcel creation sessions stay live for 15 minutes (`SESSION_TIMEOUT_SECONDS = 900`). Every user interaction (sending text, clicking buttons, or selecting locations) refreshes the activity timestamp, allowing users to freely adjust declared value, parcel description, COD, or payer details over multiple messages without session loss, while inactive sessions are automatically purged.
+
 - **🎯 Smart City & Warehouse Retention (No Disambiguation Loop)**: Eliminates repeating city disambiguation prompts! When a user chooses a city from candidates (or sends details for ambiguous cities), the chosen city and warehouse are locked into the active session. Follow-up updates (e.g. changing declared value to 50,000 UAH or specifying cargo description) seamlessly update the parcel draft without re-triggering city search or prompting for the city again.
 - **🩹 Extended Entity Healing for Declared Values & Cargo Descriptions**: Regex and heuristic extraction automatically detects phrases like *"оцінка 50000 грн"*, *"в посилці steam deck OLED 512 та Odin 2 portal"*, *"наложка 15000 на картку"*, ensuring immediate and accurate updates even if the user sends free-form follow-up texts.
 - **🏡 Intelligent Courier Address Delivery & Street Selection ("🏡 Адресна доставка кур'єром")**: Seamlessly detects and creates courier door delivery waybills (`WarehouseDoors`)! When recipient info specifies an address, the bot uses multi-permutation street search (e.g. mapping *"вул. Віри Гордієнко"* -> *"вул. Гордієнко Віри"*) with prefix stripping and similarity ranking. If multiple matching candidates exist (e.g. street vs lane), the bot displays an interactive keyboard (`[ 🏡 вул. ... ]`, `[ 🏡 пров. ... ]`) so users can accurately choose.

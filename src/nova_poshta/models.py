@@ -104,3 +104,50 @@ class AddressSaveResult(BaseModel):
     ref: str = Field(..., alias="Ref")
     description: Optional[str] = Field(default=None, alias="Description")
 
+
+class CODItemInfo(BaseModel):
+    """Information about a single waybill shipment with cash on delivery (накладений платіж)."""
+
+    int_doc_number: str
+    ref: Optional[str] = None
+    date_created: str
+    cod_amount: float
+    cod_payment_type: str = "cash"  # "cash" | "card"
+    state_id: str
+    state_name: str
+    recipient_name: str
+    recipient_phone: Optional[str] = None
+    city_recipient: str
+    description: str = "Посилка"
+    is_received: bool = False
+    is_in_transit: bool = False
+    is_refused: bool = False
+    is_draft: bool = False
+
+
+class CODMonthlyStats(BaseModel):
+    """Monthly summary statistics for Cash On Delivery (накладений платіж) shipments."""
+
+    year: int
+    month: int
+    month_name: str  # e.g. "Серпень 2026"
+    from_date: str   # "01.MM.YYYY"
+    to_date: str     # "DD.MM.YYYY"
+
+    total_count: int = 0
+    total_sum: float = 0.0
+
+    received_count: int = 0
+    received_sum: float = 0.0
+
+    in_transit_count: int = 0
+    in_transit_sum: float = 0.0
+
+    refused_count: int = 0
+    refused_sum: float = 0.0
+
+    drafts_count: int = 0
+    drafts_sum: float = 0.0
+
+    items: List[CODItemInfo] = Field(default_factory=list)
+

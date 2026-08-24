@@ -9,6 +9,8 @@ from src.nova_poshta.models import (
     ScanSheetInfo,
     StreetInfo,
     AddressSaveResult,
+    CODItemInfo,
+    CODMonthlyStats,
 )
 from src.nova_poshta.client import NovaPoshtaClient
 
@@ -21,5 +23,8 @@ __all__ = [
     "ScanSheetInfo",
     "StreetInfo",
     "AddressSaveResult",
+    "CODItemInfo",
+    "CODMonthlyStats",
     "NovaPoshtaClient",
 ]
+

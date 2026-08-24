@@ -32,6 +32,9 @@ class UserCustomSettings(BaseModel):
     sender_name: Optional[str] = None
     sender_card_mask: Optional[str] = None
     sender_card_ref: Optional[str] = None
+    cod_monthly_limit_sum: Optional[float] = 30000.0
+    cod_monthly_limit_count: Optional[int] = 10
+    cod_warning_enabled: bool = True
 
 
 class SavedDraft(BaseModel):

@@ -16,6 +16,7 @@ from src.ai.schemas import ParsedRecipientInfo
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
 from src.utils.barcode_gen import generate_code128_barcode
+from src.nova_poshta.models import CODItemInfo, CODMonthlyStats
 from src.bot.keyboards import (
     get_main_reply_keyboard,
     get_confirmation_keyboard,
@@ -31,7 +32,13 @@ from src.bot.keyboards import (
     AddressConfirmCallback,
     get_address_confirmation_keyboard,
     get_waybill_keyboard,
+    CODActionCallback,
+    CODSettingsCallback,
+    get_cod_stats_keyboard,
+    get_cod_settings_keyboard,
+    get_cod_shipments_keyboard,
 )
+
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -303,7 +310,131 @@ def filter_user_drafts(
     return filtered
 
 
+def _render_progress_bar(used: float, total: Optional[float], length: int = 10) -> str:
+    """Render emoji progress bar (e.g. 🟩🟩🟩🟩🟨⬜⬜ 60%)."""
+    if not total or total <= 0:
+        return "Без ліміту"
+    ratio = used / total
+    capped_ratio = min(max(ratio, 0.0), 1.0)
+    filled = int(round(capped_ratio * length))
+
+    if ratio >= 1.0:
+        bar = "🟥" * length
+    elif ratio >= 0.8:
+        green_count = max(0, filled - 2)
+        warn_count = filled - green_count
+        empty_count = length - filled
+        bar = ("🟩" * green_count) + ("🟨" * warn_count) + ("⬜" * empty_count)
+    else:
+        empty_count = length - filled
+        bar = ("🟩" * filled) + ("⬜" * empty_count)
+
+    pct = int(ratio * 100)
+    return f"{bar} {pct}%"
+
+
+def format_cod_dashboard(stats: CODMonthlyStats, user_settings: UserCustomSettings) -> str:
+    """Format full Ukrainian visual text report for monthly Cash On Delivery stats and limits."""
+    sum_limit = user_settings.cod_monthly_limit_sum
+    count_limit = user_settings.cod_monthly_limit_count
+
+    sum_bar = _render_progress_bar(stats.total_sum, sum_limit) if sum_limit and sum_limit > 0 else "Вимкнено"
+    cnt_bar = _render_progress_bar(float(stats.total_count), float(count_limit)) if count_limit and count_limit > 0 else "Вимкнено"
+
+    lines = [
+        f"📊 *Звіт накладеного платежу за {stats.month_name}*",
+        f"🗓 _Період:_ `{stats.from_date}` — `{stats.to_date}`\n",
+        f"💰 *Загальна сума:* `{int(stats.total_sum)} грн`" + (f" / `{int(sum_limit)} грн`" if sum_limit and sum_limit > 0 else ""),
+        f"   {sum_bar}\n",
+        f"📦 *Кількість посилок:* `{stats.total_count} шт`" + (f" / `{count_limit} шт`" if count_limit and count_limit > 0 else ""),
+        f"   {cnt_bar}\n",
+        "──────────────",
+        "📌 *Статуси за поточний місяць:*",
+        f"  🟢 *Виплачено / Забрано:* `{int(stats.received_sum)} грн` ({stats.received_count} шт)",
+        f"  🚚 *У дорозі / Очікують:* `{int(stats.in_transit_sum)} грн` ({stats.in_transit_count} шт)",
+    ]
+
+    if stats.drafts_count > 0:
+        lines.append(f"  📝 *Чернетки (не відправлені):* `{int(stats.drafts_sum)} грн` ({stats.drafts_count} шт)")
+
+    if stats.refused_count > 0:
+        lines.append(f"  🔴 *Відмови / Повернення:* `{int(stats.refused_sum)} грн` ({stats.refused_count} шт)")
+
+    lines.append("──────────────")
+
+    # Remaining limit info & warnings
+    if sum_limit and sum_limit > 0:
+        rem_sum = max(0.0, sum_limit - stats.total_sum)
+        if stats.total_sum >= sum_limit:
+            lines.append(f"⚠️ *УВАГА: Місячний ліміт суми ПЕРЕВИЩЕНО на {int(stats.total_sum - sum_limit)} грн!*")
+        elif (stats.total_sum / sum_limit) >= 0.8:
+            lines.append(f"⚠️ *Увага: Залишок ліміту суми лише {int(rem_sum)} грн ({int(100 - (stats.total_sum/sum_limit)*100)}%)!*")
+        else:
+            lines.append(f"✅ *Залишок до ліміту:* `{int(rem_sum)} грн`")
+
+    if count_limit and count_limit > 0:
+        rem_cnt = max(0, count_limit - stats.total_count)
+        if stats.total_count >= count_limit:
+            lines.append(f"⚠️ *УВАГА: Ліміт кількості посилок ПЕРЕВИЩЕНО на {stats.total_count - count_limit} шт!*")
+        elif stats.total_count >= int(count_limit * 0.8):
+            lines.append(f"⚠️ *Увага: Залишилось всього {rem_cnt} посилок до ліміту!*")
+        else:
+            lines.append(f"✅ *Залишок посилок:* `{rem_cnt} шт`")
+
+    # Next reset date
+    next_month = stats.month + 1 if stats.month < 12 else 1
+    next_year = stats.year if stats.month < 12 else stats.year + 1
+    lines.append(f"\n📅 _Лічильник автоматично обнулиться:_ `01.{next_month:02d}.{next_year}`")
+
+    return "\n".join(lines)
+
+
+def format_cod_shipments_page(stats: CODMonthlyStats, page: int = 0, page_size: int = 5) -> str:
+    """Format paginated list of shipments with Cash On Delivery."""
+    items = stats.items
+    if not items:
+        return f"📜 *Посилок з накладеним платежем за {stats.month_name} не знайдено.*"
+
+    total_items = len(items)
+    total_pages = (total_items + page_size - 1) // page_size
+    current_page = max(0, min(page, total_pages - 1))
+    start_idx = current_page * page_size
+    end_idx = min(start_idx + page_size, total_items)
+    page_items = items[start_idx:end_idx]
+
+    lines = [
+        f"📜 *Посилки з накладеним платежем ({stats.month_name})*",
+        f"_Показано {start_idx + 1}-{end_idx} із {total_items} (Сторінка {current_page + 1}/{total_pages}):_\n",
+    ]
+
+    for idx, item in enumerate(page_items, start_idx + 1):
+        if item.is_received:
+            status_icon = "🟢"
+            status_text = "Виплачено / Забрано"
+        elif item.is_refused:
+            status_icon = "🔴"
+            status_text = "Відмова / Повернення"
+        elif item.is_draft:
+            status_icon = "📝"
+            status_text = "Чернетка"
+        else:
+            status_icon = "🚚"
+            status_text = item.state_name or "У дорозі"
+
+        payout_type_str = "💳 Картка" if item.cod_payment_type == "card" else "💵 Готівка"
+
+        lines.append(
+            f"*{idx}.* 🎫 `{item.int_doc_number}` ({item.date_created})\n"
+            f"   💰 *Сума:* `{int(item.cod_amount)} грн` ({payout_type_str})\n"
+            f"   {status_icon} *Статус:* {status_text}\n"
+            f"   👤 *Отримувач:* {item.recipient_name} ({item.city_recipient})\n"
+        )
+
+    return "\n".join(lines)
+
+
 def register_handlers(
+
     settings: Settings,
     ai_extractor: AIExtractor,
     np_client: NovaPoshtaClient,
@@ -415,6 +546,9 @@ def register_handlers(
         ai_url_display = u_settings.ai_base_url or "https://api.openai.com/v1"
         ai_model_display = u_settings.ai_model or settings.ai_model
 
+        sum_lim_str = f"`{int(u_settings.cod_monthly_limit_sum)} грн`" if u_settings.cod_monthly_limit_sum else "_Без ліміту_"
+        cnt_lim_str = f"`{u_settings.cod_monthly_limit_count} шт`" if u_settings.cod_monthly_limit_count else "_Без ліміту_"
+
         card = (
             f"⚙️ *Персональний профіль користувача:* [{message.from_user.full_name}]\n\n"
             f"📊 *Загальний статус:* {status_icon}\n\n"
@@ -423,7 +557,8 @@ def register_handlers(
             f"• 👤 *ПІБ відправника:* `{u_settings.sender_name or 'Не підтягнуто'}`\n"
             f"• 📞 *Телефон:* `{u_settings.sender_phone or 'Не підтягнуто'}`\n"
             f"• 🏙 *Місто відправки:* `{u_settings.sender_city_name or 'Не вказано'}`\n"
-            f"• 📦 *Відділення відправки:* `{u_settings.sender_warehouse_name or 'Не вказано'}`\n\n"
+            f"• 📦 *Відділення відправки:* `{u_settings.sender_warehouse_name or 'Не вказано'}`\n"
+            f"• 💰 *Місячний ліміт наложки:* {sum_lim_str} | {cnt_lim_str}\n\n"
             "🧠 *Дані AI-провайдера:*\n"
             f"• 🔑 *AI API-ключ:* {masked_ai_key}\n"
             f"• 🌐 *URL API:* `{ai_url_display}`\n"
@@ -435,9 +570,13 @@ def register_handlers(
             "• `/set_ai_model MODEL` — змінити модель AI\n"
             "• `/set_name ПІБ` — змінити ПІБ відправника\n"
             "• `/set_city НазваМіста` — змінити місто відправки\n"
-            "• `/set_warehouse Номер` — змінити відділення відправки"
+            "• `/set_warehouse Номер` — змінити відділення відправки\n"
+            "• `/set_cod_limit СУМА` — ліміт суми наложки на місяць\n"
+            "• `/set_cod_count КІЛЬКІСТЬ` — ліміт кількості посилок на місяць\n"
+            "• `/cod` — звіт та статистика накладеного платежу"
         )
         await message.answer(card, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+
 
     @router.message(Command("set_name"))
     @router.message(Command("set_sender_name"))
@@ -664,9 +803,220 @@ def register_handlers(
             reply_markup=get_main_reply_keyboard(),
         )
 
+    @router.message(Command("cod"))
+    @router.message(Command("stats"))
+    @router.message(F.text == "💰 Накладений платіж")
+    @router.message(F.text == "💰 Наложка")
+    async def cmd_cod_dashboard(message: Message):
+        """Show monthly Cash On Delivery dashboard with statistics, limits and progress."""
+        clear_user_active_session(message.from_user.id)
+        if not await ensure_user_configured(message):
+            return
+
+        user_id = message.from_user.id
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+        user_settings = storage_manager.get_user_settings(user_id)
+
+        status_msg = await message.answer("⏳ *Розрахунок статистики накладеного платежу за поточний місяць...*", parse_mode="Markdown")
+
+        try:
+            stats = await user_np_client.get_monthly_cod_stats(
+                user_phone=eff_settings.sender_phone,
+                user_cp_ref=eff_settings.sender_counterparty_ref,
+            )
+            text = format_cod_dashboard(stats, user_settings)
+            await status_msg.edit_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=get_cod_stats_keyboard(),
+            )
+        except Exception as e:
+            logger.error(f"Error fetching COD stats: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ *Помилка отримання статистики:* {str(e)}", parse_mode="Markdown")
+
+    @router.message(Command("set_cod_limit"))
+    async def cmd_set_cod_limit(message: Message):
+        """Set user's custom monthly COD sum limit."""
+        clear_user_active_session(message.from_user.id)
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer(
+                "⚠️ *Використання:* `/set_cod_limit СУМА_ГРН` (наприклад, `/set_cod_limit 50000` або `/set_cod_limit 0` щоб вимкнути)",
+                parse_mode="Markdown",
+            )
+            return
+
+        try:
+            val = float(parts[1].strip())
+            new_limit = val if val > 0 else None
+            storage_manager.update_user_settings(message.from_user.id, cod_monthly_limit_sum=new_limit)
+            limit_str = f"`{int(val)} грн`" if new_limit else "Вимкнено"
+            await message.answer(
+                f"✅ *Місячний ліміт суми накладеного платежу встановлено:* {limit_str}",
+                parse_mode="Markdown",
+                reply_markup=get_main_reply_keyboard(),
+            )
+        except ValueError:
+            await message.answer("❌ *Будь ласка, вкажіть числове значення суми в гривнях.*", parse_mode="Markdown")
+
+    @router.message(Command("set_cod_count"))
+    async def cmd_set_cod_count(message: Message):
+        """Set user's custom monthly COD parcels count limit."""
+        clear_user_active_session(message.from_user.id)
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip().isdigit():
+            await message.answer(
+                "⚠️ *Використання:* `/set_cod_count КІЛЬКІСТЬ` (наприклад, `/set_cod_count 15` або `/set_cod_count 0` щоб вимкнути)",
+                parse_mode="Markdown",
+            )
+            return
+
+        val = int(parts[1].strip())
+        new_limit = val if val > 0 else None
+        storage_manager.update_user_settings(message.from_user.id, cod_monthly_limit_count=new_limit)
+        limit_str = f"`{val} посилок`" if new_limit else "Вимкнено"
+        await message.answer(
+            f"✅ *Місячний ліміт кількості посилок з наложкою встановлено:* {limit_str}",
+            parse_mode="Markdown",
+            reply_markup=get_main_reply_keyboard(),
+        )
+
+    @router.callback_query(CODActionCallback.filter())
+    async def process_cod_action_callback(
+        callback: CallbackQuery, callback_data: CODActionCallback
+    ):
+        """Handle inline actions for COD statistics dashboard."""
+        action = callback_data.action
+        page = callback_data.page
+        user_id = callback.from_user.id
+
+        if action == "noop":
+            await callback.answer()
+            return
+
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+        user_settings = storage_manager.get_user_settings(user_id)
+
+        if action in ("refresh", "back"):
+            await callback.answer("Оновлення даних...")
+            try:
+                stats = await user_np_client.get_monthly_cod_stats(
+                    user_phone=eff_settings.sender_phone,
+                    user_cp_ref=eff_settings.sender_counterparty_ref,
+                )
+                text = format_cod_dashboard(stats, user_settings)
+                await callback.message.edit_text(
+                    text,
+                    parse_mode="Markdown",
+                    reply_markup=get_cod_stats_keyboard(),
+                )
+            except Exception as e:
+                logger.error(f"Error refreshing COD stats: {e}", exc_info=True)
+                await callback.answer(f"Помилка оновлення: {e}", show_alert=True)
+            return
+
+        if action == "settings":
+            await callback.answer()
+            settings_text = (
+                "⚙️ *Налаштування місячних лімітів накладеного платежу*\n\n"
+                "Оберіть бажані ліміти або скористайтесь швидкими кнопками нижче:\n"
+                "• *Ліміт суми:* поріг фінансового моніторингу NovaPay\n"
+                "• *Ліміт посилок:* поріг ризик-орієнтованого контролю\n\n"
+                "Встановити довільне значення вручну:\n"
+                "`/set_cod_limit 50000`\n"
+                "`/set_cod_count 15`"
+            )
+            await callback.message.edit_text(
+                settings_text,
+                parse_mode="Markdown",
+                reply_markup=get_cod_settings_keyboard(
+                    current_sum_limit=user_settings.cod_monthly_limit_sum,
+                    current_count_limit=user_settings.cod_monthly_limit_count,
+                    warning_enabled=getattr(user_settings, "cod_warning_enabled", True),
+                ),
+            )
+            return
+
+        if action == "list":
+            await callback.answer("Завантаження списку...")
+            try:
+                stats = await user_np_client.get_monthly_cod_stats(
+                    user_phone=eff_settings.sender_phone,
+                    user_cp_ref=eff_settings.sender_counterparty_ref,
+                )
+                page_size = 5
+                total_items = len(stats.items)
+                total_pages = max(1, (total_items + page_size - 1) // page_size)
+                text = format_cod_shipments_page(stats, page=page, page_size=page_size)
+                await callback.message.edit_text(
+                    text,
+                    parse_mode="Markdown",
+                    reply_markup=get_cod_shipments_keyboard(
+                        current_page=page,
+                        total_pages=total_pages,
+                    ),
+                )
+            except Exception as e:
+                logger.error(f"Error loading COD shipments list: {e}", exc_info=True)
+                await callback.answer(f"Помилка завантаження списку: {e}", show_alert=True)
+            return
+
+    @router.callback_query(CODSettingsCallback.filter())
+    async def process_cod_settings_callback(
+        callback: CallbackQuery, callback_data: CODSettingsCallback
+    ):
+        """Handle inline adjustments to COD limits and warnings."""
+        user_id = callback.from_user.id
+        s_type = callback_data.setting_type
+        val_str = callback_data.value
+
+        if s_type == "sum":
+            val_f = float(val_str)
+            new_sum = val_f if val_f > 0 else None
+            storage_manager.update_user_settings(user_id, cod_monthly_limit_sum=new_sum)
+            msg = f"Ліміт суми встановлено: {int(val_f)} грн" if new_sum else "Ліміт суми вимкнено"
+            await callback.answer(msg)
+        elif s_type == "count":
+            val_i = int(val_str)
+            new_cnt = val_i if val_i > 0 else None
+            storage_manager.update_user_settings(user_id, cod_monthly_limit_count=new_cnt)
+            msg = f"Ліміт посилок встановлено: {val_i} шт" if new_cnt else "Ліміт кількості вимкнено"
+            await callback.answer(msg)
+        elif s_type == "toggle_warn":
+            new_warn = val_str == "1"
+            storage_manager.update_user_settings(user_id, cod_warning_enabled=new_warn)
+            msg = "Попередження увімкнено" if new_warn else "Попередження вимкнено"
+            await callback.answer(msg)
+
+        updated_settings = storage_manager.get_user_settings(user_id)
+        settings_text = (
+            "⚙️ *Налаштування місячних лімітів накладеного платежу*\n\n"
+            "Оберіть бажані ліміти або скористайтесь швидкими кнопками нижче:\n"
+            "• *Ліміт суми:* поріг фінансового моніторингу NovaPay\n"
+            "• *Ліміт посилок:* поріг ризик-орієнтованого контролю\n\n"
+            "Встановити довільне значення вручну:\n"
+            "`/set_cod_limit 50000`\n"
+            "`/set_cod_count 15`"
+        )
+        try:
+            await callback.message.edit_text(
+                settings_text,
+                parse_mode="Markdown",
+                reply_markup=get_cod_settings_keyboard(
+                    current_sum_limit=updated_settings.cod_monthly_limit_sum,
+                    current_count_limit=updated_settings.cod_monthly_limit_count,
+                    warning_enabled=getattr(updated_settings, "cod_warning_enabled", True),
+                ),
+            )
+        except Exception:
+            pass
+
     @router.message(Command("drafts"))
     @router.message(F.text == "📝 Мої чернетки (ТТН)")
     async def cmd_drafts(message: Message):
+
         """Show list of active created express waybill drafts (fetching both local and live NP server drafts)."""
         clear_user_active_session(message.from_user.id)
         if not await ensure_user_configured(message):
@@ -1239,6 +1589,44 @@ def register_handlers(
             logger.error(f"Error processing text message: {e}", exc_info=True)
             await status_msg.edit_text(f"❌ *Сталася помилка:* {str(e)}", parse_mode="Markdown")
 
+    async def _check_cod_warning(
+        user_id: int,
+        cod_val: float,
+        user_np_client: NovaPoshtaClient,
+        storage_manager: UserSettingsManager,
+        eff_settings: Settings,
+    ) -> str:
+        """Return warning message if current COD parcel approaches or exceeds user's monthly limits."""
+        if cod_val <= 0:
+            return ""
+        u_custom = storage_manager.get_user_settings(user_id)
+        if not getattr(u_custom, "cod_warning_enabled", True):
+            return ""
+        sum_limit = u_custom.cod_monthly_limit_sum
+        count_limit = u_custom.cod_monthly_limit_count
+        if not sum_limit and not count_limit:
+            return ""
+
+        try:
+            stats = await user_np_client.get_monthly_cod_stats(
+                user_phone=eff_settings.sender_phone,
+                user_cp_ref=eff_settings.sender_counterparty_ref,
+            )
+            new_total_sum = stats.total_sum + cod_val
+            new_total_cnt = stats.total_count + 1
+
+            if sum_limit and sum_limit > 0 and new_total_sum > sum_limit:
+                exceeded_by = int(new_total_sum - sum_limit)
+                return f"\n⚠️ *УВАГА: Ця ТТН перевищить місячний ліміт наложки ({int(sum_limit)} грн) на {exceeded_by} грн!*\n"
+            elif sum_limit and sum_limit > 0 and (new_total_sum / sum_limit) >= 0.8:
+                rem = max(0, int(sum_limit - new_total_sum))
+                return f"\n⚠️ *Увага: Залишок ліміту наложки після цієї ТТН складе лише {rem} грн!*\n"
+            elif count_limit and count_limit > 0 and new_total_cnt > count_limit:
+                return f"\n⚠️ *УВАГА: Кількість наложок за місяць ({new_total_cnt} шт) перевищить ваш ліміт ({count_limit} шт)!*\n"
+        except Exception as e:
+            logger.warning(f"Error checking COD warning: {e}")
+        return ""
+
     async def _continue_processing_recipient_info(
         message: Message,
         user_id: int,
@@ -1253,6 +1641,7 @@ def register_handlers(
         now_ts = datetime.datetime.now().timestamp()
 
         existing_session = PENDING_SESSIONS.get(session_id, {})
+
         is_address_deliv = bool(parsed_info.is_address_delivery)
 
         # Check missing required fields
@@ -1609,6 +1998,14 @@ def register_handlers(
 
         cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
+        warn_line = await _check_cod_warning(
+            user_id=user_id,
+            cod_val=cod_val,
+            user_np_client=user_np_client,
+            storage_manager=storage_manager,
+            eff_settings=eff_settings,
+        )
+
         card_text = (
             "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
             f"👤 *Отримувач:* {parsed_info.full_name}\n"
@@ -1617,9 +2014,11 @@ def register_handlers(
             f"📦 *Пункт призначення:* {dest_desc}\n"
             f"📝 *Опис вантажу:* {cargo_desc}\n"
             f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
-            f"💵 *Накладений платіж:* {cod_str}\n\n"
+            f"💵 *Накладений платіж:* {cod_str}\n"
+            f"{warn_line}\n"
             "Перевірте дані та оберіть дію нижче:"
         )
+
 
         u_custom = storage_manager.get_user_settings(user_id)
         card_mask = u_custom.sender_card_mask
@@ -1766,6 +2165,14 @@ def register_handlers(
             cod_type = session.get("cod_payment_type", "cash")
             cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
+            warn_line = await _check_cod_warning(
+                user_id=user_id,
+                cod_val=cod_val,
+                user_np_client=user_np_client,
+                storage_manager=storage_manager,
+                eff_settings=eff_settings,
+            )
+
             card_text = (
                 "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
                 f"👤 *Отримувач:* {parsed_info.full_name}\n"
@@ -1774,7 +2181,8 @@ def register_handlers(
                 f"📦 *Пункт призначення:* {dest_desc}\n"
                 f"📝 *Опис вантажу:* {cargo_desc}\n"
                 f"💰 *Оціночна вартість:* {int(next_val)} грн (Мін. 500 грн)\n"
-                f"💵 *Накладений платіж:* {cod_str}\n\n"
+                f"💵 *Накладений платіж:* {cod_str}\n"
+                f"{warn_line}\n"
                 "Перевірте дані та оберіть дію нижче:"
             )
 
@@ -1816,6 +2224,14 @@ def register_handlers(
             cod_type = session.get("cod_payment_type", "cash")
             cod_str = "❌ Немає" if next_cod <= 0 else f"{int(next_cod)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
+            warn_line = await _check_cod_warning(
+                user_id=user_id,
+                cod_val=next_cod,
+                user_np_client=user_np_client,
+                storage_manager=storage_manager,
+                eff_settings=eff_settings,
+            )
+
             card_text = (
                 "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
                 f"👤 *Отримувач:* {parsed_info.full_name}\n"
@@ -1824,7 +2240,8 @@ def register_handlers(
                 f"📦 *Пункт призначення:* {dest_desc}\n"
                 f"📝 *Опис вантажу:* {cargo_desc}\n"
                 f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
-                f"💵 *Накладений платіж:* {cod_str}\n\n"
+                f"💵 *Накладений платіж:* {cod_str}\n"
+                f"{warn_line}\n"
                 "Перевірте дані та оберіть дію нижче:"
             )
 
@@ -1866,6 +2283,14 @@ def register_handlers(
             cod_val = session.get("cod_amount", 0.0)
             cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if new_type == 'card' else 'Готівка'})"
 
+            warn_line = await _check_cod_warning(
+                user_id=user_id,
+                cod_val=cod_val,
+                user_np_client=user_np_client,
+                storage_manager=storage_manager,
+                eff_settings=eff_settings,
+            )
+
             card_text = (
                 "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
                 f"👤 *Отримувач:* {parsed_info.full_name}\n"
@@ -1874,7 +2299,8 @@ def register_handlers(
                 f"📦 *Пункт призначення:* {dest_desc}\n"
                 f"📝 *Опис вантажу:* {cargo_desc}\n"
                 f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
-                f"💵 *Накладений платіж:* {cod_str}\n\n"
+                f"💵 *Накладений платіж:* {cod_str}\n"
+                f"{warn_line}\n"
                 "Перевірте дані та оберіть дію нижче:"
             )
 

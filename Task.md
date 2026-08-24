@@ -57,6 +57,15 @@
   - [x] Запустити всі 44 тести паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md` та `README.md`
 
-- [x] **Крок 8: Тестування та Документація**
-  - [x] Запустити всі тести паралельно (`python -m pytest -n auto` -> 44 passed)
-  - [x] Оновити `README.md` та `Walkthrough.md` українською мовою
+- [x] **Крок 8: Відстеження накладеного платежу, місячні ліміти та статистика (v0.22.0)**
+  - [x] Додати Pydantic моделі `CODItemInfo` та `CODMonthlyStats` у `src/nova_poshta/models.py`
+  - [x] Додати метод `get_monthly_cod_stats` у `src/nova_poshta/client.py` з фільтрацією за місяць, статусами та сумами
+  - [x] Розширити `UserCustomSettings` полями `cod_monthly_limit_sum` та `cod_monthly_limit_count` у `src/storage.py`
+  - [x] Додати кнопку `💰 Накладений платіж` у `get_main_reply_keyboard()` та inline-клавіатури в `src/bot/keyboards.py`
+  - [x] Реалізувати дашборд статистики з прогрес-барами та розбивкою статусів у `src/bot/handlers.py`
+  - [x] Реалізувати інтерактивне налаштування місячних лімітів (30k/50k/150k грн, 5/10/20 посилок, кастомні значення)
+  - [x] Додати попередження при створенні ТТН з наложкою при наближенні чи перевищенні ліміту
+  - [x] Написати юніт-тести `tests/test_cod_tracking.py`
+  - [x] Запустити всі 50 тестів паралельно (`pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
