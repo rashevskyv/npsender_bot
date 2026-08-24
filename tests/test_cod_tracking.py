@@ -187,6 +187,17 @@ def test_progress_bar_rendering():
     assert bar_none == "Без ліміту"
 
 
+def test_extract_float_amount():
+    from src.nova_poshta.client import _extract_float_amount
+    assert _extract_float_amount(1500) == 1500.0
+    assert _extract_float_amount(2500.50) == 2500.50
+    assert _extract_float_amount("3000") == 3000.0
+    assert _extract_float_amount("3 500,00 грн") == 3500.00
+    assert _extract_float_amount("12.500") == 12.5
+    assert _extract_float_amount(None) == 0.0
+    assert _extract_float_amount("") == 0.0
+
+
 def test_format_cod_dashboard():
     stats = CODMonthlyStats(
         year=2026,
@@ -213,11 +224,11 @@ def test_format_cod_dashboard():
     report = format_cod_dashboard(stats, user_settings)
     assert "Звіт накладеного платежу за Серпень 2026" in report
     assert "18500 грн" in report
-    assert "30000 грн" in report
+    assert "29999 грн" in report
     assert "6 шт" in report
     assert "10 шт" in report
-    assert "Залишок до ліміту" in report
-    assert "11500 грн" in report
+    assert "Залишок до безпечного ліміту" in report
+    assert "11499 грн" in report
     assert "01.09.2026" in report
 
 
@@ -241,8 +252,9 @@ def test_format_cod_dashboard_exceeded():
     )
 
     report = format_cod_dashboard(stats, user_settings)
-    assert "ПЕРЕВИЩЕНО на 5000 грн" in report
+    assert "ПЕРЕВИЩЕНО на 5001 грн" in report
     assert "ПЕРЕВИЩЕНО на 2 шт" in report
+
 
 
 def test_format_cod_shipments_pagination():

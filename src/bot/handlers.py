@@ -337,16 +337,20 @@ def format_cod_dashboard(stats: CODMonthlyStats, user_settings: UserCustomSettin
     """Format full Ukrainian visual text report for monthly Cash On Delivery stats and limits."""
     sum_limit = user_settings.cod_monthly_limit_sum
     count_limit = user_settings.cod_monthly_limit_count
+    safe_limit = (sum_limit - 1.0) if (sum_limit and sum_limit > 0) else None
 
     sum_bar = _render_progress_bar(stats.total_sum, sum_limit) if sum_limit and sum_limit > 0 else "Вимкнено"
     cnt_bar = _render_progress_bar(float(stats.total_count), float(count_limit)) if count_limit and count_limit > 0 else "Вимкнено"
 
+    sum_limit_str = f" / макс. `{int(safe_limit)} грн`" if safe_limit else ""
+    cnt_limit_str = f" / `{count_limit} шт`" if count_limit and count_limit > 0 else ""
+
     lines = [
         f"📊 *Звіт накладеного платежу за {stats.month_name}*",
         f"🗓 _Період:_ `{stats.from_date}` — `{stats.to_date}`\n",
-        f"💰 *Загальна сума:* `{int(stats.total_sum)} грн`" + (f" / `{int(sum_limit)} грн`" if sum_limit and sum_limit > 0 else ""),
+        f"💰 *Загальна сума:* `{int(stats.total_sum)} грн`{sum_limit_str}",
         f"   {sum_bar}\n",
-        f"📦 *Кількість посилок:* `{stats.total_count} шт`" + (f" / `{count_limit} шт`" if count_limit and count_limit > 0 else ""),
+        f"📦 *Кількість посилок:* `{stats.total_count} шт`{cnt_limit_str}",
         f"   {cnt_bar}\n",
         "──────────────",
         "📌 *Статуси за поточний місяць:*",
@@ -363,14 +367,15 @@ def format_cod_dashboard(stats: CODMonthlyStats, user_settings: UserCustomSettin
     lines.append("──────────────")
 
     # Remaining limit info & warnings
-    if sum_limit and sum_limit > 0:
-        rem_sum = max(0.0, sum_limit - stats.total_sum)
+    if safe_limit and sum_limit:
+        rem_sum = max(0.0, safe_limit - stats.total_sum)
         if stats.total_sum >= sum_limit:
-            lines.append(f"⚠️ *УВАГА: Місячний ліміт суми ПЕРЕВИЩЕНО на {int(stats.total_sum - sum_limit)} грн!*")
+            exceeded = int(stats.total_sum - safe_limit)
+            lines.append(f"🚨 *УВАГА: Безпечний ліміт ({int(safe_limit)} грн) ПЕРЕВИЩЕНО на {exceeded} грн!*")
         elif (stats.total_sum / sum_limit) >= 0.8:
-            lines.append(f"⚠️ *Увага: Залишок ліміту суми лише {int(rem_sum)} грн ({int(100 - (stats.total_sum/sum_limit)*100)}%)!*")
+            lines.append(f"⚠️ *Увага: Залишок до безпечного ліміту ({int(safe_limit)} грн) лише {int(rem_sum)} грн!*")
         else:
-            lines.append(f"✅ *Залишок до ліміту:* `{int(rem_sum)} грн`")
+            lines.append(f"✅ *Залишок до безпечного ліміту ({int(safe_limit)} грн):* `{int(rem_sum)} грн`")
 
     if count_limit and count_limit > 0:
         rem_cnt = max(0, count_limit - stats.total_count)
@@ -403,7 +408,8 @@ def format_cod_shipments_page(stats: CODMonthlyStats, page: int = 0, page_size: 
     page_items = items[start_idx:end_idx]
 
     lines = [
-        f"📜 *Посилки з накладеним платежем ({stats.month_name})*",
+        f"📜 *Накладні та суми післяплати ({stats.month_name})*",
+        f"💰 *Всього за місяць:* `{int(stats.total_sum)} грн` ({stats.total_count} ТТН)",
         f"_Показано {start_idx + 1}-{end_idx} із {total_items} (Сторінка {current_page + 1}/{total_pages}):_\n",
     ]
 
@@ -421,16 +427,18 @@ def format_cod_shipments_page(stats: CODMonthlyStats, page: int = 0, page_size: 
             status_icon = "🚚"
             status_text = item.state_name or "У дорозі"
 
-        payout_type_str = "💳 Картка" if item.cod_payment_type == "card" else "💵 Готівка"
+        payout_type_str = "💳 на картку" if item.cod_payment_type == "card" else "💵 готівкою"
 
         lines.append(
             f"*{idx}.* 🎫 `{item.int_doc_number}` ({item.date_created})\n"
-            f"   💰 *Сума:* `{int(item.cod_amount)} грн` ({payout_type_str})\n"
+            f"   💰 *Сума післяплати:* `{int(item.cod_amount)} грн` ({payout_type_str})\n"
             f"   {status_icon} *Статус:* {status_text}\n"
             f"   👤 *Отримувач:* {item.recipient_name} ({item.city_recipient})\n"
+            f"   📦 *Вантаж:* {item.description}\n"
         )
 
     return "\n".join(lines)
+
 
 
 def register_handlers(
@@ -1608,6 +1616,7 @@ def register_handlers(
             return ""
 
         try:
+            # Query live API every single time without caching
             stats = await user_np_client.get_monthly_cod_stats(
                 user_phone=eff_settings.sender_phone,
                 user_cp_ref=eff_settings.sender_counterparty_ref,
@@ -1615,17 +1624,21 @@ def register_handlers(
             new_total_sum = stats.total_sum + cod_val
             new_total_cnt = stats.total_count + 1
 
-            if sum_limit and sum_limit > 0 and new_total_sum > sum_limit:
-                exceeded_by = int(new_total_sum - sum_limit)
-                return f"\n⚠️ *УВАГА: Ця ТТН перевищить місячний ліміт наложки ({int(sum_limit)} грн) на {exceeded_by} грн!*\n"
-            elif sum_limit and sum_limit > 0 and (new_total_sum / sum_limit) >= 0.8:
-                rem = max(0, int(sum_limit - new_total_sum))
-                return f"\n⚠️ *Увага: Залишок ліміту наложки після цієї ТТН складе лише {rem} грн!*\n"
-            elif count_limit and count_limit > 0 and new_total_cnt > count_limit:
+            if sum_limit and sum_limit > 0:
+                safe_limit = sum_limit - 1.0
+                if new_total_sum >= sum_limit:
+                    exceeded_by = int(new_total_sum - safe_limit)
+                    return f"\n🚨 *УВАГА: Ця ТТН перевищить безпечний місячний ліміт наложки (макс. {int(safe_limit)} грн) на {exceeded_by} грн (загалом буде {int(new_total_sum)} грн)!*\n"
+                elif (new_total_sum / sum_limit) >= 0.8:
+                    rem = max(0, int(safe_limit - new_total_sum))
+                    return f"\n⚠️ *Увага: Залишок безпечного ліміту наложки після цієї ТТН складе лише {rem} грн (із {int(safe_limit)} грн)!*\n"
+
+            if count_limit and count_limit > 0 and new_total_cnt > count_limit:
                 return f"\n⚠️ *УВАГА: Кількість наложок за місяць ({new_total_cnt} шт) перевищить ваш ліміт ({count_limit} шт)!*\n"
         except Exception as e:
             logger.warning(f"Error checking COD warning: {e}")
         return ""
+
 
     async def _continue_processing_recipient_info(
         message: Message,

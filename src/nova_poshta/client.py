@@ -50,6 +50,21 @@ def _clean_phone(phone_str: Optional[str]) -> str:
     return digits[-9:] if len(digits) >= 9 else digits
 
 
+def _extract_float_amount(val: Any) -> float:
+    """Safely extract float currency amount from numbers or strings with formatting."""
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip().replace(" ", "").replace(",", ".")
+    cleaned = "".join([c for c in s if c.isdigit() or c == "."])
+    try:
+        return float(cleaned) if cleaned else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+
 def _name_matches(user_name: Optional[str], target_name: Optional[str]) -> bool:
     """Check if any word in user_name matches target_name."""
     if not user_name or not target_name:
@@ -1075,6 +1090,7 @@ class NovaPoshtaClient:
         user_phone: Optional[str] = None,
         user_cp_ref: Optional[str] = None,
     ) -> CODMonthlyStats:
+
         """Fetch and calculate monthly statistics for shipments with Cash On Delivery (накладений платіж)."""
         now = datetime.date.today()
         target_year = year or now.year
@@ -1168,24 +1184,24 @@ class NovaPoshtaClient:
                 for bw in bw_data:
                     if isinstance(bw, dict):
                         c_type = str(bw.get("CargoType", ""))
-                        if c_type in ("Money", "Цінні папери", "Грошовий переказ", "TrMax", "Afterpayment"):
-                            try:
-                                cod_val = float(bw.get("RedeliveryString", 0) or 0)
-                            except (ValueError, TypeError):
-                                pass
-                            if bw.get("RedeliveryPaymentCard") or bw.get("PaymentMethod") == "Card":
+                        if c_type in ("Money", "Цінні папери", "Грошовий переказ", "TrMax", "Afterpayment", "MoneyTransfer") or not c_type or bw.get("RedeliveryPaymentCard") or bw.get("PayerType"):
+                            for field in ["RedeliveryString", "Amount", "Cost", "Sum", "RedeliveryCost", "Value"]:
+                                if bw.get(field):
+                                    amt = _extract_float_amount(bw.get(field))
+                                    if amt > 0:
+                                        cod_val = amt
+                                        break
+                            if bw.get("RedeliveryPaymentCard") or bw.get("PaymentMethod") == "Card" or bw.get("PaymentType") == "Card":
                                 cod_type = "card"
 
             if not cod_val:
-                for k in ["AfterpaymentOnGoodsCost", "RedeliveryString", "BackwardDeliveryMoney", "BackwardDeliveryCost", "RedeliverySum"]:
+                for k in ["AfterpaymentOnGoodsCost", "RedeliveryString", "BackwardDeliveryMoney", "BackwardDeliveryCost", "RedeliverySum", "CostOnSite"]:
                     val = doc.get(k)
                     if val:
-                        try:
-                            cod_val = float(val)
-                            if cod_val > 0:
-                                break
-                        except (ValueError, TypeError):
-                            pass
+                        amt = _extract_float_amount(val)
+                        if amt > 0:
+                            cod_val = amt
+                            break
 
             if doc.get("RedeliveryPaymentCard") or doc.get("PaymentCard") or doc.get("BackwardDeliveryPaymentType") == "Card":
                 cod_type = "card"
@@ -1193,6 +1209,7 @@ class NovaPoshtaClient:
             # Skip shipments without COD
             if cod_val <= 0:
                 continue
+
 
             doc_num = str(doc.get("IntDocNumber", doc.get("Number", "")))
             date_created = str(doc.get("DateTime", doc.get("CreateTime", "")))

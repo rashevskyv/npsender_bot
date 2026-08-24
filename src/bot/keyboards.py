@@ -308,15 +308,15 @@ def get_cod_stats_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔄 Оновити дані",
-                    callback_data=CODActionCallback(action="refresh", page=0).pack(),
-                ),
-                InlineKeyboardButton(
-                    text="📜 Список посилок",
+                    text="📜 Накладні та суми наложки (ТТН)",
                     callback_data=CODActionCallback(action="list", page=0).pack(),
                 ),
             ],
             [
+                InlineKeyboardButton(
+                    text="🔄 Оновити з API",
+                    callback_data=CODActionCallback(action="refresh", page=0).pack(),
+                ),
                 InlineKeyboardButton(
                     text="⚙️ Налаштувати ліміти",
                     callback_data=CODActionCallback(action="settings", page=0).pack(),
@@ -324,6 +324,7 @@ def get_cod_stats_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
 
 
 def get_cod_settings_keyboard(
