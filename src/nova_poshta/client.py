@@ -1175,7 +1175,7 @@ class NovaPoshtaClient:
             if not is_sender:
                 continue
 
-            # Extract COD details
+            # Extract COD (Накладений платіж / Контроль оплати) details strictly
             cod_val = 0.0
             cod_type = "cash"
 
@@ -1184,21 +1184,25 @@ class NovaPoshtaClient:
                 for bw in bw_data:
                     if isinstance(bw, dict):
                         c_type = str(bw.get("CargoType", ""))
-                        if c_type in ("Money", "Цінні папери", "Грошовий переказ", "TrMax", "Afterpayment", "MoneyTransfer") or not c_type or bw.get("RedeliveryPaymentCard") or bw.get("PayerType"):
-                            for field in ["RedeliveryString", "Amount", "Cost", "Sum", "RedeliveryCost", "Value"]:
-                                if bw.get(field):
-                                    amt = _extract_float_amount(bw.get(field))
+                        # Strictly match Money / Afterpayment cargo types
+                        if c_type in ("Money", "Цінні папери", "Грошовий переказ", "TrMax", "Afterpayment", "MoneyTransfer"):
+                            # The money amount is in RedeliveryString or Amount
+                            for field in ["RedeliveryString", "Amount", "RedeliverySum"]:
+                                raw_val = bw.get(field)
+                                if raw_val is not None and str(raw_val).strip():
+                                    amt = _extract_float_amount(raw_val)
                                     if amt > 0:
                                         cod_val = amt
                                         break
                             if bw.get("RedeliveryPaymentCard") or bw.get("PaymentMethod") == "Card" or bw.get("PaymentType") == "Card":
                                 cod_type = "card"
 
+            # Top-level fallback strictly for goods afterpayment / money redelivery
             if not cod_val:
-                for k in ["AfterpaymentOnGoodsCost", "RedeliveryString", "BackwardDeliveryMoney", "BackwardDeliveryCost", "RedeliverySum", "CostOnSite"]:
-                    val = doc.get(k)
-                    if val:
-                        amt = _extract_float_amount(val)
+                for k in ["AfterpaymentOnGoodsCost", "RedeliveryString", "BackwardDeliveryMoney", "RedeliverySum"]:
+                    raw_val = doc.get(k)
+                    if raw_val is not None and str(raw_val).strip():
+                        amt = _extract_float_amount(raw_val)
                         if amt > 0:
                             cod_val = amt
                             break
@@ -1206,9 +1210,10 @@ class NovaPoshtaClient:
             if doc.get("RedeliveryPaymentCard") or doc.get("PaymentCard") or doc.get("BackwardDeliveryPaymentType") == "Card":
                 cod_type = "card"
 
-            # Skip shipments without COD
+            # Skip shipments without genuine COD
             if cod_val <= 0:
                 continue
+
 
 
             doc_num = str(doc.get("IntDocNumber", doc.get("Number", "")))

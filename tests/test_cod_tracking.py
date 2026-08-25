@@ -93,7 +93,7 @@ async def test_get_monthly_cod_stats_parsing(mock_settings):
             "RedeliveryString": "800",
             "Sender": "sender-cp-123",
         },
-        # 5. Non-COD shipment (should be skipped)
+        # 5. Non-COD shipment with delivery fee paid by recipient (must be skipped)
         {
             "IntDocNumber": "20450000000005",
             "Ref": "ref-5",
@@ -103,13 +103,34 @@ async def test_get_monthly_cod_stats_parsing(mock_settings):
             "RecipientDescription": "Мельник Тарас",
             "CityRecipientDescription": "Дніпро",
             "Description": "Подарунок",
+            "Cost": "120",
+            "CostOnSite": "120",
             "Sender": "sender-cp-123",
         },
-        # 6. Deleted shipment (should be skipped)
+        # 6. Shipment with return documents, NOT money (must be skipped)
         {
             "IntDocNumber": "20450000000006",
             "Ref": "ref-6",
             "DateTime": "2026-08-17 19:00:00",
+            "StateId": "9",
+            "StateName": "Отримано",
+            "RecipientDescription": "Офіс ТОВ",
+            "CityRecipientDescription": "Полтава",
+            "Description": "Договір",
+            "BackwardDeliveryData": [
+                {
+                    "CargoType": "Documents",
+                    "RedeliveryString": "50",
+                    "Cost": "35",
+                }
+            ],
+            "Sender": "sender-cp-123",
+        },
+        # 7. Deleted shipment (must be skipped)
+        {
+            "IntDocNumber": "20450000000007",
+            "Ref": "ref-7",
+            "DateTime": "2026-08-18 19:00:00",
             "StateId": "2",
             "StateName": "Видалено",
             "DeletionMark": True,
@@ -129,9 +150,10 @@ async def test_get_monthly_cod_stats_parsing(mock_settings):
         assert stats.from_date == "01.08.2026"
         assert stats.to_date == "31.08.2026"
 
-        # 4 COD shipments total (1 skipped non-COD, 1 skipped deleted)
+        # Strictly 4 COD shipments total (skipped non-COD delivery fees, skipped return documents, skipped deleted)
         assert stats.total_count == 4
         assert stats.total_sum == 1500.0 + 2500.0 + 500.0 + 800.0  # 5300.0
+
 
         # Received
         assert stats.received_count == 1

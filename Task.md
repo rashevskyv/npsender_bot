@@ -75,4 +75,11 @@
   - [x] Написати юніт-тести та перевірити всі 51 тест паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
 
+- [x] **Крок 10: Суворе розпізнавання грошової післяплати без врахування тарифів доставки (v0.22.2)**
+  - [x] Виключити хибні спрацьовування на `CostOnSite`, `BackwardDeliveryCost`, `Cost` та послуги повернення документів
+  - [x] Обмежити парсинг `BackwardDeliveryData` тільки грошовими типами `CargoType in ("Money", "TrMax", "Afterpayment", ...)`
+  - [x] Оновити юніт-тести та перевірити всі 51 тест паралельно (`pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+
 
