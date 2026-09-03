@@ -21,6 +21,7 @@ from src.nova_poshta.models import (
     AddressSaveResult,
     CODItemInfo,
     CODMonthlyStats,
+    TrackingDocumentDetails,
 )
 
 logger = logging.getLogger(__name__)
@@ -789,6 +790,34 @@ class NovaPoshtaClient:
             }
 
         return results
+
+    async def track_document(
+        self, document_number: str, phone: Optional[str] = ""
+    ) -> Optional[TrackingDocumentDetails]:
+        """Track an express waybill by document number via Nova Poshta TrackingDocument/getStatusDocuments API."""
+        clean_num = "".join(filter(str.isdigit, str(document_number)))
+        if not clean_num:
+            return None
+
+        clean_p = _clean_phone(phone) if phone else ""
+        payload = [{"DocumentNumber": clean_num, "Phone": clean_p}]
+
+        try:
+            res = await self._post(
+                model_name="TrackingDocument",
+                called_method="getStatusDocuments",
+                method_properties={"Documents": payload},
+            )
+        except Exception as e:
+            logger.error(f"Error tracking document {clean_num} from Nova Poshta: {e}")
+            return None
+
+        data = res.get("data", [])
+        if not data:
+            return None
+
+        item = data[0]
+        return TrackingDocumentDetails.from_api_dict(item)
 
     async def get_internet_document_list(
         self, days_back: int = 30

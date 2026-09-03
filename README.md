@@ -6,6 +6,12 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **🔍 Universal Express Waybill Tracking ("🔍 Відстежити ТТН" / `/track [НОМЕР]`)**: Track any Nova Poshta express waybill (ТТН) simply by sending the 14-digit (or 11-digit) waybill number into the chat, asking in natural language, or using the `/track` command.
+  - **Comprehensive Data Extraction**: Fetches and displays all information available via the Nova Poshta API (`TrackingDocument/getStatusDocuments`), including status, route (sender/recipient cities, branch addresses, contact persons, masked phone numbers), timeline (creation date, scheduled delivery, actual delivery, last movement scan, free storage expiration), parcel parameters (cargo description, factual & volumetric weight, seats amount, announced value), and financial details (delivery cost, payer, payment status, COD/afterpayment amount and payout destination card, total amount to pay upon pickup).
+  - **Instant Smart Detection**: Automatically detects 14-digit waybill numbers with or without spaces/hyphens (`2045 0123 4567 89`), as well as natural language tracking requests (*"де моя посилка 2045..."*, *"відстеж 2045..."*, *"перевір ттн 2045..."*), responding immediately without unnecessary AI latency.
+  - **Interactive Barcode & Live Refresh**: Includes `📱 Показати штрихкод` (renders a crisp Code128 barcode image for scanning by operators at Nova Poshta branches) and `🔄 Оновити` (refreshes parcel status in place).
+  - **Public & Universal**: Works out of the box for any user without requiring prior AI configuration or custom API keys.
+
 - **💰 Monthly Cash On Delivery (COD) Tracking & Limits ("💰 Накладений платіж" / `/cod`)**: Fully tracks monthly Cash On Delivery (післяплата) shipments directly via Nova Poshta API 2.0 (`InternetDocument/getDocumentList`). Features include:
   - **Live Monthly Calculation**: Computes total COD volume (UAH sum and parcel count) from the 1st day of the current calendar month to today without caching, performing live API queries every time.
   - **Safe Financial Monitoring Ceiling (< 30,000 UAH / Max 29,999 UAH)**: Strictly warns when approaching or reaching 30,000 UAH (enforcing safe max limit of `29,999 грн` / `limit - 1`).

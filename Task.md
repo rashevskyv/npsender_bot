@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.21.0
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.23.0
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -79,6 +79,16 @@
   - [x] Виключити хибні спрацьовування на `CostOnSite`, `BackwardDeliveryCost`, `Cost` та послуги повернення документів
   - [x] Обмежити парсинг `BackwardDeliveryData` тільки грошовими типами `CargoType in ("Money", "TrMax", "Afterpayment", ...)`
   - [x] Оновити юніт-тести та перевірити всі 51 тест паралельно (`pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 11: Універсальне відстеження будь-яких накладних (ТТН) через API (v0.23.0)**
+  - [x] Створити Pydantic-модель `TrackingDocumentDetails` у `src/nova_poshta/models.py`
+  - [x] Реалізувати метод `track_document` у `src/nova_poshta/client.py` з підтримкою очищення номерів
+  - [x] Створити функцію форматування детальної картки `format_tracking_card` з усіма даними API
+  - [x] Додати автоматичне розпізнавання 14-значних та 11-значних ТТН (`extract_ttn_from_text`) та інтенту (`is_tracking_intent`)
+  - [x] Додати кнопку `🔍 Відстежити ТТН` у головне меню, команди `/track`, `/tracking` та стан очікування
+  - [x] Додати кнопки `📱 Показати штрихкод` (Code128) та `🔄 Оновити` під карткою відстеження
+  - [x] Написати юніт-тести у `tests/test_tracking.py` та перевірити всі 63 тести паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
 
 

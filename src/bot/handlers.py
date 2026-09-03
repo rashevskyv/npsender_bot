@@ -3,6 +3,7 @@
 import asyncio
 import datetime
 import logging
+import re
 import uuid
 from typing import Dict, Any, Optional, List
 
@@ -16,7 +17,7 @@ from src.ai.schemas import ParsedRecipientInfo
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
 from src.utils.barcode_gen import generate_code128_barcode
-from src.nova_poshta.models import CODItemInfo, CODMonthlyStats
+from src.nova_poshta.models import CODItemInfo, CODMonthlyStats, TrackingDocumentDetails
 from src.bot.keyboards import (
     get_main_reply_keyboard,
     get_confirmation_keyboard,
@@ -37,6 +38,8 @@ from src.bot.keyboards import (
     get_cod_stats_keyboard,
     get_cod_settings_keyboard,
     get_cod_shipments_keyboard,
+    TrackActionCallback,
+    get_tracking_keyboard,
 )
 
 
@@ -54,6 +57,8 @@ SESSION_TIMEOUT_SECONDS: float = 15 * 60  # 15 minutes TTL for active parcel cre
 USER_MESSAGE_BUFFERS: Dict[int, List[str]] = {}
 USER_DEBOUNCE_TASKS: Dict[int, asyncio.Task] = {}
 USER_LAST_MESSAGES: Dict[int, Message] = {}
+USER_TRACKING_WAITING: set = set()
+
 
 
 def _cleanup_expired_sessions():
@@ -89,6 +94,7 @@ def clear_user_active_session(user_id: int):
     if session_id:
         PENDING_SESSIONS.pop(session_id, None)
     USER_LAST_PARSED_INFO.pop(user_id, None)
+    USER_TRACKING_WAITING.discard(user_id)
 
 
 def _parse_draft_date(date_str: str) -> Optional[datetime.datetime]:
@@ -440,6 +446,210 @@ def format_cod_shipments_page(stats: CODMonthlyStats, page: int = 0, page_size: 
     return "\n".join(lines)
 
 
+def extract_ttn_from_text(text: str) -> Optional[str]:
+    """Extract standalone or prominent 14-digit (or 11-digit) Nova Poshta express waybill number from text."""
+    if not text:
+        return None
+
+    stripped = text.strip()
+
+    # 1. Direct match if the string consists of digits and separators
+    clean_digits = "".join(filter(str.isdigit, stripped))
+    if len(clean_digits) == 14 and not clean_digits.startswith("380"):
+        alpha_chars = [c for c in stripped if c.isalpha()]
+        if len(alpha_chars) <= 15:
+            return clean_digits
+
+    # 2. Match standard 14-digit pattern (starting with 1, 2, or 5) with optional spaces or hyphens
+    match_14 = re.search(r'(?<!\d)(?:1|2|5)\d{3}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{2}(?!\d)', stripped)
+    if match_14:
+        found_num = "".join(filter(str.isdigit, match_14.group(0)))
+        if len(found_num) == 14:
+            return found_num
+
+    # 3. Match any standalone 14 digits
+    match_any14 = re.search(r'(?<!\d)\d{14}(?!\d)', stripped)
+    if match_any14:
+        found_num = match_any14.group(0)
+        if not found_num.startswith("380"):
+            return found_num
+
+    # 4. Match 11-digit format
+    match_11 = re.search(r'(?<!\d)(?:1|2|5)\d{10}(?!\d)', stripped)
+    if match_11:
+        return match_11.group(0)
+
+    if len(clean_digits) == 11 and clean_digits[0] in ("1", "2", "5"):
+        alpha_chars = [c for c in stripped if c.isalpha()]
+        if len(alpha_chars) <= 15:
+            return clean_digits
+
+    return None
+
+
+def is_tracking_intent(text: str) -> bool:
+    """Check if message expresses an intent to track a parcel."""
+    t = text.lower()
+    keywords = [
+        "відстеж",
+        "відслідк",
+        "трекінг",
+        "трек",
+        "track",
+    ]
+    if any(k in t for k in keywords):
+        return True
+
+    # Combination of inquiry keyword and parcel entity
+    has_inquiry = any(w in t for w in ["де ", "статус", "перевір", "знайди", "знайти", "пошук"])
+    has_parcel_entity = any(w in t for w in ["посилк", "вантаж", "накладн", "ттн", "пакунок"])
+    return bool(has_inquiry and has_parcel_entity)
+
+
+def format_tracking_card(doc: TrackingDocumentDetails) -> str:
+    """Format full tracking details from Nova Poshta API into an informative Telegram markdown card."""
+    lines = []
+
+    # 1. Header & Number
+    lines.append("📦 *Експрес-накладна (ТТН):*")
+    lines.append(f"📄 `{doc.number}`\n")
+
+    # 2. Status with icon
+    status_lower = (doc.status or "").lower()
+    code = doc.status_code
+
+    if code in ("2", "3") or any(w in status_lower for w in ["не знайдено", "видалено", "скасовано"]):
+        icon = "❌"
+    elif code in ("9", "10", "11") or "отримано" in status_lower or "доставлено" in status_lower:
+        icon = "🟢"
+    elif code in ("7", "8") or "у відділенні" in status_lower or "прибув" in status_lower:
+        icon = "📦"
+    elif code in ("4", "5", "6") or "прямує" in status_lower or "в дорозі" in status_lower:
+        icon = "🚚"
+    elif code == "1" or "очікує" in status_lower or "створено" in status_lower:
+        icon = "📝"
+    elif code in ("101", "102", "103", "104", "105", "106", "108") or "відмова" in status_lower or "повернення" in status_lower:
+        icon = "🔴"
+    else:
+        icon = "ℹ️"
+
+    lines.append(f"{icon} *Статус:* {doc.status or 'Інформація оновлюється'}")
+    if doc.is_light_return:
+        lines.append("🔄 *Послуга:* Легке повернення")
+
+    # If document not found or deleted, return concise card
+    if code in ("2", "3") or "не знайдено" in status_lower:
+        lines.append("\n💡 _Перевірте правильність номера ТТН або спробуйте пізніше._")
+        return "\n".join(lines)
+
+    lines.append("")
+
+    # 3. Route (Звідки ➡️ Куди)
+    lines.append("📍 *Маршрут:*")
+    from_parts = []
+    if doc.city_sender:
+        from_parts.append(doc.city_sender)
+    if doc.warehouse_sender:
+        from_parts.append(doc.warehouse_sender)
+    elif doc.warehouse_sender_address:
+        from_parts.append(doc.warehouse_sender_address)
+    elif doc.sender_address:
+        from_parts.append(doc.sender_address)
+
+    from_desc = ", ".join(from_parts) if from_parts else "Відділення / Склад"
+    lines.append(f"📤 *Звідки:* {from_desc}")
+    if doc.sender_full_name:
+        phone_s = f" ({doc.sender_phone})" if doc.sender_phone else ""
+        lines.append(f"   👤 {doc.sender_full_name}{phone_s}")
+
+    to_parts = []
+    if doc.city_recipient:
+        to_parts.append(doc.city_recipient)
+    if doc.warehouse_recipient:
+        to_parts.append(doc.warehouse_recipient)
+    elif doc.warehouse_recipient_address:
+        to_parts.append(doc.warehouse_recipient_address)
+    elif doc.recipient_address:
+        to_parts.append(doc.recipient_address)
+
+    to_desc = ", ".join(to_parts) if to_parts else "Відділення / Склад"
+    lines.append(f"📥 *Куди:* {to_desc}")
+    if doc.recipient_full_name:
+        phone_r = f" ({doc.recipient_phone})" if doc.recipient_phone else ""
+        lines.append(f"   👤 {doc.recipient_full_name}{phone_r}")
+
+    lines.append("")
+
+    # 4. Dates & Timeline
+    dates_block = []
+    if doc.date_created:
+        dates_block.append(f"• Створено: {doc.date_created}")
+    if doc.scheduled_delivery_date:
+        dates_block.append(f"• Орієнтовна доставка: {doc.scheduled_delivery_date}")
+    if doc.actual_delivery_date or doc.recipient_date_time:
+        actual = doc.actual_delivery_date or doc.recipient_date_time
+        dates_block.append(f"• Отримано: {actual}")
+    elif doc.date_scan or doc.date_moving:
+        scan = doc.date_scan or doc.date_moving
+        dates_block.append(f"• Останній рух: {scan}")
+    if doc.date_first_day_storage:
+        dates_block.append(f"• Безкоштовне зберігання до: {doc.date_first_day_storage}")
+
+    if dates_block:
+        lines.append("📅 *Хронологія та дати:*")
+        lines.extend(dates_block)
+        lines.append("")
+
+    # 5. Parcel Parameters
+    lines.append("📦 *Параметри вантажу:*")
+    cargo_desc = doc.cargo_description or doc.cargo_type or "Посилка"
+    lines.append(f"• Вміст: {cargo_desc}")
+
+    w = doc.document_weight or doc.factual_weight
+    if w > 0:
+        vol_str = f" (об'ємна: {doc.volume_weight:.1f} кг)" if doc.volume_weight > 0 else ""
+        lines.append(f"• Вага: {w:.1f} кг{vol_str}")
+    if doc.seats_amount > 1:
+        lines.append(f"• Кількість місць: {doc.seats_amount}")
+    if doc.announced_price > 0:
+        lines.append(f"• Оціночна вартість: {int(doc.announced_price)} грн")
+
+    lines.append("")
+
+    # 6. Financial & Payment details
+    lines.append("💳 *Оплата та доставка:*")
+    p_map = {"Recipient": "Отримувач", "Sender": "Відправник", "ThirdPerson": "Третя особа"}
+    payer_ua = p_map.get(doc.payer_type, doc.payer_type or "Отримувач")
+    cost_val = doc.document_cost
+    if cost_val > 0:
+        lines.append(f"• Вартість доставки: {cost_val:.2f} грн (Платник: {payer_ua})")
+
+    pay_status = doc.express_waybill_payment_status or doc.payment_status
+    if pay_status:
+        status_icon = "🟢" if any(w in pay_status.lower() for w in ["сплачено", "оплачено", "paid"]) else "🟡"
+        lines.append(f"• Оплата доставки: {status_icon} {pay_status}")
+
+    cod_val = doc.afterpayment_cost or doc.redelivery_sum
+    if cod_val > 0:
+        lines.append(f"• 💰 *Накладений платіж:* {cod_val:.2f} грн")
+        if doc.redelivery_card:
+            lines.append(f"  💳 Виплата на картку: `{doc.redelivery_card}`")
+        elif doc.redelivery_payer:
+            lines.append(f"  💵 Платник наложки: {doc.redelivery_payer}")
+        if doc.redelivery_num:
+            lines.append(f"  🔢 Переказ №: `{doc.redelivery_num}`")
+
+    if doc.amount_to_pay > 0:
+        lines.append(f"• 💵 *Разом до сплати при отриманні:* *{doc.amount_to_pay:.2f} грн*")
+    elif doc.amount_paid > 0 and (code in ("9", "10", "11") or "отримано" in status_lower):
+        lines.append(f"• 🟢 Сплачено при отриманні: {doc.amount_paid:.2f} грн")
+
+    if doc.undelivery_reasons:
+        sub = f" ({doc.undelivery_reasons_subtype})" if doc.undelivery_reasons_subtype else ""
+        lines.append(f"\n⚠️ *Причина затримки/недоставки:* {doc.undelivery_reasons}{sub}")
+
+    return "\n".join(lines)
+
 
 def register_handlers(
 
@@ -477,7 +687,8 @@ def register_handlers(
             "2. **Надішліть реквізити:** Надішліть дані отримувача одним повідомленням у довільному порядку.\n"
             "3. **Автоматична валідація та контекст:** Бот перевірить місто та відділення у базі НП. Якщо ви захочете уточнити опис (наприклад, написати слово *'сувенір'*) або змінити оцінку, просто надішліть доповнення наступним повідомленням!\n"
             "4. **Інтерактивні кнопки:** Використовуйте кнопки під карткою для зміни платника (Отримувач/Відправник), типу вантажу чи оціночної вартості (мін. 500 грн).\n"
-            "5. **Чернетки та посилки:** Кнопки `📝 Мої чернетки (ТТН)` та `📦 Активні посилки` дозволяють переглядати та видаляти створені ТТН."
+            "5. **Чернетки та посилки:** Кнопки `📝 Мої чернетки (ТТН)` та `📦 Активні посилки` дозволяють переглядати та видаляти створені ТТН.\n"
+            "6. **Відстеження будь-якої ТТН:** Надішліть номер накладної (14 цифр) у чат, скористайтеся кнопкою `🔍 Відстежити ТТН` або командою `/track НОМЕР`, щоб отримати детальний статус, маршрут, терміни доставки та фінансову інформацію."
         )
         await message.answer(
             help_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard()
@@ -886,6 +1097,95 @@ def register_handlers(
         limit_str = f"`{val} посилок`" if new_limit else "Вимкнено"
         await message.answer(
             f"✅ *Місячний ліміт кількості посилок з наложкою встановлено:* {limit_str}",
+            parse_mode="Markdown",
+            reply_markup=get_main_reply_keyboard(),
+        )
+
+    async def handle_track_document(
+        message: Message,
+        doc_number: str,
+        user_id: int,
+        status_msg: Optional[Message] = None,
+    ):
+        """Track express waybill and display formatted tracking card."""
+        clean_num = "".join(filter(str.isdigit, str(doc_number)))
+        if not clean_num or len(clean_num) < 11:
+            err_text = (
+                "❌ *Некоректний номер ТТН.*\n"
+                "Номер накладної Нової Пошти містить 14 цифр (наприклад, `20450123456789`)."
+            )
+            if status_msg:
+                await status_msg.edit_text(err_text, parse_mode="Markdown")
+            else:
+                await message.answer(err_text, parse_mode="Markdown")
+            return
+
+        if not status_msg:
+            status_msg = await message.answer(
+                f"🔍 *Отримання даних по ТТН `{clean_num}` з Нової Пошти...*",
+                parse_mode="Markdown",
+            )
+        else:
+            await status_msg.edit_text(
+                f"🔍 *Отримання даних по ТТН `{clean_num}` з Нової Пошти...*",
+                parse_mode="Markdown",
+            )
+
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+
+        try:
+            tracking_info = await user_np_client.track_document(clean_num)
+        except Exception as e:
+            logger.error(f"Error tracking document {clean_num}: {e}")
+            tracking_info = None
+
+        if not tracking_info:
+            await status_msg.edit_text(
+                f"❌ *Помилка запиту до API Нової Пошти або ТТН не знайдено.*\n"
+                f"Номер: `{clean_num}`\n\n"
+                f"💡 Перевірте правильність введеного номера або спробуйте пізніше.",
+                parse_mode="Markdown",
+                reply_markup=get_tracking_keyboard(clean_num),
+            )
+            return
+
+        card_text = format_tracking_card(tracking_info)
+        await status_msg.edit_text(
+            card_text,
+            parse_mode="Markdown",
+            reply_markup=get_tracking_keyboard(clean_num),
+        )
+
+    @router.message(Command("track"))
+    @router.message(Command("tracking"))
+    @router.message(F.text == "🔍 Відстежити ТТН")
+    async def cmd_track(message: Message):
+        """Track express waybill by number or prompt user to enter one."""
+        user_id = message.from_user.id
+        clear_user_active_session(user_id)
+
+        # Check if argument was passed with command: /track 20450123456789
+        parts = message.text.strip().split()
+        if len(parts) > 1:
+            raw_target = parts[1]
+            ttn = extract_ttn_from_text(raw_target) or "".join(filter(str.isdigit, raw_target))
+            if ttn and len(ttn) >= 11:
+                USER_TRACKING_WAITING.discard(user_id)
+                await handle_track_document(message, ttn, user_id)
+                return
+
+        USER_TRACKING_WAITING.add(user_id)
+        prompt_text = (
+            "🔍 *Відстеження експрес-накладної (ТТН) Нової Пошти*\n\n"
+            "Надішліть номер накладної (14 цифр) у повідомленні.\n"
+            "Наприклад:\n"
+            "• `20450123456789`\n"
+            "• `2045 0123 4567 89`\n\n"
+            "💡 _Ви також можете просто скинути номер накладної у будь-який момент без натискання кнопок!_"
+        )
+        await message.answer(
+            prompt_text,
             parse_mode="Markdown",
             reply_markup=get_main_reply_keyboard(),
         )
@@ -2086,6 +2386,40 @@ def register_handlers(
             )
             return
 
+        # Check if user sent a TTN or asked to track a parcel
+        ttn = extract_ttn_from_text(text)
+        is_tracking_req = (
+            (user_id in USER_TRACKING_WAITING and ttn is not None)
+            or (ttn is not None and is_tracking_intent(text))
+            or (
+                ttn is not None
+                and len(text.strip()) <= 35
+                and not any(w in text.lower() for w in ["реєстр", "scansheet", "чернетк", "створ"])
+            )
+        )
+
+        if is_tracking_req and ttn:
+            USER_TRACKING_WAITING.discard(user_id)
+            await handle_track_document(message, ttn, user_id)
+            return
+
+        # If user was in tracking waiting mode but input wasn't recognized as TTN
+        if user_id in USER_TRACKING_WAITING:
+            alpha_chars = [c for c in text if c.isalpha()]
+            # If user entered something short that is not a recipient address
+            if len(alpha_chars) < 10:
+                await message.answer(
+                    "⚠️ *Номер ТТН не розпізнано.*\n"
+                    "Номер накладної Нової Пошти зазвичай містить 14 цифр (наприклад, `20450123456789`).\n"
+                    "Спробуйте ще раз або скористайтеся меню нижче.",
+                    parse_mode="Markdown",
+                    reply_markup=get_main_reply_keyboard(),
+                )
+                return
+            else:
+                # User sent full recipient data instead, discard tracking state
+                USER_TRACKING_WAITING.discard(user_id)
+
         if user_id not in USER_MESSAGE_BUFFERS:
             USER_MESSAGE_BUFFERS[user_id] = []
 
@@ -2099,6 +2433,57 @@ def register_handlers(
         USER_DEBOUNCE_TASKS[user_id] = asyncio.create_task(
             _process_user_accumulated_messages(user_id)
         )
+
+    @router.callback_query(TrackActionCallback.filter())
+    async def process_track_callback(
+        callback: CallbackQuery, callback_data: TrackActionCallback
+    ):
+        """Handle inline actions for tracking cards."""
+        action = callback_data.action
+        doc_number = callback_data.doc_number
+        user_id = callback.from_user.id
+
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+
+        if action == "refresh":
+            await callback.answer("⏳ Оновлення статусу ТТН...")
+            try:
+                tracking_info = await user_np_client.track_document(doc_number)
+            except Exception as e:
+                logger.error(f"Error refreshing tracking for {doc_number}: {e}")
+                tracking_info = None
+
+            if not tracking_info:
+                await callback.answer("❌ Не вдалося оновити дані або накладну не знайдено.", show_alert=True)
+                return
+
+            new_text = format_tracking_card(tracking_info)
+            try:
+                await callback.message.edit_text(
+                    new_text,
+                    parse_mode="Markdown",
+                    reply_markup=get_tracking_keyboard(doc_number),
+                )
+                await callback.answer("✅ Статус оновлено!")
+            except Exception:
+                await callback.answer("✅ Дані актуальні.")
+
+        elif action == "barcode":
+            await callback.answer("⏳ Генерація штрих-коду...")
+            barcode_bytes = generate_code128_barcode(doc_number)
+            photo_file = BufferedInputFile(
+                barcode_bytes, filename=f"ttn_{doc_number}.png"
+            )
+            caption = (
+                f"📱 *Штрихкод для експрес-накладної:*\n`{doc_number}`\n\n"
+                f"Покажіть цей штрихкод оператору у відділенні Нової Пошти для швидкого сканування."
+            )
+            await callback.message.answer_photo(
+                photo=photo_file,
+                caption=caption,
+                parse_mode="Markdown",
+            )
 
     @router.callback_query(WaybillActionCallback.filter())
     async def process_waybill_callback(

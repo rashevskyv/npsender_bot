@@ -22,9 +22,10 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
             ],
             [
                 KeyboardButton(text="💰 Накладений платіж"),
-                KeyboardButton(text="⚙️ Налаштування"),
+                KeyboardButton(text="🔍 Відстежити ТТН"),
             ],
             [
+                KeyboardButton(text="⚙️ Налаштування"),
                 KeyboardButton(text="❓ Допомога"),
             ],
         ],
@@ -448,4 +449,36 @@ def get_cod_shipments_keyboard(
             ],
         ]
     )
+
+
+class TrackActionCallback(CallbackData, prefix="trk"):
+    """Callback data schema for waybill tracking actions."""
+
+    action: str  # "refresh", "barcode"
+    doc_number: str
+
+
+def get_tracking_keyboard(doc_number: str) -> InlineKeyboardMarkup:
+    """Build interactive action buttons for tracking results."""
+    clean_num = "".join(filter(str.isdigit, str(doc_number)))
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="📱 Показати штрихкод",
+                callback_data=TrackActionCallback(action="barcode", doc_number=clean_num).pack(),
+            ),
+            InlineKeyboardButton(
+                text="🔄 Оновити",
+                callback_data=TrackActionCallback(action="refresh", doc_number=clean_num).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🌐 Відкрити на сайті Нової Пошти",
+                url=f"https://novaposhta.ua/tracking/?cargo_number={clean_num}",
+            ),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
