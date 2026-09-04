@@ -1,6 +1,6 @@
 """Pydantic data models for Nova Poshta API responses and requests."""
 
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from pydantic import BaseModel, Field
 
 

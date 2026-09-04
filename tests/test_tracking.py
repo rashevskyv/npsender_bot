@@ -413,3 +413,13 @@ async def test_process_track_callback_refresh_and_barcode(setup_track_handlers):
     cb_barcode.message.answer_photo.assert_called_once()
     assert "Штрихкод для експрес-накладної" in cb_barcode.message.answer_photo.call_args[1]["caption"]
 
+
+def test_tracking_document_details_type_hints():
+    """Verify that type hints on TrackingDocumentDetails and from_api_dict resolve without NameError (e.g. Dict, Any)."""
+    import typing
+    hints_cls = typing.get_type_hints(TrackingDocumentDetails)
+    assert "number" in hints_cls
+    hints_method = typing.get_type_hints(TrackingDocumentDetails.from_api_dict)
+    assert "data" in hints_method
+
+

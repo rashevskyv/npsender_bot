@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.23.0
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.23.1
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -91,5 +91,8 @@
   - [x] Написати юніт-тести у `tests/test_tracking.py` та перевірити всі 63 тести паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
 
-
-
+- [x] **Крок 12: Виправлення сумісності з Python 3.12 (NameError: name 'Dict' is not defined) (v0.23.1)**
+  - [x] Додати імпорт `Dict` з модуля `typing` у `src/nova_poshta/models.py`
+  - [x] Додати регресійний тест `test_tracking_document_details_type_hints` у `tests/test_tracking.py` з перевіркою `typing.get_type_hints`
+  - [x] Перевірити виконання всіх 64 тестів паралельно (`pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`

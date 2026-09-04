@@ -1,5 +1,14 @@
 # Walkthrough (Журнал змін)
 
+## [v0.23.1] - 2026-09-04
+- **Виправлення сумісності з Python 3.12: усунення NameError 'Dict' при імпорті моделей трекінгу**:
+  - **Виправлення імпорту типізації (`src/nova_poshta/models.py`)**:
+    - Додано імпорт `Dict` з модуля `typing` (`from typing import Optional, List, Any, Dict`).
+    - Усунено критичну помилку часу ініціалізації `NameError: name 'Dict' is not defined`, яка виникала на середовищах із Python <= 3.12 (наприклад, Ubuntu 24.04 LTS / systemd) через evaluation анотацій у сигнатурі методу `TrackingDocumentDetails.from_api_dict(cls, data: Dict[str, Any])`.
+  - **Тестування та регресійний контроль**:
+    - У `tests/test_tracking.py` додано тест `test_tracking_document_details_type_hints`, який примусово перевіряє роздільну здатність та валідність type hints через `typing.get_type_hints` для класу `TrackingDocumentDetails` та методу `from_api_dict`.
+    - Усі 64 тести пройдено успішно та паралельно (`pytest -n auto`).
+
 ## [v0.23.0] - 2026-09-03
 - **Універсальне відстеження будь-яких експрес-накладних (ТТН) через Nova Poshta API**:
   - **Повна інтеграція з API відстеження (`TrackingDocument/getStatusDocuments`)**:
