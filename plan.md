@@ -3,7 +3,7 @@
 ## Опис проекту
 Створення Telegram-бота на Python (aiogram 3.x), який за допомогою штучного інтелекту (OpenAI-сумісного API / Gemini) парсить неструктурований текст із реквізитами отримувача без регулярних виразів, формує експрес-накладні (ТТН як у відділення/поштомати, так і на адресну доставку кур'єром), забезпечує інтелектуальне об'єднання чернеток у реєстри (ScanSheet) на основі природномовних запитів та генерує штрих-коди Code128 для швидкого сканування на відділеннях Нової Пошти.
 
-## Основні компоненти (v0.23.1)
+## Основні компоненти (v0.23.2)
 1. [x] **AI Entity Extractor, Regex Healing & Smart Contextual Editing (`src/ai/`)**:
    - Повна ізоляція AI-провайдера за Telegram `user_id`.
    - Дворівневий механізм захисту та автолікування сутностей `heal_parsed_recipient_info` (гарантований парсинг навіть при збоях AI).
@@ -73,3 +73,11 @@
 12. [x] **Виправлення сумісності з Python 3.12 (v0.23.1)**:
     - [x] Імпорт `Dict` з модуля `typing` у `src/nova_poshta/models.py` для усунення `NameError: name 'Dict' is not defined` при старті сервісу на Ubuntu 24.04 (Python 3.12).
     - [x] Регресійне тестування type hints через `typing.get_type_hints` у `tests/test_tracking.py`.
+
+13. [x] **Виправлення генерації штрихкоду та вилучення накладних з реєстру (ScanSheet) через AI (v0.23.2)**:
+    - [x] Захист `generate_code128_barcode` від порожнього рядка (`ValueError`) для усунення `IndexError: list index out of range`.
+    - [x] Валідація результатів `create_scan_sheet` у клієнті Нової Пошти (перевірка `Errors`, непорожнього `Number`).
+    - [x] Реалізація методу `remove_documents_from_scan_sheet` (`ScanSheet/removeDocuments`) у `NovaPoshtaClient`.
+    - [x] Додавання дій `remove_waybill` та `delete_register` у схеми `AIRegisterFilterResult`, `ParsedRecipientInfo` та промпт `REGISTER_FILTER_SYSTEM_PROMPT`.
+    - [x] Збереження контексту останнього створеного/переглянутого реєстру (`USER_LAST_SCANSHEET_CONTEXT`) для підтримки природномовного вилучення накладних за порядковим номером (№1, №2...), номером ТТН або прізвищем.
+    - [x] Оновлення збереженого реєстру в `storage.py` та генерація оновленого реєстру зі штрихкодом.

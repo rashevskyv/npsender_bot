@@ -50,6 +50,7 @@ router = Router()
 PENDING_SESSIONS: Dict[str, Dict[str, Any]] = {}
 USER_ACTIVE_SESSIONS: Dict[int, str] = {}  # user_id -> active session_id
 USER_LAST_PARSED_INFO: Dict[int, ParsedRecipientInfo] = {}  # user_id -> last parsed recipient info for natural language follow-up edits
+USER_LAST_SCANSHEET_CONTEXT: Dict[int, Dict[str, Any]] = {}  # user_id -> last created or viewed register context
 VALUE_OPTIONS = [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
 SESSION_TIMEOUT_SECONDS: float = 15 * 60  # 15 minutes TTL for active parcel creation sessions
 
@@ -1704,23 +1705,51 @@ def register_handlers(
                     return
 
                 await status_msg.edit_text(
-                    "🔍 *Отримання ваших активних чернеток та підбір накладних через AI...*",
+                    "🔍 *Аналіз чернеток та реєстрів через AI...*",
                     parse_mode="Markdown",
                 )
 
                 active_drafts = await fetch_user_active_drafts(actual_user_id, user_np_client, storage_manager)
 
-                if not active_drafts:
+                # Prepare active register context if available
+                last_scansheet = USER_LAST_SCANSHEET_CONTEXT.get(actual_user_id)
+                if not last_scansheet:
+                    user_saved_sheets = storage_manager.get_user_scansheets(actual_user_id)
+                    if user_saved_sheets:
+                        recent = user_saved_sheets[0]
+                        drafts_by_num = {str(d.get("int_doc_number")): d for d in active_drafts}
+                        built_items = []
+                        for idx, num in enumerate(recent.document_numbers, 1):
+                            d_info = drafts_by_num.get(num, {})
+                            built_items.append({
+                                "index": idx,
+                                "int_doc_number": num,
+                                "ref": d_info.get("ref", num),
+                                "recipient_name": d_info.get("recipient_name", ""),
+                                "city_description": d_info.get("city_description", ""),
+                                "warehouse_description": d_info.get("warehouse_description", ""),
+                                "cargo_description": d_info.get("cargo_description", ""),
+                                "declared_value": d_info.get("declared_value", 500),
+                                "cod_amount": d_info.get("cod_amount", 0),
+                            })
+                        last_scansheet = {
+                            "ref": recent.ref,
+                            "number": recent.number,
+                            "date_created": recent.date_created,
+                            "count_of_documents": recent.count_of_documents,
+                            "items": built_items,
+                        }
+
+                if not active_drafts and not last_scansheet:
                     await status_msg.edit_text(
-                        "📝 *Активних чернеток ТТН (невідправлених) не знайдено.*\n"
-                        "Усі ваші накладні вже відправлені або ще не створені. "
-                        "Неможливо сформувати реєстр без накладних.",
+                        "📝 *Активних чернеток ТТН та реєстрів не знайдено.*\n"
+                        "Усі ваші накладні вже відправлені або ще не створені.",
                         parse_mode="Markdown",
                     )
                     return
 
                 ai_reg_result = await user_ai_extractor.filter_drafts_for_register(
-                    user_prompt=text, drafts=active_drafts
+                    user_prompt=text, drafts=active_drafts, active_scansheet=last_scansheet
                 )
 
                 if ai_reg_result.action == "list_registers":
@@ -1729,6 +1758,169 @@ def register_handlers(
                     except Exception:
                         pass
                     await cmd_registers(message)
+                    return
+
+                if ai_reg_result.action == "delete_register":
+                    target_ref = None
+                    target_num = None
+                    if last_scansheet:
+                        target_ref = last_scansheet.get("ref")
+                        target_num = last_scansheet.get("number")
+                    else:
+                        user_sheets = storage_manager.get_user_scansheets(actual_user_id)
+                        if user_sheets:
+                            target_ref = user_sheets[0].ref
+                            target_num = user_sheets[0].number
+
+                    if not target_ref:
+                        await status_msg.edit_text(
+                            "ℹ️ *У вас немає активних реєстрів для видалення.*",
+                            parse_mode="Markdown",
+                        )
+                        return
+
+                    await status_msg.edit_text(
+                        f"⏳ *Розформування та видалення реєстру № `{target_num or target_ref}`...*",
+                        parse_mode="Markdown",
+                    )
+                    deleted = await user_np_client.delete_scan_sheet(target_ref)
+                    storage_manager.delete_user_scansheet(actual_user_id, target_ref)
+                    USER_LAST_SCANSHEET_CONTEXT.pop(actual_user_id, None)
+
+                    del_msg = (
+                        f"🗑 *Реєстр (ScanSheet) № `{target_num or target_ref}` успішно розформовано та видалено з бази Нової Пошти.*\n"
+                        "Усі накладні повернуто до ваших активних чернеток."
+                        if deleted
+                        else f"🗑 *Реєстр № `{target_num or target_ref}` видалено з локальної бази.*"
+                    )
+                    await status_msg.edit_text(del_msg, parse_mode="Markdown")
+                    return
+
+                if ai_reg_result.action == "remove_waybill":
+                    if not last_scansheet or not last_scansheet.get("items"):
+                        await status_msg.edit_text(
+                            "❌ *Не знайдено активного реєстру, з якого можна вилучити накладну.*",
+                            parse_mode="Markdown",
+                        )
+                        return
+
+                    target_item = None
+                    items = last_scansheet["items"]
+
+                    # Match by 1-based index (e.g. 2 for №2)
+                    if ai_reg_result.target_item_index and 1 <= ai_reg_result.target_item_index <= len(items):
+                        target_item = items[ai_reg_result.target_item_index - 1]
+
+                    # Match by explicit target_doc_number
+                    if not target_item and ai_reg_result.target_doc_number:
+                        clean_num = str(ai_reg_result.target_doc_number).strip()
+                        target_item = next((it for it in items if it.get("int_doc_number") == clean_num), None)
+
+                    # Match by selected_doc_numbers
+                    if not target_item and ai_reg_result.selected_doc_numbers:
+                        sel_set = set(ai_reg_result.selected_doc_numbers)
+                        target_item = next((it for it in items if str(it.get("int_doc_number")) in sel_set), None)
+
+                    # Match by recipient name
+                    if not target_item and ai_reg_result.target_recipient:
+                        rec_query = ai_reg_result.target_recipient.lower().strip()
+                        target_item = next((it for it in items if rec_query in it.get("recipient_name", "").lower()), None)
+
+                    if not target_item:
+                        await status_msg.edit_text(
+                            f"❌ *Накладну не знайдено у поточному реєстрі № `{last_scansheet.get('number')}`.*\n"
+                            "Перевірте номер накладної або порядковий номер у списку реєстру.",
+                            parse_mode="Markdown",
+                        )
+                        return
+
+                    doc_to_remove_num = str(target_item["int_doc_number"])
+                    doc_to_remove_ref = str(target_item.get("ref", doc_to_remove_num))
+                    recipient_name = target_item.get("recipient_name", "")
+                    reg_number = last_scansheet.get("number", "")
+                    reg_ref = last_scansheet.get("ref", "")
+
+                    await status_msg.edit_text(
+                        f"⏳ *Вилучення накладної `{doc_to_remove_num}` ({recipient_name}) з реєстру № `{reg_number}`...*",
+                        parse_mode="Markdown",
+                    )
+
+                    # Call Nova Poshta removeDocuments API
+                    remove_refs = list(set([doc_to_remove_ref, doc_to_remove_num]))
+                    try:
+                        await user_np_client.remove_documents_from_scan_sheet(remove_refs)
+                    except Exception as rem_err:
+                        logger.warning(f"Nova Poshta removeDocuments returned error: {rem_err}")
+
+                    # Update storage
+                    storage_manager.remove_document_from_user_scansheet(
+                        actual_user_id, reg_ref or reg_number, doc_to_remove_num
+                    )
+
+                    # Update context items
+                    remaining_items = [it for it in items if it.get("int_doc_number") != doc_to_remove_num]
+                    for idx, it in enumerate(remaining_items, 1):
+                        it["index"] = idx
+
+                    last_scansheet["items"] = remaining_items
+                    last_scansheet["count_of_documents"] = len(remaining_items)
+                    USER_LAST_SCANSHEET_CONTEXT[actual_user_id] = last_scansheet
+
+                    # If no items left, auto disband
+                    if not remaining_items:
+                        try:
+                            await user_np_client.delete_scan_sheet(reg_ref)
+                        except Exception:
+                            pass
+                        storage_manager.delete_user_scansheet(actual_user_id, reg_ref)
+                        USER_LAST_SCANSHEET_CONTEXT.pop(actual_user_id, None)
+                        await status_msg.edit_text(
+                            f"✅ *Накладну `{doc_to_remove_num}` успішно вилучено з реєстру!*\n\n"
+                            f"Оскільки в реєстрі більше не залишилося накладних, реєстр № `{reg_number}` автоматично розформовано.",
+                            parse_mode="Markdown",
+                        )
+                        return
+
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
+
+                    details_lines = []
+                    for idx, it in enumerate(remaining_items, 1):
+                        cod_str = f" | 💵 Наложка: {int(it.get('cod_amount', 0))} грн" if it.get("cod_amount") else ""
+                        line = (
+                            f"*{idx}. ТТН:* `{it['int_doc_number']}` | {it['recipient_name']}\n"
+                            f"   🏙 {it['city_description']}, {it['warehouse_description']}\n"
+                            f"   📝 {it['cargo_description']} | 💰 {int(it.get('declared_value', 500))} грн{cod_str}"
+                        )
+                        details_lines.append(line)
+                    details_block = "\n\n".join(details_lines)
+
+                    caption_text = (
+                        f"✅ *Накладну `{doc_to_remove_num}` ({recipient_name}) успішно вилучено з реєстру!*\n\n"
+                        f"📋 *Оновлений реєстр (ScanSheet):* `{reg_number}`\n"
+                        f"📦 *Залишилось накладних:* {len(remaining_items)}\n\n"
+                        f"📄 *Накладні у реєстрі:*\n{details_block}\n\n"
+                        "📱 *Покажіть цей штрихкод оператору Нової Пошти для сканування!*"
+                    )
+
+                    try:
+                        barcode_bytes = generate_code128_barcode(reg_number)
+                        photo_file = BufferedInputFile(barcode_bytes, filename=f"scansheet_{reg_number}.png")
+                        await message.answer_photo(
+                            photo=photo_file,
+                            caption=caption_text,
+                            parse_mode="Markdown",
+                            reply_markup=get_register_keyboard(ref=reg_ref),
+                        )
+                    except Exception as bc_err:
+                        logger.error(f"Error generating updated barcode photo: {bc_err}")
+                        await message.answer(
+                            caption_text,
+                            parse_mode="Markdown",
+                            reply_markup=get_register_keyboard(ref=reg_ref),
+                        )
                     return
 
                 selected_nums_set = set(ai_reg_result.selected_doc_numbers)
@@ -1753,7 +1945,15 @@ def register_handlers(
                     doc_refs = [d["ref"] for d in matched_drafts]
                     doc_nums = [d["int_doc_number"] for d in matched_drafts]
 
-                    scansheet_info = await user_np_client.create_scan_sheet(doc_refs)
+                    try:
+                        scansheet_info = await user_np_client.create_scan_sheet(doc_refs)
+                    except Exception as ss_err:
+                        logger.error(f"Error creating scan sheet via Nova Poshta API: {ss_err}", exc_info=True)
+                        await status_msg.edit_text(
+                            f"❌ *Помилка створення реєстру:* {ss_err}",
+                            parse_mode="Markdown",
+                        )
+                        return
 
                     saved_scansheet = SavedScanSheet(
                         ref=scansheet_info.ref,
@@ -1764,8 +1964,27 @@ def register_handlers(
                     )
                     storage_manager.add_user_scansheet(actual_user_id, saved_scansheet)
 
-                    barcode_bytes = generate_code128_barcode(scansheet_info.number)
-                    photo_file = BufferedInputFile(barcode_bytes, filename=f"scansheet_{scansheet_info.number}.png")
+                    # Update context for follow-up actions (like removal of waybills)
+                    scansheet_items = []
+                    for idx, d in enumerate(matched_drafts, 1):
+                        scansheet_items.append({
+                            "index": idx,
+                            "int_doc_number": str(d.get("int_doc_number")),
+                            "ref": str(d.get("ref")),
+                            "recipient_name": d.get("recipient_name", ""),
+                            "city_description": d.get("city_description", ""),
+                            "warehouse_description": d.get("warehouse_description", ""),
+                            "cargo_description": d.get("cargo_description", ""),
+                            "declared_value": d.get("declared_value", 500),
+                            "cod_amount": d.get("cod_amount", 0),
+                        })
+                    USER_LAST_SCANSHEET_CONTEXT[actual_user_id] = {
+                        "ref": scansheet_info.ref,
+                        "number": scansheet_info.number,
+                        "date_created": scansheet_info.date_created,
+                        "count_of_documents": scansheet_info.count_of_documents,
+                        "items": scansheet_items,
+                    }
 
                     # Construct detailed list of included TTNs
                     details_lines = []
@@ -1792,12 +2011,23 @@ def register_handlers(
                         f"📄 *Накладні у реєстрі:*\n{details_block}\n\n"
                         "📱 *Покажіть цей штрихкод оператору Нової Пошти для сканування!*"
                     )
-                    await message.answer_photo(
-                        photo=photo_file,
-                        caption=caption_text,
-                        parse_mode="Markdown",
-                        reply_markup=get_register_keyboard(ref=scansheet_info.ref),
-                    )
+
+                    try:
+                        barcode_bytes = generate_code128_barcode(scansheet_info.number)
+                        photo_file = BufferedInputFile(barcode_bytes, filename=f"scansheet_{scansheet_info.number}.png")
+                        await message.answer_photo(
+                            photo=photo_file,
+                            caption=caption_text,
+                            parse_mode="Markdown",
+                            reply_markup=get_register_keyboard(ref=scansheet_info.ref),
+                        )
+                    except Exception as bc_err:
+                        logger.error(f"Error generating barcode photo for scansheet {scansheet_info.number}: {bc_err}")
+                        await message.answer(
+                            caption_text,
+                            parse_mode="Markdown",
+                            reply_markup=get_register_keyboard(ref=scansheet_info.ref),
+                        )
                     return
 
                 # Default action: show filtered drafts list
@@ -3264,6 +3494,7 @@ def register_handlers(
             return
 
         if action == "delete":
+            USER_LAST_SCANSHEET_CONTEXT.pop(user_id, None)
             try:
                 deleted = await user_np_client.delete_scan_sheet(ref)
                 storage_manager.delete_user_scansheet(user_id, ref)
@@ -3338,3 +3569,6 @@ def register_handlers(
             parsed_info=parsed_info,
             status_msg=status_msg,
         )
+
+    router._handle_combined_text_message = _handle_combined_text_message
+

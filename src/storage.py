@@ -300,12 +300,30 @@ class UserSettingsManager:
         if uid_str in self.scansheets:
             initial_len = len(self.scansheets[uid_str])
             self.scansheets[uid_str] = [
-                s for s in self.scansheets[uid_str] if s.ref != ref
+                s for s in self.scansheets[uid_str] if s.ref != ref and s.number != ref
             ]
             if len(self.scansheets[uid_str]) < initial_len:
                 self.save_scansheets()
                 return True
         return False
+
+    def remove_document_from_user_scansheet(
+        self, user_id: int, scansheet_ref_or_number: str, doc_number: str
+    ) -> Optional[SavedScanSheet]:
+        """Remove a document number from a saved user scansheet, updating count and list."""
+        uid_str = str(user_id)
+        if uid_str not in self.scansheets:
+            return None
+        clean_doc = str(doc_number).strip()
+        for s in self.scansheets[uid_str]:
+            if s.ref == scansheet_ref_or_number or s.number == scansheet_ref_or_number:
+                updated_nums = [d for d in s.document_numbers if d != clean_doc]
+                if len(updated_nums) != len(s.document_numbers):
+                    s.document_numbers = updated_nums
+                    s.count_of_documents = len(updated_nums)
+                    self.save_scansheets()
+                return s
+        return None
 
     def purge_old_or_sent_scansheets(self, user_id: int, refs: List[str]) -> int:
         """Purge ScanSheets matching any ref in refs list for user ID."""

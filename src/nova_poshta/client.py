@@ -1029,6 +1029,31 @@ class NovaPoshtaClient:
             raise RuntimeError("ScanSheet/insertDocuments returned empty data array")
 
         info = data[0]
+        ref_val = str(info.get("Ref", "") or "").strip()
+        num_val = str(info.get("Number", "") or "").strip()
+
+        # Check for errors returned inside info or res
+        errors_in_info = info.get("Errors", [])
+        if not ref_val or not num_val or errors_in_info:
+            err_parts = []
+            if isinstance(errors_in_info, list):
+                for e in errors_in_info:
+                    if isinstance(e, dict):
+                        err_parts.append(f"{e.get('Number', '')}: {e.get('Error', '')}")
+                    else:
+                        err_parts.append(str(e))
+            elif isinstance(errors_in_info, str):
+                err_parts.append(errors_in_info)
+
+            res_errors = res.get("errors", [])
+            if res_errors:
+                err_parts.extend([str(e) for e in res_errors])
+
+            if not ref_val or not num_val:
+                combined_err = "; ".join([p for p in err_parts if p]) or "Нова Пошта не повернула номер реєстру (можливо, накладні вже додано до іншого реєстру)."
+                logger.error(f"Failed to create scan sheet: {combined_err}")
+                raise RuntimeError(f"Помилка створення реєстру: {combined_err}")
+
         raw_cnt = (
             info.get("CountOfDocuments")
             or len(info.get("Success", []))
@@ -1040,11 +1065,22 @@ class NovaPoshtaClient:
             cnt = len(document_refs)
 
         return ScanSheetInfo(
-            Ref=str(info.get("Ref", "")),
-            Number=str(info.get("Number", "")),
+            Ref=ref_val,
+            Number=num_val,
             DateTime=str(info.get("DateTime", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))),
             CountOfDocuments=cnt,
         )
+
+    async def remove_documents_from_scan_sheet(self, document_refs: List[str]) -> bool:
+        """Remove specific waybill documents from a Nova Poshta ScanSheet (Register)."""
+        if not document_refs:
+            return True
+        res = await self._post(
+            model_name="ScanSheet",
+            called_method="removeDocuments",
+            method_properties={"DocumentRefs": document_refs},
+        )
+        return res.get("success", False)
 
     async def get_scan_sheets(self, days_back: int = 2) -> List[ScanSheetInfo]:
         """Fetch list of user's active registers (ScanSheets). Defaults to past 2 days."""

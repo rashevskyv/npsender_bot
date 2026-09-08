@@ -5,15 +5,31 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class AIRegisterFilterResult(BaseModel):
-    """Structured AI output for selecting and matching waybill drafts for register (ScanSheet) creation or filtering."""
+    """Structured AI output for selecting, matching, or modifying waybill drafts for register (ScanSheet)."""
 
     action: str = Field(
         default="create",
-        description="Action type: 'create' (generate register from selected drafts), 'filter_drafts' (only display matched drafts), 'list_registers' (view existing registers), 'not_found' (no matching drafts)",
+        description="Action type: 'create' (generate register), 'remove_waybill' (remove specific waybill from register), 'delete_register' (disband register), 'filter_drafts' (only display matched drafts), 'list_registers' (view existing registers), 'not_found' (no matching drafts)",
     )
     selected_doc_numbers: List[str] = Field(
         default_factory=list,
         description="List of 14-digit waybill numbers (IntDocNumber) selected from the provided drafts matching the user request",
+    )
+    target_item_index: Optional[int] = Field(
+        default=None,
+        description="1-based ordinal index of the waybill to remove/manipulate if specified by user (e.g. 2 for 'накладна №2' or 'другу накладну')",
+    )
+    target_doc_number: Optional[str] = Field(
+        default=None,
+        description="Specific 14-digit waybill number to remove or manipulate if explicitly provided in request",
+    )
+    target_recipient: Optional[str] = Field(
+        default=None,
+        description="Recipient surname/name if specified for removal (e.g. 'Кожин')",
+    )
+    register_number_or_ref: Optional[str] = Field(
+        default=None,
+        description="ScanSheet register number or ref if explicitly specified in text",
     )
     summary: Optional[str] = Field(
         default=None,
@@ -23,6 +39,19 @@ class AIRegisterFilterResult(BaseModel):
         default=None,
         description="Brief reasoning of how the matching was performed",
     )
+
+    @field_validator("target_item_index", mode="before")
+    @classmethod
+    def parse_target_index(cls, v):
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            digits = "".join(filter(str.isdigit, v))
+            return int(digits) if digits else None
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return None
 
     @field_validator("selected_doc_numbers", mode="before")
     @classmethod
@@ -114,7 +143,7 @@ class ParsedRecipientInfo(BaseModel):
     )
     register_action: Optional[str] = Field(
         default=None,
-        description="Action type for register intent: 'create' (create a register), 'list' (view active registers), 'filter_drafts' (show/discuss filtered waybills)",
+        description="Action type for register intent: 'create' (create a register), 'remove_waybill' (remove/exclude waybill from register), 'delete_register' (disband register), 'list' (view active registers), 'filter_drafts' (show/discuss filtered waybills)",
     )
     filter_cargo_description: Optional[str] = Field(
         default=None,

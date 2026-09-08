@@ -377,3 +377,286 @@ async def test_process_draft_callback_barcode(tmp_path):
     assert "20451512966104" in call_args.kwargs["caption"]
 
 
+def test_barcode_generation_empty_data_raises_value_error():
+    """Verify that empty, whitespace or None barcode input raises ValueError rather than IndexError."""
+    with pytest.raises(ValueError, match="Barcode data cannot be empty"):
+        generate_code128_barcode("")
+
+    with pytest.raises(ValueError, match="Barcode data cannot be empty"):
+        generate_code128_barcode("   ")
+
+    with pytest.raises(ValueError, match="Barcode data cannot be empty"):
+        generate_code128_barcode(None)
+
+
+def test_ai_register_filter_result_parsing():
+    """Verify AIRegisterFilterResult schema parses target_item_index and actions."""
+    from src.ai.schemas import AIRegisterFilterResult
+
+    res = AIRegisterFilterResult(
+        action="remove_waybill",
+        target_item_index="№2",
+        target_doc_number="20451531036290",
+        target_recipient="Кожин",
+    )
+    assert res.action == "remove_waybill"
+    assert res.target_item_index == 2
+    assert res.target_doc_number == "20451531036290"
+    assert res.target_recipient == "Кожин"
+
+
+@pytest.mark.asyncio
+async def test_filter_drafts_fallback_remove_waybill():
+    """Verify programmatic fallback in AIExtractor identifies removal requests."""
+    from src.ai.extractor import AIExtractor
+    from src.config import Settings
+    from unittest.mock import AsyncMock, MagicMock
+
+    settings = Settings(TELEGRAM_BOT_TOKEN="dummy", AI_API_KEY="dummy")
+    extractor = AIExtractor(settings)
+
+    # Mock client to throw exception and force fallback
+    extractor.client = MagicMock()
+    extractor.client.chat.completions.create = AsyncMock(side_effect=RuntimeError("AI Down"))
+
+    drafts = [{"int_doc_number": "204501"}, {"int_doc_number": "204502"}]
+
+    # Test #1: ordinal index №2
+    res = await extractor.filter_drafts_for_register("Прибери, будь ласка, з реєстру накладну №2.", drafts)
+    assert res.action == "remove_waybill"
+    assert res.target_item_index == 2
+
+    # Test #2: word "другу"
+    res2 = await extractor.filter_drafts_for_register("Видали другу накладну з реєстру", drafts)
+    assert res2.action == "remove_waybill"
+    assert res2.target_item_index == 2
+
+    # Test #3: TTN number
+    res3 = await extractor.filter_drafts_for_register("Прибери 20451531036290 з реєстру", drafts)
+    assert res3.action == "remove_waybill"
+    assert res3.target_doc_number == "20451531036290"
+
+    # Test #4: delete register
+    res4 = await extractor.filter_drafts_for_register("Видали цей реєстр", drafts)
+    assert res4.action == "delete_register"
+
+
+@pytest.mark.asyncio
+async def test_create_scan_sheet_validation_and_remove_documents():
+    """Verify create_scan_sheet raises error on empty number and remove_documents_from_scan_sheet works."""
+    from src.nova_poshta.client import NovaPoshtaClient
+    from src.config import Settings
+    from unittest.mock import AsyncMock
+
+    client = NovaPoshtaClient(Settings(NOVA_POSHTA_API_KEY="test_key"))
+
+    # When NP returns empty number / errors
+    client._post = AsyncMock(return_value={
+        "success": True,
+        "data": [{
+            "Ref": "",
+            "Number": "",
+            "Errors": [{"Number": "20451531219131", "Error": "Накладна вже у реєстрі"}]
+        }]
+    })
+
+    with pytest.raises(RuntimeError, match="Помилка створення реєстру"):
+        await client.create_scan_sheet(["doc-ref-1"])
+
+    # When NP succeeds with valid scan sheet
+    client._post = AsyncMock(return_value={
+        "success": True,
+        "data": [{
+            "Ref": "new-sheet-ref",
+            "Number": "105-88899900",
+            "CountOfDocuments": 2,
+            "DateTime": "2026-09-08 19:30:00"
+        }]
+    })
+    sheet = await client.create_scan_sheet(["doc-ref-1", "doc-ref-2"])
+    assert sheet.number == "105-88899900"
+    assert sheet.ref == "new-sheet-ref"
+    assert sheet.count_of_documents == 2
+
+    # Test remove_documents_from_scan_sheet
+    client._post = AsyncMock(return_value={"success": True, "data": []})
+    ok = await client.remove_documents_from_scan_sheet(["doc-ref-2"])
+    assert ok is True
+    client._post.assert_called_once_with(
+        model_name="ScanSheet",
+        called_method="removeDocuments",
+        method_properties={"DocumentRefs": ["doc-ref-2"]},
+    )
+
+
+def test_storage_remove_document_from_user_scansheet(tmp_path):
+    """Verify storage_manager updates document numbers and count when removing a doc from scansheet."""
+    import os
+    from src.storage import UserSettingsManager, SavedScanSheet
+
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    drafts_file = os.path.join(tmp_path, "user_drafts.json")
+    scansheets_file = os.path.join(tmp_path, "user_scansheets.json")
+    manager = UserSettingsManager(
+        filepath=storage_file,
+        drafts_filepath=drafts_file,
+        scansheets_filepath=scansheets_file,
+    )
+
+    s1 = SavedScanSheet(
+        ref="sheet-ref-abc",
+        number="105-80149920",
+        date_created="2026-09-08 19:13:47",
+        count_of_documents=3,
+        document_numbers=["20451531219131", "20451531036290", "20451531340827"],
+    )
+    manager.add_user_scansheet(777, s1)
+
+    updated = manager.remove_document_from_user_scansheet(777, "105-80149920", "20451531036290")
+    assert updated is not None
+    assert updated.count_of_documents == 2
+    assert updated.document_numbers == ["20451531219131", "20451531340827"]
+
+    # Verify persisted
+    saved_list = manager.get_user_scansheets(777)
+    assert len(saved_list) == 1
+    assert saved_list[0].count_of_documents == 2
+    assert "20451531036290" not in saved_list[0].document_numbers
+
+
+@pytest.mark.asyncio
+async def test_handle_text_remove_waybill_from_register(tmp_path):
+    """Verify end-to-end processing of user text 'Прибери, будь ласка, з реєстру накладну №2.'"""
+    import os
+    from unittest.mock import AsyncMock, MagicMock
+    from src.config import Settings
+    from src.storage import UserSettingsManager, SavedScanSheet
+    from src.ai.schemas import ParsedRecipientInfo, AIRegisterFilterResult
+    from src.bot.handlers import router, register_handlers, USER_LAST_SCANSHEET_CONTEXT
+
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    drafts_file = os.path.join(tmp_path, "user_drafts.json")
+    scansheets_file = os.path.join(tmp_path, "user_scansheets.json")
+    manager = UserSettingsManager(
+        filepath=storage_file,
+        drafts_filepath=drafts_file,
+        scansheets_filepath=scansheets_file,
+    )
+
+    manager.update_user_settings(888, nova_poshta_api_key="np_key_888", ai_api_key="ai_key_888")
+
+    s1 = SavedScanSheet(
+        ref="sheet-ref-123",
+        number="105-80149920",
+        date_created="2026-09-08 19:13:47",
+        count_of_documents=3,
+        document_numbers=["20451531219131", "20451531036290", "20451531340827"],
+    )
+    manager.add_user_scansheet(888, s1)
+
+    # Set up user context
+    USER_LAST_SCANSHEET_CONTEXT[888] = {
+        "ref": "sheet-ref-123",
+        "number": "105-80149920",
+        "date_created": "2026-09-08 19:13:47",
+        "count_of_documents": 3,
+        "items": [
+            {
+                "index": 1,
+                "int_doc_number": "20451531219131",
+                "ref": "ref-1",
+                "recipient_name": "Згирча Юлія Віорелівна",
+                "city_description": "Тернопіль",
+                "warehouse_description": "Відділення №7",
+                "cargo_description": "Посилка",
+                "declared_value": 500.0,
+                "cod_amount": 0.0,
+            },
+            {
+                "index": 2,
+                "int_doc_number": "20451531036290",
+                "ref": "ref-2",
+                "recipient_name": "Кожин Олександр Миколайович",
+                "city_description": "Кам'янське",
+                "warehouse_description": "Відділення №14",
+                "cargo_description": "Планшет",
+                "declared_value": 10100.0,
+                "cod_amount": 10100.0,
+            },
+            {
+                "index": 3,
+                "int_doc_number": "20451531340827",
+                "ref": "ref-3",
+                "recipient_name": "Верич Костянтин Миколайович",
+                "city_description": "Запоріжжя",
+                "warehouse_description": "Поштомат №40400",
+                "cargo_description": "3DS",
+                "declared_value": 5000.0,
+                "cod_amount": 5000.0,
+            },
+        ],
+    }
+
+    from unittest.mock import patch
+    with patch("src.ai.extractor.AIExtractor.parse_text", new_callable=AsyncMock) as mock_parse_text, \
+         patch("src.ai.extractor.AIExtractor.filter_drafts_for_register", new_callable=AsyncMock) as mock_filter_drafts, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.remove_documents_from_scan_sheet", new_callable=AsyncMock) as mock_remove_docs, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_internet_document_list", new_callable=AsyncMock) as mock_get_docs:
+
+        mock_parse_text.return_value = ParsedRecipientInfo(
+            is_recipient_info=False,
+            is_register_intent=True,
+            register_action="remove_waybill",
+        )
+        mock_filter_drafts.return_value = AIRegisterFilterResult(
+            action="remove_waybill",
+            target_item_index=2,
+            target_doc_number="20451531036290",
+            target_recipient="Кожин Олександр",
+        )
+        mock_remove_docs.return_value = True
+        mock_get_docs.return_value = []
+
+        settings = Settings(
+            TELEGRAM_BOT_TOKEN="dummy",
+            SENDER_REF="sender_ref_test",
+            SENDER_CONTACT_REF="contact_ref_test",
+            SENDER_PHONE="380991234567",
+        )
+        register_handlers(settings, MagicMock(), MagicMock(), manager)
+
+        # Mock Telegram message
+        mock_msg = MagicMock()
+        mock_msg.from_user.id = 888
+        mock_status = MagicMock()
+        mock_status.edit_text = AsyncMock()
+        mock_status.delete = AsyncMock()
+        mock_msg.answer = AsyncMock(return_value=mock_status)
+        mock_msg.answer_photo = AsyncMock()
+
+        await router._handle_combined_text_message(mock_msg, "Прибери, будь ласка, з реєстру накладну №2.", user_id=888)
+
+        # Verify remove_documents_from_scan_sheet called with 20451531036290
+        mock_remove_docs.assert_called_once()
+        rem_call_args = mock_remove_docs.call_args[0][0]
+        assert "20451531036290" in rem_call_args or "ref-2" in rem_call_args
+
+    # Verify storage updated
+    saved_after = manager.get_user_scansheets(888)
+    assert len(saved_after) == 1
+    assert saved_after[0].count_of_documents == 2
+    assert "20451531036290" not in saved_after[0].document_numbers
+
+    # Verify answer_photo called with updated barcode for register 105-80149920 and caption
+    mock_msg.answer_photo.assert_called_once()
+    photo_caption = mock_msg.answer_photo.call_args.kwargs["caption"]
+    assert "20451531036290" in photo_caption
+    assert "успішно вилучено з реєстру" in photo_caption
+    assert "105-80149920" in photo_caption
+    assert "2" in photo_caption
+    assert "20451531219131" in photo_caption
+    assert "20451531340827" in photo_caption
+
+
+
+

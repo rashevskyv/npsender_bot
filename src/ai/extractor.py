@@ -3,6 +3,7 @@
 import json
 import logging
 import datetime
+import re
 from typing import Optional, List, Dict, Any
 from openai import AsyncOpenAI
 
@@ -84,10 +85,12 @@ Determine the user's intent:
      • cargo_type: "Parcel" or "Documents" if explicitly specified
 
 3. REGISTER & WAYBILL FILTERING INTENT (is_register_intent: true):
-   If the user asks to list/filter waybills by date, time, or cargo description, or asks to create a ScanSheet register (e.g. "надай мені всі накладні, які були створені за сьогодні", "створи реєстр з усіх накладних з описом сувенір", "створи реєстр з накладних створених вчора до обіду", "покажи мої реєстри", "створи реєстр з накладної 2045..."):
+   If the user asks to list/filter waybills, create a ScanSheet register, or remove/delete a waybill or register (e.g. "надай мені всі накладні, які були створені за сьогодні", "створи реєстр з усіх накладних з описом сувенір", "створи реєстр з накладної 2045...", "прибери з реєстру накладну №2", "видали другу накладну з реєстру", "видали реєстр", "розформуй реєстр", "покажи мої реєстри"):
    - Set `is_register_intent`: true
    - Set `register_action`:
      • "create": if user requests to build/create a register (ScanSheet)
+     • "remove_waybill": if user requests to remove/exclude a waybill from a register
+     • "delete_register": if user requests to disband/delete a register
      • "list": if user asks to view existing registers
      • "filter_drafts": if user asks to list, view, or discuss waybill drafts matching a filter
    - Set filter criteria:
@@ -97,21 +100,31 @@ Determine the user's intent:
 Return ONLY valid JSON matching this schema."""
 
 
-REGISTER_FILTER_SYSTEM_PROMPT = """You are an intelligent Nova Poshta logistics assistant specialized in filtering express waybill drafts (ТТН / чернетки) and selecting waybills to combine into a ScanSheet Register (Реєстр).
+REGISTER_FILTER_SYSTEM_PROMPT = """You are an intelligent Nova Poshta logistics assistant specialized in managing express waybills (ТТН / чернетки) and ScanSheet Registers (Реєстри).
 
 You will receive:
 1. `current_timestamp`: The exact current date, time and day of week.
 2. `drafts`: A JSON array containing all active un-shipped waybill drafts for the user.
-3. The user's natural language request.
+3. `active_register`: (Optional) Current active ScanSheet register context with its number, ref, and list of waybills.
+4. The user's natural language request.
 
 Your task:
 1. Analyze the user's requested action:
    • "create": User explicitly wants to create / make / combine into a register (e.g. "створи реєстр", "зроби реєстр з усіх чернеток", "об'єднай у реєстр", "створи реєстр з накладної 20451506611097", "згенеруй сканшит")
+   • "remove_waybill": User wants to remove, detach or exclude a specific waybill from the register (e.g. "прибери, будь ласка, з реєстру накладну №2", "видали другу накладну з реєстру", "вилучи Кожина з реєстру", "прибери 20451531036290 з реєстру", "видали з реєстру першу накладну")
+   • "delete_register": User wants to disband, delete or cancel the register entirely (e.g. "видали цей реєстр", "розформуй реєстр", "скасуй реєстр")
    • "filter_drafts": User only wants to see, find, or list drafts matching criteria without creating a register (e.g. "покажи чернетки за вчора", "знайди накладні на Київ", "які чернетки мають опис сувенір")
    • "list_registers": User wants to view existing registers (e.g. "покажи мої реєстри")
    • "not_found": No drafts in the provided list match the requested criteria
 
-2. Select the matching waybills (`selected_doc_numbers`):
+2. If action is "remove_waybill":
+   • `target_item_index`: 1-based integer index if user refers to item by ordinal/number (e.g. 2 for "№2" or "другу", 1 for "першу", 3 for "третю", 4 for "четверту", etc.).
+   • `target_doc_number`: 14-digit waybill number if mentioned in user text or matched from `active_register`.
+   • `target_recipient`: Recipient name/surname if mentioned (e.g. "Кожин").
+   • `selected_doc_numbers`: If identified, array containing the 14-digit TTN number to remove.
+
+3. If action is "create":
+   Select the matching waybills (`selected_doc_numbers`):
    • Explicit TTN numbers: If user mentions one or more specific TTN numbers (e.g. "20451506611097"), match those exact drafts from `drafts`.
    • All drafts: If user requests all drafts ("з усіх моїх чернеток", "з усіх накладних", "з усіх", "всі чернетки", "створи реєстр") without restricting filters -> return ALL `int_doc_number` values present in `drafts`.
    • Date / Time filters: Use `current_timestamp` to evaluate relative time phrases:
@@ -123,11 +136,14 @@ Your task:
    • Recipient name / City / Branch: e.g. "у Кривий Ріг", "для Залужної", "для Юлії" -> match corresponding fields.
    • Payment / COD filters: e.g. "з наложкою", "без наложки", "на картку".
 
-3. Return ONLY valid JSON in this format:
+4. Return ONLY valid JSON in this format:
 {
-  "action": "create" | "filter_drafts" | "list_registers" | "not_found",
+  "action": "create" | "remove_waybill" | "delete_register" | "filter_drafts" | "list_registers" | "not_found",
   "selected_doc_numbers": ["20451506611097", ...],
-  "summary": "Короткий опис вибірки (наприклад: '1 накладна (Залужна Юлія, Кривий Ріг)' або '3 накладні за вчора')",
+  "target_item_index": 2,
+  "target_doc_number": "20451531036290",
+  "target_recipient": "Кожин",
+  "summary": "Короткий опис дії (наприклад: 'Вилучення накладної №2 (Кожин Олександр)' або '3 накладні за вчора')",
   "explanation": "Коротке пояснення логіки вибору українською мовою"
 }
 """
@@ -444,9 +460,12 @@ class AIExtractor:
                 return empty_res
 
     async def filter_drafts_for_register(
-        self, user_prompt: str, drafts: List[Dict[str, Any]]
+        self,
+        user_prompt: str,
+        drafts: List[Dict[str, Any]],
+        active_scansheet: Optional[Dict[str, Any]] = None,
     ) -> AIRegisterFilterResult:
-        """Evaluate active drafts against user prompt with AI to select TTNs for register creation."""
+        """Evaluate active drafts against user prompt with AI to select or remove TTNs for registers."""
         now = datetime.datetime.now()
         time_context = {
             "current_timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -455,9 +474,16 @@ class AIExtractor:
             "yesterday_date": (now - datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
         }
 
+        active_reg_block = (
+            f"Active Register (ScanSheet):\n{json.dumps(active_scansheet, ensure_ascii=False, indent=2)}\n\n"
+            if active_scansheet
+            else ""
+        )
+
         user_content = (
             f"Context:\n{json.dumps(time_context, ensure_ascii=False, indent=2)}\n\n"
             f"Active Waybill Drafts ({len(drafts)}):\n{json.dumps(drafts, ensure_ascii=False, indent=2)}\n\n"
+            f"{active_reg_block}"
             f"User Request:\n{user_prompt}"
         )
 
@@ -493,6 +519,59 @@ class AIExtractor:
                 return AIRegisterFilterResult(**data)
             except Exception as fallback_err:
                 logger.error(f"Fallback AI register filtering failed: {fallback_err}")
+                p_lower = user_prompt.lower()
+
+                # Check for delete register intent
+                if any(w in p_lower for w in ["розформу", "скасу"]) and "реєстр" in p_lower:
+                    return AIRegisterFilterResult(
+                        action="delete_register",
+                        summary="Видалення реєстру",
+                        explanation="Автоматичне розпізнавання наміру видалення реєстру",
+                    )
+                if any(w in p_lower for w in ["видал", "знищ"]) and "реєстр" in p_lower and not any(k in p_lower for k in ["накладн", "ттн"]):
+                    return AIRegisterFilterResult(
+                        action="delete_register",
+                        summary="Видалення реєстру",
+                        explanation="Автоматичне розпізнавання наміру видалення реєстру",
+                    )
+
+                # Check for remove waybill intent
+                if any(w in p_lower for w in ["прибери", "видали", "вилучи", "забери", "викинути", "прибрати"]):
+                    # Look for 14-digit TTN
+                    ttn_match = re.search(r"\b(204\d{11})\b", user_prompt)
+                    if ttn_match:
+                        return AIRegisterFilterResult(
+                            action="remove_waybill",
+                            target_doc_number=ttn_match.group(1),
+                            selected_doc_numbers=[ttn_match.group(1)],
+                            summary=f"Вилучення накладної {ttn_match.group(1)} з реєстру",
+                            explanation="Автоматичне розпізнавання номера накладної",
+                        )
+
+                    # Look for ordinal or number like №2, 2
+                    num_match = re.search(r"(?:№|номер|накладн[а-я]*\s*№?)\s*(\d+)", p_lower)
+                    target_idx = None
+                    if num_match:
+                        target_idx = int(num_match.group(1))
+                    elif "перш" in p_lower:
+                        target_idx = 1
+                    elif "друг" in p_lower:
+                        target_idx = 2
+                    elif "трет" in p_lower:
+                        target_idx = 3
+                    elif "четверт" in p_lower:
+                        target_idx = 4
+                    elif "п'ят" in p_lower or "пят" in p_lower:
+                        target_idx = 5
+
+                    if target_idx:
+                        return AIRegisterFilterResult(
+                            action="remove_waybill",
+                            target_item_index=target_idx,
+                            summary=f"Вилучення накладної №{target_idx} з реєстру",
+                            explanation="Автоматичне розпізнавання порядкового номера накладної",
+                        )
+
                 # Programmatic fallback: if user prompt mentions "всі" or "усі" or "реєстр", select all drafts
                 all_nums = [str(d.get("int_doc_number", "")) for d in drafts if d.get("int_doc_number")]
                 return AIRegisterFilterResult(

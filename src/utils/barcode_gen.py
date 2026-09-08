@@ -11,7 +11,9 @@ logger = logging.getLogger(__name__)
 def generate_code128_barcode(barcode_data: str) -> bytes:
     """Generate high-resolution PNG bytes for a Code128 barcode string."""
     try:
-        clean_data = str(barcode_data).strip()
+        clean_data = str(barcode_data or "").strip()
+        if not clean_data:
+            raise ValueError("Barcode data cannot be empty")
         rv = io.BytesIO()
         code128_cls = barcode.get_barcode_class("code128")
         code_inst = code128_cls(clean_data, writer=ImageWriter())

@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.23.1
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.23.2
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -96,3 +96,15 @@
   - [x] Додати регресійний тест `test_tracking_document_details_type_hints` у `tests/test_tracking.py` з перевіркою `typing.get_type_hints`
   - [x] Перевірити виконання всіх 64 тестів паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 13: Виправлення збою генератора штрихкоду та вилучення накладних з реєстру (ScanSheet) через AI (v0.23.2)**
+  - [x] Захистити `generate_code128_barcode` від порожніх рядків (`ValueError`)
+  - [x] Додати валідацію `Errors` та непорожнього `Number`/`Ref` у `create_scan_sheet`
+  - [x] Додати метод `remove_documents_from_scan_sheet` у `NovaPoshtaClient`
+  - [x] Оновити `AIRegisterFilterResult`, `ParsedRecipientInfo` та `REGISTER_FILTER_SYSTEM_PROMPT` діями `remove_waybill` і `delete_register`
+  - [x] Додати збереження контексту активного реєстру `USER_LAST_SCANSHEET_CONTEXT` та метод вилучення накладної з реєстру в `storage.py`
+  - [x] Реалізувати природномовне вилучення накладної (за порядковим номером №2, ТТН або прізвищем) та оновлення картки реєстру зі штрихкодом
+  - [x] Написати юніт-тести та перевірити всі тести паралельно (`pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+
