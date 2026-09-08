@@ -1071,16 +1071,37 @@ class NovaPoshtaClient:
             CountOfDocuments=cnt,
         )
 
-    async def remove_documents_from_scan_sheet(self, document_refs: List[str]) -> bool:
+    async def get_scan_sheet_documents(self, scansheet_ref: str) -> List[Dict[str, Any]]:
+        """Fetch documents in a specific ScanSheet register from Nova Poshta API."""
+        if not scansheet_ref:
+            return []
+        try:
+            res = await self._post(
+                model_name="ScanSheet",
+                called_method="getScanSheetDocuments",
+                method_properties={"Ref": scansheet_ref},
+            )
+            data = res.get("data", [])
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Failed to fetch ScanSheet documents for {scansheet_ref}: {e}")
+            return []
+
+    async def remove_documents_from_scan_sheet(
+        self, document_refs: List[str], scan_sheet_ref: Optional[str] = None
+    ) -> bool:
         """Remove specific waybill documents from a Nova Poshta ScanSheet (Register)."""
         if not document_refs:
             return True
+        method_props: Dict[str, Any] = {"DocumentRefs": document_refs}
+        if scan_sheet_ref:
+            method_props["Ref"] = scan_sheet_ref
         res = await self._post(
             model_name="ScanSheet",
             called_method="removeDocuments",
-            method_properties={"DocumentRefs": document_refs},
+            method_properties=method_props,
         )
-        return res.get("success", False)
+        return bool(res.get("success", False))
 
     async def get_scan_sheets(self, days_back: int = 2) -> List[ScanSheetInfo]:
         """Fetch list of user's active registers (ScanSheets). Defaults to past 2 days."""

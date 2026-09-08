@@ -1564,6 +1564,7 @@ def register_handlers(
             "🔍 *Отримання ваших активних реєстрів з Нової Пошти...*", parse_mode="Markdown"
         )
         try:
+            storage_manager.cleanup_invalid_scansheets(user_id)
             raw_api_sheets = await user_np_client.get_scan_sheets(days_back=2)
             raw_saved_sheets = storage_manager.get_user_scansheets(user_id)
 
@@ -1576,10 +1577,11 @@ def register_handlers(
                 storage_manager.purge_old_or_sent_scansheets(user_id, old_saved_refs)
                 raw_saved_sheets = storage_manager.get_user_scansheets(user_id)
 
-            # Filter API sheets by recent date & non-printed status
+            # Filter API sheets by recent date, non-empty number/ref & non-printed status
             recent_api_sheets = [
                 s for s in raw_api_sheets
-                if not s.is_printed and _is_recent_scansheet(s.date_created, max_days=2) and s.count_of_documents > 0
+                if s.ref and s.number and str(s.number).strip()
+                and not s.is_printed and _is_recent_scansheet(s.date_created, max_days=2) and s.count_of_documents > 0
             ]
 
             # Collect document numbers from saved sheets to check if they are all shipped
@@ -1598,10 +1600,13 @@ def register_handlers(
                 except Exception as e:
                     logger.error(f"Error checking TTN statuses for registers: {e}")
 
-            # Filter saved sheets: purge sheets where all TTNs are shipped
+            # Filter saved sheets: purge sheets where all TTNs are shipped or missing valid numbers
             recent_saved_sheets = []
             sent_saved_refs = []
             for sheet in raw_saved_sheets:
+                if not sheet.ref or not sheet.number or not str(sheet.number).strip():
+                    sent_saved_refs.append(sheet.ref)
+                    continue
                 if not _is_recent_scansheet(sheet.date_created, max_days=2):
                     sent_saved_refs.append(sheet.ref)
                     continue
@@ -1629,7 +1634,10 @@ def register_handlers(
 
             displayed_refs = set()
             for sheet in recent_saved_sheets:
+                if not sheet.ref or not sheet.number or not str(sheet.number).strip():
+                    continue
                 displayed_refs.add(sheet.ref)
+                displayed_refs.add(sheet.number)
                 card = (
                     f"📋 *Реєстр №* `{sheet.number}`\n"
                     f"📅 *Дата:* {sheet.date_created}\n"
@@ -1645,7 +1653,7 @@ def register_handlers(
                 )
 
             for a_sheet in recent_api_sheets:
-                if a_sheet.ref not in displayed_refs:
+                if a_sheet.ref not in displayed_refs and a_sheet.number not in displayed_refs:
                     card = (
                         f"📋 *Реєстр №* `{a_sheet.number}`\n"
                         f"📅 *Дата:* {a_sheet.date_created}\n"
@@ -1714,17 +1722,37 @@ def register_handlers(
                 # Prepare active register context if available
                 last_scansheet = USER_LAST_SCANSHEET_CONTEXT.get(actual_user_id)
                 if not last_scansheet:
+                    storage_manager.cleanup_invalid_scansheets(actual_user_id)
                     user_saved_sheets = storage_manager.get_user_scansheets(actual_user_id)
                     if user_saved_sheets:
                         recent = user_saved_sheets[0]
+
+                        # Fetch live documents from Nova Poshta API for exact document refs if available
+                        doc_refs_map = {}
+                        live_doc_numbers = []
+                        if recent.ref:
+                            try:
+                                api_docs = await user_np_client.get_scan_sheet_documents(recent.ref)
+                                for ad in api_docs:
+                                    n = str(ad.get("Number", "")).strip()
+                                    r = str(ad.get("Ref", "")).strip()
+                                    if n:
+                                        live_doc_numbers.append(n)
+                                        if r:
+                                            doc_refs_map[n] = r
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch live docs for scansheet {recent.ref}: {e}")
+
+                        eff_doc_numbers = live_doc_numbers if live_doc_numbers else recent.document_numbers
                         drafts_by_num = {str(d.get("int_doc_number")): d for d in active_drafts}
                         built_items = []
-                        for idx, num in enumerate(recent.document_numbers, 1):
+                        for idx, num in enumerate(eff_doc_numbers, 1):
                             d_info = drafts_by_num.get(num, {})
+                            doc_ref_val = doc_refs_map.get(num) or d_info.get("ref", num)
                             built_items.append({
                                 "index": idx,
                                 "int_doc_number": num,
-                                "ref": d_info.get("ref", num),
+                                "ref": doc_ref_val,
                                 "recipient_name": d_info.get("recipient_name", ""),
                                 "city_description": d_info.get("city_description", ""),
                                 "warehouse_description": d_info.get("warehouse_description", ""),
@@ -1736,7 +1764,7 @@ def register_handlers(
                             "ref": recent.ref,
                             "number": recent.number,
                             "date_created": recent.date_created,
-                            "count_of_documents": recent.count_of_documents,
+                            "count_of_documents": len(built_items),
                             "items": built_items,
                         }
 
@@ -1797,6 +1825,55 @@ def register_handlers(
                     return
 
                 if ai_reg_result.action == "remove_waybill":
+                    # If user specified a specific register number or ref, switch to it
+                    if ai_reg_result.register_number_or_ref:
+                        reg_q = str(ai_reg_result.register_number_or_ref).strip()
+                        user_saved_sheets = storage_manager.get_user_scansheets(actual_user_id)
+                        matched_s = next(
+                            (s for s in user_saved_sheets if s.number == reg_q or s.ref == reg_q),
+                            None
+                        )
+                        if matched_s:
+                            doc_refs_map = {}
+                            live_doc_numbers = []
+                            if matched_s.ref:
+                                try:
+                                    api_docs = await user_np_client.get_scan_sheet_documents(matched_s.ref)
+                                    for ad in api_docs:
+                                        n = str(ad.get("Number", "")).strip()
+                                        r = str(ad.get("Ref", "")).strip()
+                                        if n:
+                                            live_doc_numbers.append(n)
+                                            if r:
+                                                doc_refs_map[n] = r
+                                except Exception as e:
+                                    logger.warning(f"Failed to fetch live docs for scansheet {matched_s.ref}: {e}")
+
+                            eff_doc_numbers = live_doc_numbers if live_doc_numbers else matched_s.document_numbers
+                            drafts_by_num = {str(d.get("int_doc_number")): d for d in active_drafts}
+                            built_items = []
+                            for idx, num in enumerate(eff_doc_numbers, 1):
+                                d_info = drafts_by_num.get(num, {})
+                                doc_ref_val = doc_refs_map.get(num) or d_info.get("ref", num)
+                                built_items.append({
+                                    "index": idx,
+                                    "int_doc_number": num,
+                                    "ref": doc_ref_val,
+                                    "recipient_name": d_info.get("recipient_name", ""),
+                                    "city_description": d_info.get("city_description", ""),
+                                    "warehouse_description": d_info.get("warehouse_description", ""),
+                                    "cargo_description": d_info.get("cargo_description", ""),
+                                    "declared_value": d_info.get("declared_value", 500),
+                                    "cod_amount": d_info.get("cod_amount", 0),
+                                })
+                            last_scansheet = {
+                                "ref": matched_s.ref,
+                                "number": matched_s.number,
+                                "date_created": matched_s.date_created,
+                                "count_of_documents": len(built_items),
+                                "items": built_items,
+                            }
+
                     if not last_scansheet or not last_scansheet.get("items"):
                         await status_msg.edit_text(
                             "❌ *Не знайдено активного реєстру, з якого можна вилучити накладну.*",
@@ -1848,7 +1925,7 @@ def register_handlers(
                     # Call Nova Poshta removeDocuments API
                     remove_refs = list(set([doc_to_remove_ref, doc_to_remove_num]))
                     try:
-                        await user_np_client.remove_documents_from_scan_sheet(remove_refs)
+                        await user_np_client.remove_documents_from_scan_sheet(remove_refs, scan_sheet_ref=reg_ref)
                     except Exception as rem_err:
                         logger.warning(f"Nova Poshta removeDocuments returned error: {rem_err}")
 

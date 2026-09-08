@@ -113,7 +113,10 @@ class UserSettingsManager:
                 with open(self.scansheets_filepath, "r", encoding="utf-8") as f:
                     raw_sheets = json.load(f)
                     self.scansheets = {
-                        uid: [SavedScanSheet(**s) for s in s_list]
+                        uid: [
+                            SavedScanSheet(**s) for s in s_list
+                            if s.get("ref") and s.get("number") and str(s.get("number")).strip()
+                        ]
                         for uid, s_list in raw_sheets.items()
                     }
             except Exception as e:
@@ -284,6 +287,9 @@ class UserSettingsManager:
 
     def add_user_scansheet(self, user_id: int, scansheet: SavedScanSheet):
         """Add a created ScanSheet register to user's storage."""
+        if not scansheet.ref or not scansheet.number or not str(scansheet.number).strip():
+            logger.warning(f"Ignoring attempt to save invalid scansheet with empty ref/number: {scansheet}")
+            return
         uid_str = str(user_id)
         if uid_str not in self.scansheets:
             self.scansheets[uid_str] = []
@@ -291,8 +297,24 @@ class UserSettingsManager:
         self.save_scansheets()
 
     def get_user_scansheets(self, user_id: int) -> List[SavedScanSheet]:
-        """Get ScanSheets list for user ID."""
-        return self.scansheets.get(str(user_id), [])
+        """Get valid ScanSheets list for user ID."""
+        sheets = self.scansheets.get(str(user_id), [])
+        return [s for s in sheets if s.ref and s.number and str(s.number).strip()]
+
+    def cleanup_invalid_scansheets(self, user_id: int) -> int:
+        """Purge any saved scansheets with empty ref or number from storage."""
+        uid_str = str(user_id)
+        if uid_str not in self.scansheets:
+            return 0
+        initial_len = len(self.scansheets[uid_str])
+        self.scansheets[uid_str] = [
+            s for s in self.scansheets[uid_str]
+            if s.ref and s.number and str(s.number).strip()
+        ]
+        removed_count = initial_len - len(self.scansheets[uid_str])
+        if removed_count > 0:
+            self.save_scansheets()
+        return removed_count
 
     def delete_user_scansheet(self, user_id: int, ref: str) -> bool:
         """Delete a ScanSheet by Ref GUID for user ID."""

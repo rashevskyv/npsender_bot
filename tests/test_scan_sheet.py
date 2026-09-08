@@ -636,10 +636,11 @@ async def test_handle_text_remove_waybill_from_register(tmp_path):
 
         await router._handle_combined_text_message(mock_msg, "Прибери, будь ласка, з реєстру накладну №2.", user_id=888)
 
-        # Verify remove_documents_from_scan_sheet called with 20451531036290
+        # Verify remove_documents_from_scan_sheet called with 20451531036290 and scan_sheet_ref
         mock_remove_docs.assert_called_once()
         rem_call_args = mock_remove_docs.call_args[0][0]
         assert "20451531036290" in rem_call_args or "ref-2" in rem_call_args
+        assert mock_remove_docs.call_args.kwargs.get("scan_sheet_ref") == "sheet-ref-123"
 
     # Verify storage updated
     saved_after = manager.get_user_scansheets(888)
@@ -656,6 +657,132 @@ async def test_handle_text_remove_waybill_from_register(tmp_path):
     assert "2" in photo_caption
     assert "20451531219131" in photo_caption
     assert "20451531340827" in photo_caption
+
+
+def test_storage_scansheet_validation_and_cleanup(tmp_path):
+    import os
+    import json
+    from src.storage import UserSettingsManager, SavedScanSheet
+
+    scansheets_file = os.path.join(tmp_path, "user_scansheets.json")
+    # Prepopulate with 1 corrupt entry (empty ref/number) and 1 valid entry
+    with open(scansheets_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "999": [
+                {"ref": "", "number": "", "date_created": "2026-09-08 19:14:38", "count_of_documents": 1, "document_numbers": ["20451531219131"]},
+                {"ref": "reg-valid-1", "number": "105-80149920", "date_created": "2026-09-08 19:13:47", "count_of_documents": 3, "document_numbers": ["20451531219131", "20451531036290", "20451531340827"]}
+            ]
+        }, f)
+
+    manager = UserSettingsManager(
+        filepath=os.path.join(tmp_path, "s.json"),
+        drafts_filepath=os.path.join(tmp_path, "d.json"),
+        scansheets_filepath=scansheets_file,
+    )
+
+    # Corrupt entry should be filtered out on load
+    sheets = manager.get_user_scansheets(999)
+    assert len(sheets) == 1
+    assert sheets[0].number == "105-80149920"
+
+    # Attempting to add invalid scansheet should be ignored
+    manager.add_user_scansheet(999, SavedScanSheet(ref="", number="", date_created="now", count_of_documents=0))
+    sheets_after_add = manager.get_user_scansheets(999)
+    assert len(sheets_after_add) == 1
+
+
+@pytest.mark.asyncio
+async def test_remove_waybill_recovers_from_storage_when_context_empty(tmp_path):
+    """Test that when USER_LAST_SCANSHEET_CONTEXT is empty, bot recovers from valid storage register and removes item #2."""
+    import os
+    from src.storage import UserSettingsManager, SavedScanSheet
+    from src.bot.handlers import register_handlers, router, USER_LAST_SCANSHEET_CONTEXT
+    from src.config import Settings
+    from src.ai.schemas import ParsedRecipientInfo, AIRegisterFilterResult
+    from unittest.mock import patch, AsyncMock, MagicMock
+
+    USER_LAST_SCANSHEET_CONTEXT.clear()
+
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    drafts_file = os.path.join(tmp_path, "user_drafts.json")
+    scansheets_file = os.path.join(tmp_path, "user_scansheets.json")
+    manager = UserSettingsManager(
+        filepath=storage_file,
+        drafts_filepath=drafts_file,
+        scansheets_filepath=scansheets_file,
+    )
+
+    # Add valid register with 3 documents
+    valid_sheet = SavedScanSheet(
+        ref="reg-ref-xyz",
+        number="105-80149920",
+        date_created="2026-09-08 19:13:47",
+        count_of_documents=3,
+        document_numbers=["20451531219131", "20451531036290", "20451531340827"],
+    )
+    manager.update_user_settings(777, nova_poshta_api_key="np_key_777", ai_api_key="ai_key_777")
+    manager.add_user_scansheet(777, valid_sheet)
+
+    with patch("src.ai.extractor.AIExtractor.parse_text", new_callable=AsyncMock) as mock_parse_text, \
+         patch("src.ai.extractor.AIExtractor.filter_drafts_for_register", new_callable=AsyncMock) as mock_filter_drafts, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.remove_documents_from_scan_sheet", new_callable=AsyncMock) as mock_remove_docs, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_internet_document_list", new_callable=AsyncMock) as mock_get_docs, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_scan_sheet_documents", new_callable=AsyncMock) as mock_get_ss_docs:
+
+        mock_parse_text.return_value = ParsedRecipientInfo(
+            is_recipient_info=False,
+            is_register_intent=True,
+            register_action="remove_waybill",
+        )
+        mock_filter_drafts.return_value = AIRegisterFilterResult(
+            action="remove_waybill",
+            target_item_index=2,
+        )
+        mock_remove_docs.return_value = True
+        mock_get_docs.return_value = []
+        mock_get_ss_docs.return_value = [
+            {"Number": "20451531219131", "Ref": "doc-guid-1"},
+            {"Number": "20451531036290", "Ref": "doc-guid-2"},
+            {"Number": "20451531340827", "Ref": "doc-guid-3"},
+        ]
+
+        settings = Settings(
+            TELEGRAM_BOT_TOKEN="dummy",
+            SENDER_REF="sender_ref_test",
+            SENDER_CONTACT_REF="contact_ref_test",
+            SENDER_PHONE="380991234567",
+        )
+        register_handlers(settings, MagicMock(), MagicMock(), manager)
+
+        mock_msg = MagicMock()
+        mock_msg.from_user.id = 777
+        mock_status = MagicMock()
+        mock_status.edit_text = AsyncMock()
+        mock_status.delete = AsyncMock()
+        mock_msg.answer = AsyncMock(return_value=mock_status)
+        mock_msg.answer_photo = AsyncMock()
+
+        await router._handle_combined_text_message(mock_msg, "Прибери, будь ласка, з реєстру накладну №2.", user_id=777)
+
+        # Verify remove_documents_from_scan_sheet called with 2nd document ("20451531036290" / "doc-guid-2") and scan_sheet_ref="reg-ref-xyz"
+        mock_remove_docs.assert_called_once()
+        rem_args = mock_remove_docs.call_args[0][0]
+        assert "20451531036290" in rem_args or "doc-guid-2" in rem_args
+        assert mock_remove_docs.call_args.kwargs.get("scan_sheet_ref") == "reg-ref-xyz"
+
+        # Verify storage updated: 3 -> 2 documents, 20451531036290 removed
+        saved = manager.get_user_scansheets(777)
+        assert len(saved) == 1
+        assert saved[0].count_of_documents == 2
+        assert saved[0].document_numbers == ["20451531219131", "20451531340827"]
+
+        # Verify answer_photo sent with 2 remaining waybills
+        mock_msg.answer_photo.assert_called_once()
+        cap = mock_msg.answer_photo.call_args.kwargs["caption"]
+        assert "Залишилось накладних:* 2" in cap
+        assert "20451531219131" in cap
+        assert "20451531340827" in cap
+        assert "20451531036290" in cap  # mentioned as removed
 
 
 
