@@ -242,6 +242,7 @@ async def fetch_user_active_drafts(
             "cost": d.cost,
             "created_at": d.created_at,
             "is_light_return": is_lr,
+            "scan_sheet_number": getattr(d, "scan_sheet_number", None),
         }
 
     for live_item in np_live_drafts:
@@ -255,6 +256,8 @@ async def fetch_user_active_drafts(
             or (st.get("is_light_return", False) if st else False)
             or "легке повернення" in (live_item.description or "").lower()
         )
+
+        live_ss_num = getattr(live_item, "scan_sheet_number", None)
 
         if doc_num not in combined_drafts_map:
             combined_drafts_map[doc_num] = {
@@ -272,7 +275,10 @@ async def fetch_user_active_drafts(
                 "cost": live_item.cost,
                 "created_at": live_item.date_created or "Нещодавно",
                 "is_light_return": is_lr,
+                "scan_sheet_number": live_ss_num,
             }
+        else:
+            combined_drafts_map[doc_num]["scan_sheet_number"] = live_ss_num
 
     return list(combined_drafts_map.values())
 
@@ -1632,16 +1638,22 @@ def register_handlers(
             await status_msg.delete()
             await message.answer("📋 *Ваші активні реєстри (ScanSheet) за 2 дні:*", parse_mode="Markdown")
 
+            # Map live API sheets by ref and number to synchronize counts
+            api_sheet_map = {s.ref: s for s in raw_api_sheets if s.ref}
+            api_sheet_map.update({s.number: s for s in raw_api_sheets if s.number})
+
             displayed_refs = set()
             for sheet in recent_saved_sheets:
                 if not sheet.ref or not sheet.number or not str(sheet.number).strip():
                     continue
                 displayed_refs.add(sheet.ref)
                 displayed_refs.add(sheet.number)
+                api_s = api_sheet_map.get(sheet.ref) or api_sheet_map.get(sheet.number)
+                eff_count = api_s.count_of_documents if api_s else sheet.count_of_documents
                 card = (
                     f"📋 *Реєстр №* `{sheet.number}`\n"
                     f"📅 *Дата:* {sheet.date_created}\n"
-                    f"📦 *Кількість накладних:* {sheet.count_of_documents}\n"
+                    f"📦 *Кількість накладних:* {eff_count}\n"
                 )
                 if sheet.document_numbers:
                     card += f"📄 *ТТН у реєстрі:* {', '.join(sheet.document_numbers)}\n"
@@ -2032,18 +2044,32 @@ def register_handlers(
                         )
                         return
 
+                    # Filter matched_drafts to only those that actually succeeded in Nova Poshta API
+                    success_set = set(str(s).strip() for s in scansheet_info.success_documents)
+                    truly_added_drafts = [
+                        d for d in matched_drafts
+                        if str(d.get("int_doc_number", "")).strip() in success_set or str(d.get("ref", "")).strip() in success_set
+                    ]
+                    if not truly_added_drafts and matched_drafts:
+                        truly_added_drafts = matched_drafts
+
+                    actual_doc_nums = [d["int_doc_number"] for d in truly_added_drafts]
+
                     saved_scansheet = SavedScanSheet(
                         ref=scansheet_info.ref,
                         number=scansheet_info.number,
                         date_created=scansheet_info.date_created,
                         count_of_documents=scansheet_info.count_of_documents,
-                        document_numbers=doc_nums,
+                        document_numbers=actual_doc_nums,
                     )
                     storage_manager.add_user_scansheet(actual_user_id, saved_scansheet)
+                    storage_manager.update_drafts_scansheet(
+                        actual_user_id, actual_doc_nums, scansheet_info.number
+                    )
 
                     # Update context for follow-up actions (like removal of waybills)
                     scansheet_items = []
-                    for idx, d in enumerate(matched_drafts, 1):
+                    for idx, d in enumerate(truly_added_drafts, 1):
                         scansheet_items.append({
                             "index": idx,
                             "int_doc_number": str(d.get("int_doc_number")),
@@ -2065,7 +2091,7 @@ def register_handlers(
 
                     # Construct detailed list of included TTNs
                     details_lines = []
-                    for idx, d in enumerate(matched_drafts, 1):
+                    for idx, d in enumerate(truly_added_drafts, 1):
                         cod_str = f" | 💵 Наложка: {int(d.get('cod_amount', 0))} грн" if d.get("cod_amount") else ""
                         line = (
                             f"*{idx}. ТТН:* `{d['int_doc_number']}` | {d['recipient_name']}\n"
@@ -2074,6 +2100,22 @@ def register_handlers(
                         )
                         details_lines.append(line)
                     details_block = "\n\n".join(details_lines)
+
+                    # Warnings for rejected / skipped documents
+                    rejected_block = ""
+                    if scansheet_info.error_documents:
+                        rejected_lines = []
+                        for item in scansheet_info.error_documents:
+                            num = item.get("number") or item.get("ref") or ""
+                            err_txt = item.get("error") or "Не вдалося додати"
+                            ss_num = item.get("scansheet_number")
+                            ss_info = f" (вже у реєстрі `{ss_num}`)" if ss_num else ""
+                            if num:
+                                rejected_lines.append(f"• `{num}`: {err_txt}{ss_info}")
+                            elif err_txt:
+                                rejected_lines.append(f"• {err_txt}")
+                        if rejected_lines:
+                            rejected_block = "\n\n⚠️ *Не додано до цього реєстру:*\n" + "\n".join(rejected_lines)
 
                     try:
                         await status_msg.delete()
@@ -2085,7 +2127,7 @@ def register_handlers(
                         f"📋 *Номер реєстру:* `{scansheet_info.number}`\n"
                         f"📅 *Дата створення:* {scansheet_info.date_created}\n"
                         f"📦 *Кількість накладних:* {scansheet_info.count_of_documents}\n\n"
-                        f"📄 *Накладні у реєстрі:*\n{details_block}\n\n"
+                        f"📄 *Накладні у реєстрі:*\n{details_block}{rejected_block}\n\n"
                         "📱 *Покажіть цей штрихкод оператору Нової Пошти для сканування!*"
                     )
 

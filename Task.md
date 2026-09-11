@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.23.4
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.23.5
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -122,6 +122,18 @@
   - [x] Покращити ранжування знайдених вулиць з урахуванням точного збігу та входження підрядка
   - [x] Передавати `settlement_ref` та `city_name` у виклики `search_street` у `src/bot/handlers.py`
   - [x] Додати юніт-тести в `tests/test_nova_poshta.py` та `tests/test_address_delivery.py` (76 passed)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 16: Виправлення розбіжності кількості накладних у створеному реєстрі (ScanSheet) та фільтрація вже зареєстрованих чернеток (v0.23.5)**
+  - [x] Розширити `ScanSheetInfo` полями `success_documents`, `error_documents` та увімкнути `populate_by_name` (`src/nova_poshta/models.py`)
+  - [x] Додати поле `scan_sheet_number` до `WaybillItemInfo` та `SavedDraft` (`src/nova_poshta/models.py`, `src/storage.py`)
+  - [x] Реалізувати метод `update_drafts_scansheet` у `UserSettingsManager` (`src/storage.py`)
+  - [x] Реалізувати точний парсинг `Data.Success`, `Data.Errors`, `Data.Warnings` у `create_scan_sheet` (`src/nova_poshta/client.py`)
+  - [x] Зчитувати `ScanSheetNumber` для кожної чернетки у `get_internet_document_list` (`src/nova_poshta/client.py`)
+  - [x] Навчити системний промпт AI `REGISTER_FILTER_SYSTEM_PROMPT` відфільтровувати вже зареєстровані чернетки (`src/ai/extractor.py`)
+  - [x] Зберігати у новому реєстрі та контексті Telegram-бота виключно фактично додані накладні, з відображенням попередження про відхилені ТТН (`src/bot/handlers.py`)
+  - [x] Синхронізувати кількість накладних у `cmd_registers` з live API Нової Пошти
+  - [x] Написати юніт-тести та перевірити всі 81 тест паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
 
 

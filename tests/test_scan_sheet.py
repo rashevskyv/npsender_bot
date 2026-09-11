@@ -785,5 +785,335 @@ async def test_remove_waybill_recovers_from_storage_when_context_empty(tmp_path)
         assert "20451531036290" in cap  # mentioned as removed
 
 
+@pytest.mark.asyncio
+async def test_scan_sheet_info_populated_by_name_and_lists():
+    info = ScanSheetInfo(
+        Ref="ref-123",
+        Number="105-80150900",
+        DateTime="2026-09-08 19:52:45",
+        CountOfDocuments=1,
+        success_documents=["20451531340827"],
+        error_documents=[{
+            "number": "20451531036290",
+            "error": "Документ уже знаходиться у реєстрі",
+            "scansheet_number": "105-80149920",
+        }],
+    )
+    assert info.ref == "ref-123"
+    assert info.number == "105-80150900"
+    assert info.count_of_documents == 1
+    assert info.success_documents == ["20451531340827"]
+    assert len(info.error_documents) == 1
+    assert info.error_documents[0]["scansheet_number"] == "105-80149920"
+
+    # Also test instantiation with field names (ref, number) thanks to ConfigDict(populate_by_name=True)
+    info2 = ScanSheetInfo(
+        ref="ref-456",
+        number="105-99999999",
+        count_of_documents=2,
+    )
+    assert info2.ref == "ref-456"
+    assert info2.number == "105-99999999"
+    assert info2.count_of_documents == 2
+
+
+@pytest.mark.asyncio
+async def test_create_scan_sheet_client_partial_success_with_warnings():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+    from unittest.mock import patch, AsyncMock
+
+    settings = Settings(
+        TELEGRAM_BOT_TOKEN="dummy",
+        NOVA_POSHTA_API_KEY="test_np_key",
+    )
+    client = NovaPoshtaClient(settings)
+
+    mock_post_res = {
+        "success": True,
+        "data": [
+            {
+                "Ref": "new-scansheet-ref",
+                "Number": "105-80150900",
+                "DateTime": "2026-09-08 19:52:45",
+                "Errors": [],
+                "Success": [],
+                "Warnings": [],
+                "Data": {
+                    "Success": [
+                        {"Ref": "doc-ref-1", "Number": "20451531340827"}
+                    ],
+                    "Errors": [],
+                    "Warnings": [
+                        {
+                            "Ref": "doc-ref-2",
+                            "Number": "20451531036290",
+                            "Warning": "Документ уже знаходиться у реєстрі",
+                            "ScanSheetNumber": "105-80149920",
+                        }
+                    ],
+                },
+            }
+        ],
+        "errors": [],
+    }
+
+    with patch.object(client, "_post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_post_res
+
+        res = await client.create_scan_sheet(["doc-ref-1", "doc-ref-2"])
+        assert res.ref == "new-scansheet-ref"
+        assert res.number == "105-80150900"
+        # Crucial check: count must be 1, NOT 2!
+        assert res.count_of_documents == 1
+        assert res.success_documents == ["20451531340827"]
+        assert len(res.error_documents) == 1
+        assert res.error_documents[0]["number"] == "20451531036290"
+        assert res.error_documents[0]["scansheet_number"] == "105-80149920"
+
+
+@pytest.mark.asyncio
+async def test_create_scan_sheet_client_complete_failure_raises_informative_error():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+    from unittest.mock import patch, AsyncMock
+
+    settings = Settings(
+        TELEGRAM_BOT_TOKEN="dummy",
+        NOVA_POSHTA_API_KEY="test_np_key",
+    )
+    client = NovaPoshtaClient(settings)
+
+    mock_post_res = {
+        "success": True,
+        "data": [
+            {
+                "Ref": "",
+                "Number": "",
+                "DateTime": "2026-09-08 19:52:45",
+                "Errors": [],
+                "Success": [],
+                "Warnings": [],
+                "Data": {
+                    "Success": [],
+                    "Errors": [],
+                    "Warnings": [
+                        {
+                            "Ref": "doc-ref-1",
+                            "Number": "20451531340827",
+                            "Warning": "Документ уже знаходиться у реєстрі",
+                            "ScanSheetNumber": "105-80150900",
+                        }
+                    ],
+                },
+            }
+        ],
+        "errors": [],
+    }
+
+    with patch.object(client, "_post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_post_res
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await client.create_scan_sheet(["doc-ref-1"])
+
+        err_msg = str(exc_info.value)
+        assert "20451531340827" in err_msg
+        assert "105-80150900" in err_msg
+        assert "знаходиться у реєстрі" in err_msg
+
+
+@pytest.mark.asyncio
+async def test_handler_create_scansheet_partial_success_shows_correct_count_and_warnings(tmp_path):
+    import os
+    from src.bot.handlers import register_handlers, router, USER_LAST_SCANSHEET_CONTEXT
+    from src.storage import UserSettingsManager, SavedDraft
+    from src.config import Settings
+    from src.ai.schemas import ParsedRecipientInfo, AIRegisterFilterResult
+    from src.nova_poshta.models import ScanSheetInfo
+    from unittest.mock import patch, AsyncMock, MagicMock
+
+    USER_LAST_SCANSHEET_CONTEXT.clear()
+
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    drafts_file = os.path.join(tmp_path, "user_drafts.json")
+    scansheets_file = os.path.join(tmp_path, "user_scansheets.json")
+    manager = UserSettingsManager(
+        filepath=storage_file,
+        drafts_filepath=drafts_file,
+        scansheets_filepath=scansheets_file,
+    )
+
+    manager.update_user_settings(888, nova_poshta_api_key="np_key_888", ai_api_key="ai_key_888")
+
+    # Add 2 drafts in storage
+    d1 = SavedDraft(
+        ref="ref-ttn-1",
+        int_doc_number="20451531340827",
+        recipient_name="Верич Костянтин",
+        recipient_phone="380991111111",
+        city_description="Київ",
+        warehouse_description="Відділення №1",
+        payer_type="Recipient",
+        cargo_description="сувенір",
+        declared_value=500.0,
+        cost=80.0,
+        created_at="2026-09-08 17:43:37",
+    )
+    d2 = SavedDraft(
+        ref="ref-ttn-2",
+        int_doc_number="20451531036290",
+        recipient_name="Кожин Олександр",
+        recipient_phone="380992222222",
+        city_description="Львів",
+        warehouse_description="Відділення №5",
+        payer_type="Recipient",
+        cargo_description="документи",
+        declared_value=300.0,
+        cost=60.0,
+        created_at="2026-09-08 14:29:50",
+    )
+    manager.add_user_draft(888, d1)
+    manager.add_user_draft(888, d2)
+
+    settings = Settings(
+        TELEGRAM_BOT_TOKEN="dummy",
+        SENDER_REF="sender_ref_test",
+        SENDER_CONTACT_REF="contact_ref_test",
+        SENDER_PHONE="380991234567",
+    )
+    register_handlers(settings, MagicMock(), MagicMock(), manager)
+
+    with patch("src.ai.extractor.AIExtractor.parse_text", new_callable=AsyncMock) as mock_parse_text, \
+         patch("src.ai.extractor.AIExtractor.filter_drafts_for_register", new_callable=AsyncMock) as mock_filter_drafts, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.create_scan_sheet", new_callable=AsyncMock) as mock_create_ss, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_internet_document_list", new_callable=AsyncMock) as mock_get_docs, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_documents_status", new_callable=AsyncMock) as mock_get_statuses:
+
+        mock_parse_text.return_value = ParsedRecipientInfo(
+            is_recipient_info=False,
+            is_register_intent=True,
+            register_action="create",
+        )
+        mock_filter_drafts.return_value = AIRegisterFilterResult(
+            action="create",
+            selected_doc_numbers=["20451531340827", "20451531036290"],
+            summary="2 накладних",
+        )
+        # Simulate partial success from API: only 20451531340827 was added; 20451531036290 was rejected (already in 105-80149920)
+        mock_create_ss.return_value = ScanSheetInfo(
+            Ref="new-reg-ref-888",
+            Number="105-80150900",
+            DateTime="2026-09-08 19:52:45",
+            CountOfDocuments=1,
+            success_documents=["20451531340827"],
+            error_documents=[{
+                "number": "20451531036290",
+                "error": "Документ уже знаходиться у реєстрі",
+                "scansheet_number": "105-80149920",
+            }],
+        )
+        mock_get_docs.return_value = []
+        mock_get_statuses.return_value = {
+            "20451531340827": {"is_draft": True},
+            "20451531036290": {"is_draft": True},
+        }
+
+        mock_msg = MagicMock()
+        mock_msg.from_user.id = 888
+        mock_status = MagicMock()
+        mock_status.edit_text = AsyncMock()
+        mock_status.delete = AsyncMock()
+        mock_msg.answer = AsyncMock(return_value=mock_status)
+        mock_msg.answer_photo = AsyncMock()
+
+        await router._handle_combined_text_message(mock_msg, "Створи реєстр з усіх чернеток.", user_id=888)
+
+        # Verify saved scansheet has count=1 and only the succeeded doc
+        saved_sheets = manager.get_user_scansheets(888)
+        assert len(saved_sheets) == 1
+        assert saved_sheets[0].number == "105-80150900"
+        assert saved_sheets[0].count_of_documents == 1
+        assert saved_sheets[0].document_numbers == ["20451531340827"]
+
+        # Verify USER_LAST_SCANSHEET_CONTEXT has count=1 and 1 item
+        ctx = USER_LAST_SCANSHEET_CONTEXT.get(888)
+        assert ctx is not None
+        assert ctx["count_of_documents"] == 1
+        assert len(ctx["items"]) == 1
+        assert ctx["items"][0]["int_doc_number"] == "20451531340827"
+
+        # Verify draft was updated with scansheet number in storage
+        user_drafts = manager.get_user_drafts(888)
+        d1_updated = next(d for d in user_drafts if d.int_doc_number == "20451531340827")
+        assert d1_updated.scan_sheet_number == "105-80150900"
+
+        # Verify message photo caption
+        mock_msg.answer_photo.assert_called_once()
+        caption = mock_msg.answer_photo.call_args.kwargs["caption"]
+        assert "Кількість накладних:* 1" in caption
+        assert "20451531340827" in caption
+        assert "Не додано до цього реєстру:" in caption
+        assert "20451531036290" in caption
+        assert "105-80149920" in caption
+
+
+@pytest.mark.asyncio
+async def test_fetch_user_active_drafts_propagates_scan_sheet_number(tmp_path):
+    import os
+    from src.bot.handlers import fetch_user_active_drafts
+    from src.storage import UserSettingsManager
+    from src.nova_poshta.client import NovaPoshtaClient
+    from src.nova_poshta.models import WaybillItemInfo
+    from unittest.mock import AsyncMock, MagicMock
+
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    drafts_file = os.path.join(tmp_path, "user_drafts.json")
+    scansheets_file = os.path.join(tmp_path, "user_scansheets.json")
+    manager = UserSettingsManager(
+        filepath=storage_file,
+        drafts_filepath=drafts_file,
+        scansheets_filepath=scansheets_file,
+    )
+
+    mock_client = MagicMock(spec=NovaPoshtaClient)
+    mock_client.get_internet_document_list = AsyncMock(return_value=[
+        WaybillItemInfo(
+            int_doc_number="20451531340827",
+            ref="ref1",
+            state_name="Чернетка",
+            recipient_name="Верич К.",
+            city_recipient="Київ",
+            address_recipient="Відділення 1",
+            cost=80.0,
+            description="Посилка",
+            scan_sheet_number="105-80150900",
+        ),
+        WaybillItemInfo(
+            int_doc_number="20451532860941",
+            ref="ref2",
+            state_name="Чернетка",
+            recipient_name="Даниленко В.",
+            city_recipient="Львів",
+            address_recipient="Відділення 2",
+            cost=90.0,
+            description="Посилка",
+            scan_sheet_number=None,
+        )
+    ])
+    mock_client.get_documents_status = AsyncMock(return_value={
+        "20451531340827": {"is_draft": True},
+        "20451532860941": {"is_draft": True},
+    })
+
+    drafts = await fetch_user_active_drafts(999, mock_client, manager)
+    assert len(drafts) == 2
+    d1 = next(d for d in drafts if d["int_doc_number"] == "20451531340827")
+    d2 = next(d for d in drafts if d["int_doc_number"] == "20451532860941")
+    assert d1["scan_sheet_number"] == "105-80150900"
+    assert d2["scan_sheet_number"] is None
+
+
+
 
 

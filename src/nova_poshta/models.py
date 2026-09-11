@@ -1,7 +1,7 @@
 """Pydantic data models for Nova Poshta API responses and requests."""
 
 from typing import Optional, List, Any, Dict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class CityInfo(BaseModel):
@@ -79,16 +79,21 @@ class WaybillItemInfo(BaseModel):
     estimated_delivery_date: Optional[str] = None
     date_created: Optional[str] = None
     is_light_return: bool = False
+    scan_sheet_number: Optional[str] = None
 
 
 class ScanSheetInfo(BaseModel):
     """Nova Poshta ScanSheet (Register) entity."""
+
+    model_config = ConfigDict(populate_by_name=True)
 
     ref: str = Field(..., alias="Ref")
     number: str = Field(..., alias="Number")
     date_created: str = Field(default="", alias="DateTime")
     count_of_documents: int = Field(default=0, alias="CountOfDocuments")
     is_printed: bool = Field(default=False)
+    success_documents: List[str] = Field(default_factory=list)
+    error_documents: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class StreetInfo(BaseModel):

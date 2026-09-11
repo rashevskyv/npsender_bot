@@ -104,7 +104,7 @@ REGISTER_FILTER_SYSTEM_PROMPT = """You are an intelligent Nova Poshta logistics 
 
 You will receive:
 1. `current_timestamp`: The exact current date, time and day of week.
-2. `drafts`: A JSON array containing all active un-shipped waybill drafts for the user.
+2. `drafts`: A JSON array containing all active un-shipped waybill drafts for the user. Each draft contains fields: `int_doc_number`, `recipient_name`, `city_description`, `warehouse_description`, `cargo_description`, `declared_value`, `cod_amount`, `created_at`, and `scan_sheet_number` (string or null, indicates if this draft is already in an existing register).
 3. `active_register`: (Optional) Current active ScanSheet register context with its number, ref, and list of waybills.
 4. The user's natural language request.
 
@@ -126,7 +126,8 @@ Your task:
 3. If action is "create":
    Select the matching waybills (`selected_doc_numbers`):
    • Explicit TTN numbers: If user mentions one or more specific TTN numbers (e.g. "20451506611097"), match those exact drafts from `drafts`.
-   • All drafts: If user requests all drafts ("з усіх моїх чернеток", "з усіх накладних", "з усіх", "всі чернетки", "створи реєстр") without restricting filters -> return ALL `int_doc_number` values present in `drafts`.
+   • Unregistered drafts filter: A waybill cannot belong to two registers. For general requests ("з усіх чернеток", "з усіх накладних", "створи реєстр", "за сьогодні", "всі чернетки"), select ONLY drafts where `scan_sheet_number` is null/empty/None. Do NOT include drafts that are already in another register.
+   • All drafts: If user requests all drafts ("з усіх моїх чернеток", "з усіх накладних", "з усіх", "всі чернетки", "створи реєстр") without restricting filters -> return all un-registered `int_doc_number` values present in `drafts`.
    • Date / Time filters: Use `current_timestamp` to evaluate relative time phrases:
      - "сьогодні" (today) -> drafts where `created_at` date matches current date.
      - "вчора" (yesterday) -> drafts where `created_at` date matches yesterday's date.

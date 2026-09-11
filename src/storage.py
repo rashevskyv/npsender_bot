@@ -54,6 +54,7 @@ class SavedDraft(BaseModel):
     cost: float
     created_at: str
     is_light_return: bool = False
+    scan_sheet_number: Optional[str] = None
 
 
 class SavedScanSheet(BaseModel):
@@ -284,6 +285,23 @@ class UserSettingsManager:
         if removed_count > 0:
             self.save_drafts()
         return removed_count
+
+    def update_drafts_scansheet(
+        self, user_id: int, doc_numbers: List[str], scansheet_number: Optional[str]
+    ) -> int:
+        """Update scan_sheet_number on user drafts matching given doc_numbers or refs."""
+        uid_str = str(user_id)
+        if uid_str not in self.drafts or not doc_numbers:
+            return 0
+        target_set = set(str(n).strip() for n in doc_numbers)
+        updated = 0
+        for d in self.drafts[uid_str]:
+            if d.int_doc_number in target_set or d.ref in target_set:
+                d.scan_sheet_number = scansheet_number
+                updated += 1
+        if updated > 0:
+            self.save_drafts()
+        return updated
 
     def add_user_scansheet(self, user_id: int, scansheet: SavedScanSheet):
         """Add a created ScanSheet register to user's storage."""

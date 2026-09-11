@@ -1037,6 +1037,7 @@ class NovaPoshtaClient:
                     estimated_delivery_date=doc.get("EstimatedDeliveryDate"),
                     date_created=doc.get("DateTime"),
                     is_light_return=check_is_light_return(doc),
+                    scan_sheet_number=str(doc.get("ScanSheetNumber") or doc.get("ScanSheet") or "").strip() or None,
                 )
             )
         return items
@@ -1136,49 +1137,91 @@ class NovaPoshtaClient:
         )
         data = res.get("data", [])
         if not data:
-            raise RuntimeError("ScanSheet/insertDocuments returned empty data array")
+            res_errors = res.get("errors", [])
+            err_msg = "; ".join([str(e) for e in res_errors]) if res_errors else "ScanSheet/insertDocuments returned empty data array"
+            raise RuntimeError(f"Помилка створення реєстру: {err_msg}")
 
         info = data[0]
         ref_val = str(info.get("Ref", "") or "").strip()
         num_val = str(info.get("Number", "") or "").strip()
+        data_block = info.get("Data") if isinstance(info.get("Data"), dict) else {}
 
-        # Check for errors returned inside info or res
-        errors_in_info = info.get("Errors", [])
-        if not ref_val or not num_val or errors_in_info:
+        # 1. Parse successful documents from Data.Success or info.Success
+        raw_success = data_block.get("Success", []) or info.get("Success", [])
+        success_docs: List[str] = []
+        if isinstance(raw_success, list):
+            for item in raw_success:
+                if isinstance(item, dict):
+                    doc_id = str(item.get("Number") or item.get("Ref") or "").strip()
+                    if doc_id:
+                        success_docs.append(doc_id)
+                elif item:
+                    success_docs.append(str(item).strip())
+
+        # 2. Parse errors and warnings from Data.Errors, Data.Warnings, info.Errors, info.Warnings
+        raw_errors = data_block.get("Errors", []) or info.get("Errors", [])
+        raw_warnings = data_block.get("Warnings", []) or info.get("Warnings", [])
+
+        error_items: List[Dict[str, Any]] = []
+        if isinstance(raw_errors, list):
+            for e in raw_errors:
+                if isinstance(e, dict):
+                    error_items.append({
+                        "ref": str(e.get("Ref", "")),
+                        "number": str(e.get("Number", "")),
+                        "error": str(e.get("Error", "Помилка додавання")),
+                        "scansheet_number": str(e.get("ScanSheetNumber", "")),
+                    })
+                elif e:
+                    error_items.append({"ref": "", "number": "", "error": str(e), "scansheet_number": ""})
+        elif isinstance(raw_errors, str) and raw_errors:
+            error_items.append({"ref": "", "number": "", "error": raw_errors, "scansheet_number": ""})
+
+        if isinstance(raw_warnings, list):
+            for w in raw_warnings:
+                if isinstance(w, dict):
+                    error_items.append({
+                        "ref": str(w.get("Ref", "")),
+                        "number": str(w.get("Number", "")),
+                        "error": str(w.get("Warning", "Зауваження при додаванні")),
+                        "scansheet_number": str(w.get("ScanSheetNumber", "")),
+                    })
+                elif w:
+                    error_items.append({"ref": "", "number": "", "error": str(w), "scansheet_number": ""})
+
+        raw_cnt = info.get("CountOfDocuments")
+        if not success_docs and raw_cnt:
+            try:
+                cnt = int(raw_cnt)
+            except (ValueError, TypeError):
+                cnt = len(document_refs)
+            success_docs = [str(r) for r in document_refs]
+        else:
+            cnt = len(success_docs)
+
+        # 3. If no register was returned or NO documents were successfully added, raise an explicit error
+        if not ref_val or not num_val or (cnt == 0 and len(document_refs) > 0):
             err_parts = []
-            if isinstance(errors_in_info, list):
-                for e in errors_in_info:
-                    if isinstance(e, dict):
-                        err_parts.append(f"{e.get('Number', '')}: {e.get('Error', '')}")
-                    else:
-                        err_parts.append(str(e))
-            elif isinstance(errors_in_info, str):
-                err_parts.append(errors_in_info)
+            for item in error_items:
+                prefix = f"ТТН {item['number']}: " if item['number'] else ""
+                suffix = f" (вже у реєстрі {item['scansheet_number']})" if item['scansheet_number'] else ""
+                err_parts.append(f"{prefix}{item['error']}{suffix}")
 
-            res_errors = res.get("errors", [])
-            if res_errors:
-                err_parts.extend([str(e) for e in res_errors])
+            top_errors = res.get("errors", [])
+            if top_errors:
+                err_parts.extend([str(e) for e in top_errors])
 
-            if not ref_val or not num_val:
-                combined_err = "; ".join([p for p in err_parts if p]) or "Нова Пошта не повернула номер реєстру (можливо, накладні вже додано до іншого реєстру)."
-                logger.error(f"Failed to create scan sheet: {combined_err}")
-                raise RuntimeError(f"Помилка створення реєстру: {combined_err}")
-
-        raw_cnt = (
-            info.get("CountOfDocuments")
-            or len(info.get("Success", []))
-            or len(document_refs)
-        )
-        try:
-            cnt = int(raw_cnt)
-        except (ValueError, TypeError):
-            cnt = len(document_refs)
+            combined_err = "; ".join([p for p in err_parts if p]) or "Нова Пошта не повернула номер реєстру (можливо, накладні вже додано до іншого реєстру)."
+            logger.error(f"Failed to create scan sheet: {combined_err}")
+            raise RuntimeError(f"Помилка створення реєстру: {combined_err}")
 
         return ScanSheetInfo(
             Ref=ref_val,
             Number=num_val,
             DateTime=str(info.get("DateTime", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))),
             CountOfDocuments=cnt,
+            success_documents=success_docs,
+            error_documents=error_items,
         )
 
     async def get_scan_sheet_documents(self, scansheet_ref: str) -> List[Dict[str, Any]]:
