@@ -127,6 +127,8 @@ class NovaPoshtaClient:
     """Nova Poshta API 2.0 client."""
 
     _waybills_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+    _city_settlement_cache: Dict[str, str] = {}
+
 
     def __init__(self, settings: Settings):
         self.api_key = settings.nova_poshta_api_key
@@ -276,6 +278,38 @@ class NovaPoshtaClient:
         finally:
             self.api_key = orig_key
 
+    async def get_settlement_ref(
+        self, city_ref: str, city_name: Optional[str] = None
+    ) -> Optional[str]:
+        """Resolve SettlementRef for a given CityRef, utilizing memory cache or searchSettlements."""
+        if not city_ref:
+            return None
+        cached = NovaPoshtaClient._city_settlement_cache.get(city_ref)
+        if cached:
+            return cached
+
+        if not city_name:
+            return None
+
+        try:
+            res = await self._post(
+                model_name="Address",
+                called_method="searchSettlements",
+                method_properties={"CityName": city_name, "Limit": "10"},
+            )
+            for grp in res.get("data", []):
+                for addr in grp.get("Addresses", []):
+                    d_city = addr.get("DeliveryCity")
+                    s_ref = addr.get("Ref")
+                    if d_city and s_ref:
+                        NovaPoshtaClient._city_settlement_cache[d_city] = s_ref
+                        if d_city == city_ref:
+                            return s_ref
+        except Exception as e:
+            logger.debug(f"Failed to lookup SettlementRef for {city_name}: {e}")
+
+        return NovaPoshtaClient._city_settlement_cache.get(city_ref)
+
     async def search_city(self, city_name: str) -> List[CityInfo]:
         """Search for a city by name."""
         res = await self._post(
@@ -283,17 +317,39 @@ class NovaPoshtaClient:
             called_method="getCities",
             method_properties={"FindByString": city_name, "Limit": "10"},
         )
+
+        settlement_map: Dict[str, str] = {}
+        try:
+            res_settle = await self._post(
+                model_name="Address",
+                called_method="searchSettlements",
+                method_properties={"CityName": city_name, "Limit": "10"},
+            )
+            for grp in res_settle.get("data", []):
+                for addr in grp.get("Addresses", []):
+                    d_city = addr.get("DeliveryCity")
+                    s_ref = addr.get("Ref")
+                    if d_city and s_ref:
+                        settlement_map[d_city] = s_ref
+                        NovaPoshtaClient._city_settlement_cache[d_city] = s_ref
+        except Exception:
+            pass
+
         cities = []
         for item in res.get("data", []):
+            c_ref = item.get("Ref", "")
+            s_ref = settlement_map.get(c_ref) or NovaPoshtaClient._city_settlement_cache.get(c_ref)
             cities.append(
                 CityInfo(
-                    Ref=item.get("Ref", ""),
+                    Ref=c_ref,
                     Description=item.get("Description", ""),
                     AreaDescription=item.get("AreaDescription"),
                     RegionsDescription=item.get("RegionsDescription"),
+                    SettlementRef=s_ref,
                 )
             )
         return cities
+
 
     async def get_warehouse(
         self, city_ref: str, warehouse_number: int, is_postomat: bool = False
@@ -343,9 +399,13 @@ class NovaPoshtaClient:
         )
 
     async def search_street(
-        self, city_ref: str, street_name: str
+        self,
+        city_ref: str,
+        street_name: str,
+        settlement_ref: Optional[str] = None,
+        city_name: Optional[str] = None,
     ) -> List[StreetInfo]:
-        """Search for streets by name within a city with intelligent variations and ranking."""
+        """Search for streets by name within a city with intelligent variations, settlement streets integration, and ranking."""
         raw_name = street_name.strip()
         if not raw_name or not city_ref:
             return []
@@ -363,24 +423,19 @@ class NovaPoshtaClient:
 
         words = [w for w in re.findall(r"[\w']+", cleaned) if len(w) >= 2]
 
-        queries = [cleaned]
-        if len(words) > 1:
-            queries.append(" ".join(reversed(words)))
-            for w in reversed(words):
-                if len(w) >= 3 and w not in queries:
-                    queries.append(w)
-
         seen_refs = set()
         all_streets: List[StreetInfo] = []
 
-        for q in queries:
+        async def _query_get_street(query_str: str):
+            if not query_str:
+                return
             try:
                 res = await self._post(
                     model_name="Address",
                     called_method="getStreet",
                     method_properties={
                         "CityRef": city_ref,
-                        "FindByString": q,
+                        "FindByString": query_str,
                         "Page": "1",
                     },
                 )
@@ -396,18 +451,72 @@ class NovaPoshtaClient:
                                 CityRef=str(item.get("CityRef", city_ref)),
                             )
                         )
+            except Exception as e:
+                logger.warning(f"Error querying getStreet with '{query_str}': {e}")
+
+        # 1. First attempt: direct query with cleaned name and reversed words
+        queries = [cleaned]
+        if len(words) > 1:
+            queries.append(" ".join(reversed(words)))
+            for w in reversed(words):
+                if len(w) >= 3 and w not in queries:
+                    queries.append(w)
+
+        for q in queries:
+            await _query_get_street(q)
+            if all_streets:
+                break
+
+        # 2. If getStreet returned nothing, try intelligent settlement streets search (searchSettlementStreets)
+        if not all_streets:
+            eff_settle_ref = settlement_ref or await self.get_settlement_ref(city_ref, city_name)
+            candidate_descriptions: List[str] = []
+            if eff_settle_ref:
+                try:
+                    res_sss = await self._post(
+                        model_name="Address",
+                        called_method="searchSettlementStreets",
+                        method_properties={
+                            "SettlementRef": eff_settle_ref,
+                            "StreetName": cleaned,
+                            "Limit": "20",
+                        },
+                    )
+                    for grp in res_sss.get("data", []):
+                        for addr in grp.get("Addresses", []):
+                            desc = addr.get("SettlementStreetDescription")
+                            if desc and desc not in candidate_descriptions:
+                                candidate_descriptions.append(desc)
+                except Exception as e:
+                    logger.warning(f"Error querying searchSettlementStreets with '{cleaned}': {e}")
+
+            # Query getStreet with candidate descriptions returned by searchSettlementStreets
+            for cand in candidate_descriptions:
+                await _query_get_street(cand)
+
+        # 3. If still nothing found, expand with common Ukrainian military, academic, and historical titles
+        if not all_streets:
+            titles = [
+                "Генерала", "Академіка", "Гетьмана", "Степана", "Богдана", "Тараса",
+                "Івана", "Лесі", "Володимира", "Михайла", "Князя", "Героїв", "Полковника",
+                "Майора", "Професора", "Маршала", "Святого", "Василя", "Олександра", "Юрія"
+            ]
+            title_queries = [f"{t} {cleaned}" for t in titles]
+            for tq in title_queries:
+                await _query_get_street(tq)
                 if all_streets:
                     break
-            except Exception as e:
-                logger.warning(f"Error querying getStreet with '{q}': {e}")
 
         # Rank all_streets by similarity to raw input
         def score_street(s: StreetInfo) -> float:
-            s_words = set(re.findall(r"[\w']+", s.description.lower()))
+            s_desc_lower = s.description.lower()
+            s_words = set(re.findall(r"[\w']+", s_desc_lower))
             q_words = set(w.lower() for w in words)
             overlap = len(s_words & q_words)
             # Exact match bonus
-            if s.description.lower() == cleaned.lower():
+            if s_desc_lower == cleaned.lower():
+                overlap += 3.0
+            elif cleaned.lower() in s_desc_lower:
                 overlap += 2.0
             # Street type bonus if user specified "вул" / "пров" etc.
             if "вул" in raw_name.lower() and "вул" in s.streets_type.lower():
@@ -420,6 +529,7 @@ class NovaPoshtaClient:
 
         all_streets.sort(key=score_street, reverse=True)
         return all_streets
+
 
     async def create_counterparty_address(
         self,

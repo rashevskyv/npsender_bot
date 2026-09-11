@@ -11,6 +11,8 @@ class CityInfo(BaseModel):
     description: str = Field(..., alias="Description")
     area: Optional[str] = Field(default=None, alias="AreaDescription")
     region: Optional[str] = Field(default=None, alias="RegionsDescription")
+    settlement_ref: Optional[str] = Field(default=None, alias="SettlementRef")
+
 
 
 class WarehouseInfo(BaseModel):

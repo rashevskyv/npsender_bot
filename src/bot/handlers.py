@@ -2383,7 +2383,12 @@ def register_handlers(
             if is_address_deliv:
                 # Search street in NP database
                 street_query = parsed_info.street_name or ""
-                streets = await user_np_client.search_street(city_ref=matched_city.ref, street_name=street_query)
+                streets = await user_np_client.search_street(
+                    city_ref=matched_city.ref,
+                    street_name=street_query,
+                    settlement_ref=getattr(matched_city, "settlement_ref", None),
+                    city_name=matched_city.description,
+                )
                 if not streets:
                     await status_msg.edit_text(
                         f"❌ Вулицю *'{street_query}'* у населеному пункті *{matched_city.description}* не знайдено в базі Нової Пошти.\n"
@@ -3064,6 +3069,8 @@ def register_handlers(
                         streets = await user_np_client.search_street(
                             city_ref=city.ref,
                             street_name=session.get("street_name") or parsed_info.street_name or "",
+                            settlement_ref=getattr(city, "settlement_ref", None),
+                            city_name=getattr(city, "description", None),
                         )
                         street_ref = streets[0].ref if streets else ""
 

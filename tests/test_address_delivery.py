@@ -378,3 +378,78 @@ async def test_preserve_user_custom_settings_across_natural_language_updates(set
     assert session["cargo_description"] == "сувенір", "Cargo description must be updated to 'сувенір'!"
 
 
+@pytest.mark.asyncio
+async def test_address_delivery_street_search_passes_settlement_ref(setup_test_handlers):
+    """Test that address confirmation courier flow passes settlement_ref and city_name to search_street."""
+    manager = setup_test_handlers
+    user_id = 99887766
+    session_id = "test-sess-tarnavsky"
+
+    manager.update_user_settings(
+        user_id,
+        nova_poshta_api_key="test_np_key",
+        ai_api_key="test_ai_key",
+    )
+
+    parsed_info = ParsedRecipientInfo(
+        first_name="Костянтин",
+        last_name="Черняков",
+        phone="+380989946045",
+        city_name="Львів",
+        street_name="Тарнавського",
+        building_number="106",
+        flat_number="26",
+        is_address_delivery=True,
+        is_recipient_info=True,
+    )
+
+    city = CityInfo(
+        Ref="lviv-city-ref",
+        Description="Львів",
+        AreaDescription="Львівська",
+        SettlementRef="lviv-settle-ref",
+    )
+
+    message = MagicMock()
+    message.from_user.id = user_id
+    message.text = "+380989946045\nЧерняков Костянтин\nАдресна доставка:\nЛьвів, вул. Тарнавського 106, кв. 26"
+    status_mock = MagicMock()
+    status_mock.edit_text = AsyncMock()
+    message.answer = AsyncMock(return_value=status_mock)
+
+    with patch("src.ai.extractor.AIExtractor.parse_text", new_callable=AsyncMock) as mock_parse, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.search_city", new_callable=AsyncMock) as mock_city, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.search_street", new_callable=AsyncMock) as mock_street:
+
+        mock_parse.return_value = parsed_info
+        mock_city.return_value = [city]
+        mock_street.return_value = [
+            StreetInfo(
+                Ref="street-tarnavsky-guid",
+                Description="Генерала Тарнавського",
+                StreetsType="вул.",
+                CityRef="lviv-city-ref",
+            )
+        ]
+
+        msg_handler = _get_message_handler()
+        await msg_handler(message)
+        from src.bot.handlers import USER_DEBOUNCE_TASKS
+        if user_id in USER_DEBOUNCE_TASKS:
+            await USER_DEBOUNCE_TASKS[user_id]
+
+        assert mock_street.called
+        call_kwargs = mock_street.call_args[1]
+        assert call_kwargs["city_ref"] == "lviv-city-ref"
+        assert call_kwargs["street_name"] == "Тарнавського"
+        assert call_kwargs["settlement_ref"] == "lviv-settle-ref"
+        assert call_kwargs["city_name"] == "Львів"
+
+        assert status_mock.edit_text.called
+        call_text = status_mock.edit_text.call_args[0][0]
+        assert "Генерала Тарнавського" in call_text
+        assert "106" in call_text
+        assert "26" in call_text
+
+
+

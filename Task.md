@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.23.2
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.23.4
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -113,5 +113,16 @@
   - [x] Забезпечити точний вибір дійсного реєстру (наприклад, `105-80149920`) при порожньому контексті в пам'яті
   - [x] Додати юніт-тести та перевірити всі 72 тести паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 15: Інтелектуальний комбінований пошук вулиць через searchSettlementStreets та getStreet (v0.23.4)**
+  - [x] Додати опціональне поле `settlement_ref` у модель `CityInfo` (`src/nova_poshta/models.py`)
+  - [x] Додати кешування `_city_settlement_cache` та метод `get_settlement_ref` у `NovaPoshtaClient` (`src/nova_poshta/client.py`)
+  - [x] Збагатити `search_city` автоматичним мапінгом `DeliveryCity -> SettlementRef` через `searchSettlements`
+  - [x] Реалізувати багаторівневий пошук у `search_street`: прямий запит `getStreet`, інтелектуальний повнотекстовий пошук через `searchSettlementStreets` та фолбек розширення популярними званнями/титулами/іменами
+  - [x] Покращити ранжування знайдених вулиць з урахуванням точного збігу та входження підрядка
+  - [x] Передавати `settlement_ref` та `city_name` у виклики `search_street` у `src/bot/handlers.py`
+  - [x] Додати юніт-тести в `tests/test_nova_poshta.py` та `tests/test_address_delivery.py` (76 passed)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
 
 

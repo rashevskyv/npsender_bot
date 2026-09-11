@@ -486,3 +486,140 @@ def test_check_is_light_return():
     assert check_is_light_return({}) is False
 
 
+@pytest.mark.asyncio
+async def test_search_street_via_search_settlement_streets():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="test_key"))
+    recorded_calls = []
+
+    async def mock_post(model_name, called_method, method_properties):
+        recorded_calls.append((model_name, called_method, method_properties))
+        if called_method == "getStreet":
+            q = method_properties.get("FindByString", "")
+            if q == "Генерала Тарнавського":
+                return {
+                    "success": True,
+                    "data": [
+                        {
+                            "Ref": "street-tarnavsky-guid",
+                            "Description": "Генерала Тарнавського",
+                            "StreetsType": "вул.",
+                            "CityRef": "lviv-city-ref",
+                        }
+                    ],
+                }
+            return {"success": True, "data": []}
+        elif called_method == "searchSettlementStreets":
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "TotalCount": 1,
+                        "Addresses": [
+                            {
+                                "SettlementRef": "lviv-settle-ref",
+                                "SettlementStreetRef": "sss-guid-1",
+                                "SettlementStreetDescription": "Генерала Тарнавського",
+                                "Present": "вул. Генерала Тарнавського",
+                            }
+                        ],
+                    }
+                ],
+            }
+        return {"success": True, "data": []}
+
+    client._post = mock_post
+
+    streets = await client.search_street(
+        city_ref="lviv-city-ref",
+        street_name="Тарнавського",
+        settlement_ref="lviv-settle-ref",
+        city_name="Львів",
+    )
+    assert len(streets) == 1
+    assert streets[0].description == "Генерала Тарнавського"
+    assert streets[0].ref == "street-tarnavsky-guid"
+
+
+@pytest.mark.asyncio
+async def test_search_street_via_title_expansion_fallback():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="test_key"))
+
+    async def mock_post(model_name, called_method, method_properties):
+        if called_method == "getStreet":
+            q = method_properties.get("FindByString", "")
+            if q == "Генерала Тарнавського":
+                return {
+                    "success": True,
+                    "data": [
+                        {
+                            "Ref": "street-tarnavsky-guid",
+                            "Description": "Генерала Тарнавського",
+                            "StreetsType": "вул.",
+                            "CityRef": "lviv-city-ref",
+                        }
+                    ],
+                }
+        return {"success": True, "data": []}
+
+    client._post = mock_post
+
+    streets = await client.search_street(
+        city_ref="lviv-city-ref",
+        street_name="вул. Тарнавського",
+    )
+    assert len(streets) == 1
+    assert streets[0].description == "Генерала Тарнавського"
+
+
+@pytest.mark.asyncio
+async def test_search_city_populates_settlement_ref():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="test_key"))
+
+    async def mock_post(model_name, called_method, method_properties):
+        if called_method == "getCities":
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "Ref": "lviv-city-ref",
+                        "Description": "Львів",
+                        "AreaDescription": "Львівська",
+                    }
+                ],
+            }
+        elif called_method == "searchSettlements":
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "TotalCount": 1,
+                        "Addresses": [
+                            {
+                                "Ref": "lviv-settle-ref",
+                                "DeliveryCity": "lviv-city-ref",
+                                "MainDescription": "Львів",
+                            }
+                        ],
+                    }
+                ],
+            }
+        return {"success": True, "data": []}
+
+    client._post = mock_post
+
+    cities = await client.search_city("Львів")
+    assert len(cities) == 1
+    assert cities[0].ref == "lviv-city-ref"
+    assert cities[0].settlement_ref == "lviv-settle-ref"
+
+
+
