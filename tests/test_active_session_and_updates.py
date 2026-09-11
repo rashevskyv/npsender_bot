@@ -252,3 +252,89 @@ async def test_city_selection_and_follow_up_update_retains_chosen_city(setup_han
         assert "steam deck OLED 512 та Odin 2 portal" in card_text_call
         assert "Лозова" in card_text_call
         assert "Відділення №1: вул. Транспортна, 1" in card_text_call
+
+
+@pytest.mark.asyncio
+async def test_waybill_action_toggle_cod_type_and_cycles_no_unbound_local_error():
+    """Regression test: clicking toggle_cod_type, cycle_cod, cycle_value must not raise UnboundLocalError."""
+    from src.nova_poshta.models import CODMonthlyStats
+
+    user_id = 999
+    session_id = "test-session-cod"
+
+    city = CityInfo(Ref="city-ref-1", Description="Львів")
+    wh = WarehouseInfo(
+        Ref="wh-ref-1",
+        Description="Відділення №1: вул. Городоцька, 1",
+        Number="1",
+        TypeOfWarehouse="Warehouse",
+        CityRef="city-ref-1",
+    )
+    parsed_info = ParsedRecipientInfo(
+        first_name="Костянтин",
+        last_name="Черняков",
+        phone="380989946045",
+        city_name="Львів",
+        warehouse_number=1,
+        is_postomat=False,
+        declared_value=14800.0,
+        cargo_description="планшет",
+        cod_amount=14800.0,
+        cod_payment_type="cash",
+    )
+
+    PENDING_SESSIONS[session_id] = {
+        "parsed_info": parsed_info,
+        "city": city,
+        "warehouse": wh,
+        "destination_description": "Відділення №1: вул. Городоцька, 1",
+        "payer_type": "Recipient",
+        "cargo_type": "Parcel",
+        "declared_value": 14800.0,
+        "cargo_description": "планшет",
+        "cod_amount": 14800.0,
+        "cod_payment_type": "cash",
+        "user_id": user_id,
+        "updated_at": time.time(),
+    }
+    USER_ACTIVE_SESSIONS[user_id] = session_id
+
+    waybill_callback_handler = _get_callback_handler("process_waybill_callback")
+
+    mock_cb = MagicMock()
+    mock_cb.from_user.id = user_id
+    mock_cb.message.edit_text = AsyncMock()
+    mock_cb.message.edit_reply_markup = AsyncMock()
+    mock_cb.answer = AsyncMock()
+
+    # 1. Test toggle_cod_type (switch from cash to card)
+    cb_toggle = WaybillActionCallback(action="toggle_cod_type", session_id=session_id)
+    with patch("src.nova_poshta.client.NovaPoshtaClient.get_monthly_cod_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = CODMonthlyStats(
+            year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+            total_count=1, total_sum=1000.0, items=[]
+        )
+        await waybill_callback_handler(mock_cb, cb_toggle)
+        assert PENDING_SESSIONS[session_id]["cod_payment_type"] == "card"
+        mock_cb.message.edit_text.assert_called()
+
+    # 2. Test cycle_cod
+    cb_cod = WaybillActionCallback(action="cycle_cod", session_id=session_id)
+    with patch("src.nova_poshta.client.NovaPoshtaClient.get_monthly_cod_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = CODMonthlyStats(
+            year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+            total_count=1, total_sum=1000.0, items=[]
+        )
+        await waybill_callback_handler(mock_cb, cb_cod)
+        mock_cb.message.edit_text.assert_called()
+
+    # 3. Test cycle_value
+    cb_val = WaybillActionCallback(action="cycle_value", session_id=session_id)
+    with patch("src.nova_poshta.client.NovaPoshtaClient.get_monthly_cod_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = CODMonthlyStats(
+            year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+            total_count=1, total_sum=1000.0, items=[]
+        )
+        await waybill_callback_handler(mock_cb, cb_val)
+        mock_cb.message.edit_text.assert_called()
+

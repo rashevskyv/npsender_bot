@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.23.5
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.23.6
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -134,6 +134,13 @@
   - [x] Зберігати у новому реєстрі та контексті Telegram-бота виключно фактично додані накладні, з відображенням попередження про відхилені ТТН (`src/bot/handlers.py`)
   - [x] Синхронізувати кількість накладних у `cmd_registers` з live API Нової Пошти
   - [x] Написати юніт-тести та перевірити всі 81 тест паралельно (`pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 17: Виправлення UnboundLocalError при зміні виплати наложки або оцінки (v0.23.6)**
+  - [x] Перенести ініціалізацію `eff_settings` та `user_np_client` на початок `process_waybill_callback` (`src/bot/handlers.py`)
+  - [x] Усунути збій `UnboundLocalError: cannot access local variable 'user_np_client'` при натисканні кнопок `toggle_cod_type`, `cycle_cod`, `cycle_value`
+  - [x] Написати регресійний юніт-тест `test_waybill_action_toggle_cod_type_and_cycles_no_unbound_local_error` (`tests/test_active_session_and_updates.py`)
+  - [x] Запустити всі 82 тести паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
 
 

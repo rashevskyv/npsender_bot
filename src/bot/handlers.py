@@ -2857,6 +2857,9 @@ def register_handlers(
         action = callback_data.action
         user_id = session["user_id"]
 
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+
         if action == "cancel":
             clear_user_active_session(user_id)
             await callback.message.edit_text("❌ *Створення накладної скасовано.*", parse_mode="Markdown")
@@ -3081,9 +3084,6 @@ def register_handlers(
                 f"⏳ *Реєстрація отримувача та {action_title.lower()} express-накладної у базі Нової Пошти...*",
                 parse_mode="Markdown",
             )
-
-            eff_settings = storage_manager.get_effective_settings(user_id, settings)
-            user_np_client = NovaPoshtaClient(eff_settings)
 
             parsed_info = session["parsed_info"]
             city = session["city"]

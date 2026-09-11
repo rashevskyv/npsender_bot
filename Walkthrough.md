@@ -1,5 +1,19 @@
 # Walkthrough (Журнал змін)
 
+## [v0.23.6] - 2026-09-11
+- **Виправлення помилки UnboundLocalError при зміні типу виплати наложки, суми наложки або оцінки**:
+  - **Причина помилки**:
+    - Користувач повідомив про збій при натисканні кнопки перемикання виплати накладеного платежу (`[ 🔄 💵 Виплата: Готівкою у відділенні ]` -> на картку):
+      `UnboundLocalError: cannot access local variable 'user_np_client' where it is not associated with a value` у `src/bot/handlers.py`, рядок 2999/3041.
+    - Обробники дій `toggle_cod_type`, `cycle_cod` та `cycle_value` викликали функцію перевірки місячного ліміту `_check_cod_warning(..., user_np_client=user_np_client, eff_settings=eff_settings)`.
+    - Проте змінні `eff_settings` та `user_np_client` ініціалізувалися лише далі за кодом — всередині блоку `if action == "confirm":`. Через це Python вважав `user_np_client` локальною змінною для всієї функції `process_waybill_callback`, викликаючи `UnboundLocalError`.
+  - **Виправлення**:
+    - Ініціалізацію `eff_settings = storage_manager.get_effective_settings(user_id, settings)` та `user_np_client = NovaPoshtaClient(eff_settings)` перенесено на самий початок функції `process_waybill_callback` одразу після валідації сесії та отримання `user_id`.
+    - Усунено дублювання ініціалізації в блоці `action == "confirm"`.
+  - **Тестування**:
+    - Додано регресійний юніт-тест `test_waybill_action_toggle_cod_type_and_cycles_no_unbound_local_error` у `tests/test_active_session_and_updates.py`.
+    - Усі 82 тести успішно виконано в паралельному режимі (`pytest -n auto`).
+
 ## [v0.23.5] - 2026-09-11
 - **Виправлення розбіжності кількості накладних у створеному реєстрі (ScanSheet) та мобільному додатку Нової Пошти**:
   - **Дослідження причин розбіжності**:
