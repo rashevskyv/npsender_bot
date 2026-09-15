@@ -25,7 +25,10 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="🔍 Відстежити ТТН"),
             ],
             [
+                KeyboardButton(text="👥 Користувачі"),
                 KeyboardButton(text="⚙️ Налаштування"),
+            ],
+            [
                 KeyboardButton(text="❓ Допомога"),
             ],
         ],
@@ -34,11 +37,97 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+class UserProfileCallback(CallbackData, prefix="uprof"):
+    """Callback data schema for sender user profiles management."""
+
+    action: str  # "select", "add", "delete_prompt", "delete", "refresh"
+    profile_id: str  # profile ID or "none"
+
+
+def get_users_management_keyboard(
+    profiles: List[Any],
+    active_profile_id: Optional[str] = None,
+    balances_map: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> InlineKeyboardMarkup:
+    """Build interactive inline keyboard for multi-user profile management."""
+    rows = []
+    balances_map = balances_map or {}
+
+    for p in profiles:
+        is_active = (p.id == active_profile_id)
+        bal = balances_map.get(p.id, {})
+        rem_sum = bal.get("rem_sum")
+
+        if is_active:
+            label = f"✅ {p.name} (Активний)"
+            if rem_sum is not None:
+                label += f" | Ліміт: {int(rem_sum)} грн"
+            rows.append([
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=UserProfileCallback(action="select", profile_id=p.id).pack(),
+                )
+            ])
+        else:
+            label = f"🔄 Обрати: {p.name}"
+            if rem_sum is not None:
+                label += f" (залишок {int(rem_sum)} грн)"
+            rows.append([
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=UserProfileCallback(action="select", profile_id=p.id).pack(),
+                )
+            ])
+
+    mgmt_row = [
+        InlineKeyboardButton(
+            text="➕ Додати користувача",
+            callback_data=UserProfileCallback(action="add", profile_id="none").pack(),
+        ),
+        InlineKeyboardButton(
+            text="🔄 Оновити",
+            callback_data=UserProfileCallback(action="refresh", profile_id="none").pack(),
+        ),
+    ]
+    rows.append(mgmt_row)
+
+    if len(profiles) > 1:
+        rows.append([
+            InlineKeyboardButton(
+                text="🗑 Видалити користувача",
+                callback_data=UserProfileCallback(action="delete_prompt", profile_id="none").pack(),
+            )
+        ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_profile_delete_keyboard(
+    profiles: List[Any], active_profile_id: Optional[str] = None
+) -> InlineKeyboardMarkup:
+    """Keyboard to select which non-active profile to delete."""
+    rows = []
+    for p in profiles:
+        if p.id != active_profile_id:
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"🗑 Видалити «{p.name}»",
+                    callback_data=UserProfileCallback(action="delete", profile_id=p.id).pack(),
+                )
+            ])
+    rows.append([
+        InlineKeyboardButton(
+            text="🔙 Назад до списку користувачів",
+            callback_data=UserProfileCallback(action="refresh", profile_id="none").pack(),
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 class WaybillActionCallback(CallbackData, prefix="wb"):
     """Callback data schema for waybill actions."""
 
-    action: str  # "confirm", "cancel", "toggle_payer", "toggle_cargo", "cycle_value", "cycle_cod", "toggle_cod_type"
+    action: str  # "confirm", "force_confirm", "cancel", "toggle_payer", "toggle_cargo", "cycle_value", "cycle_cod", "toggle_cod_type", "back_to_card", "switch_profile", "cycle_sender"
     session_id: str  # unique ID or state reference
 
 
@@ -50,6 +139,9 @@ def get_confirmation_keyboard(
     cod_payment_type: str = "cash",
     sender_card_mask: Optional[str] = None,
     session_id: str = "default",
+    suggested_profile: Optional[Dict[str, Any]] = None,
+    active_profile_name: Optional[str] = None,
+    has_multiple_profiles: bool = False,
 ) -> InlineKeyboardMarkup:
     """Build interactive confirmation keyboard with toggle buttons in Ukrainian."""
     payer_label = "👤 Платник: Отримувач" if payer_type == "Recipient" else "📦 Платник: Відправник"
@@ -115,6 +207,30 @@ def get_confirmation_keyboard(
             ]
         )
 
+    # If recommendation exists to switch user with more limit
+    if suggested_profile:
+        s_name = suggested_profile.get("name", "іншого")
+        s_rem = int(suggested_profile.get("rem_sum", 0))
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text=f"👥 Переключити на: {s_name} (+{s_rem} грн ліміту)",
+                callback_data=WaybillActionCallback(
+                    action="switch_profile",
+                    session_id=session_id,
+                ).pack(),
+            )
+        ])
+    elif has_multiple_profiles and active_profile_name:
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                text=f"👤 Відправник: {active_profile_name} 🔄",
+                callback_data=WaybillActionCallback(
+                    action="cycle_sender",
+                    session_id=session_id,
+                ).pack(),
+            )
+        ])
+
     keyboard_rows.append(
         [
             InlineKeyboardButton(
@@ -135,6 +251,63 @@ def get_confirmation_keyboard(
     )
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+
+def get_limit_exceeded_confirmation_keyboard(
+    session_id: str, suggested_profile: Optional[Dict[str, Any]] = None
+) -> InlineKeyboardMarkup:
+    """Build confirmation keyboard when COD limits are exceeded."""
+    keyboard = []
+    if suggested_profile:
+        s_name = suggested_profile.get("name", "іншого")
+        s_rem = int(suggested_profile.get("rem_sum", 0))
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"👥 Переключити на: {s_name} (залишок {s_rem} грн)",
+                callback_data=WaybillActionCallback(
+                    action="switch_profile",
+                    session_id=session_id,
+                ).pack(),
+            )
+        ])
+
+    keyboard.extend([
+        [
+            InlineKeyboardButton(
+                text="⚠️ Все одно створити ТТН",
+                callback_data=WaybillActionCallback(
+                    action="force_confirm",
+                    session_id=session_id,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="💰 Змінити наложку",
+                callback_data=WaybillActionCallback(
+                    action="cycle_cod",
+                    session_id=session_id,
+                ).pack(),
+            ),
+            InlineKeyboardButton(
+                text="🔙 До картки ТТН",
+                callback_data=WaybillActionCallback(
+                    action="back_to_card",
+                    session_id=session_id,
+                ).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="❌ Скасувати створення",
+                callback_data=WaybillActionCallback(
+                    action="cancel",
+                    session_id=session_id,
+                ).pack(),
+            ),
+        ],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 class DraftActionCallback(CallbackData, prefix="draft"):
@@ -454,7 +627,7 @@ def get_cod_shipments_keyboard(
 class TrackActionCallback(CallbackData, prefix="trk"):
     """Callback data schema for waybill tracking actions."""
 
-    action: str  # "refresh", "barcode"
+    action: str  # "refresh", "barcode", "track"
     doc_number: str
 
 
@@ -464,7 +637,7 @@ def get_tracking_keyboard(doc_number: str) -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton(
-                text="📱 Показати штрихкод",
+                text="📱 Згенерувати штрих-код",
                 callback_data=TrackActionCallback(action="barcode", doc_number=clean_num).pack(),
             ),
             InlineKeyboardButton(
@@ -478,6 +651,48 @@ def get_tracking_keyboard(doc_number: str) -> InlineKeyboardMarkup:
                 url=f"https://novaposhta.ua/tracking/?cargo_number={clean_num}",
             ),
         ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_waybill_action_keyboard(doc_number: str) -> InlineKeyboardMarkup:
+    """Build interactive action choice keyboard when a waybill number is sent: Track or Barcode."""
+    clean_num = "".join(filter(str.isdigit, str(doc_number)))
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="🔍 Відстежити",
+                callback_data=TrackActionCallback(action="track", doc_number=clean_num).pack(),
+            ),
+            InlineKeyboardButton(
+                text="📱 Згенерувати штрих-код",
+                callback_data=TrackActionCallback(action="barcode", doc_number=clean_num).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🌐 Відкрити на сайті Нової Пошти",
+                url=f"https://novaposhta.ua/tracking/?cargo_number={clean_num}",
+            ),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_barcode_keyboard(doc_number: str) -> InlineKeyboardMarkup:
+    """Build interactive action buttons under generated waybill barcode photo."""
+    clean_num = "".join(filter(str.isdigit, str(doc_number)))
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="🔍 Відстежити ТТН",
+                callback_data=TrackActionCallback(action="track", doc_number=clean_num).pack(),
+            ),
+            InlineKeyboardButton(
+                text="🌐 Відкрити на сайті НП",
+                url=f"https://novaposhta.ua/tracking/?cargo_number={clean_num}",
+            ),
+        ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 

@@ -11,6 +11,7 @@ from src.bot.handlers import (
     _render_progress_bar,
     format_cod_dashboard,
     format_cod_shipments_page,
+    evaluate_cod_limits,
 )
 
 
@@ -343,3 +344,170 @@ def test_user_settings_manager_cod_limits(tmp_path):
     reloaded = new_manager.get_user_settings(111)
     assert reloaded.cod_monthly_limit_sum == 50000.0
     assert reloaded.cod_warning_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_evaluate_cod_limits_safe_range(mock_settings, tmp_path):
+    storage_file = tmp_path / "user_settings.json"
+    manager = UserSettingsManager(filepath=str(storage_file), drafts_filepath=str(tmp_path / "d.json"))
+    manager.update_user_settings(1, cod_monthly_limit_sum=30000.0, cod_monthly_limit_count=10)
+
+    client = NovaPoshtaClient(mock_settings)
+    mock_stats = CODMonthlyStats(
+        year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+        total_count=3, total_sum=10000.0, items=[]
+    )
+
+    with patch.object(client, "get_monthly_cod_stats", new_callable=AsyncMock) as m:
+        m.return_value = mock_stats
+        res = await evaluate_cod_limits(
+            user_id=1,
+            cod_val=2000.0,
+            user_np_client=client,
+            storage_manager=manager,
+            eff_settings=mock_settings,
+        )
+
+        assert res["has_cod"] is True
+        assert res["is_exceeded"] is False
+        assert res["is_near"] is False
+        assert res["base_sum"] == 10000.0
+        assert res["new_total_sum"] == 12000.0
+        assert res["new_total_cnt"] == 4
+        assert res["safe_limit"] == 29999.0
+        assert res["rem_sum"] == 29999.0 - 12000.0
+        assert "Використано наразі: `10000 грн` (3 ТТН)" in res["summary_text"]
+        assert "Ця накладна: `+2000 грн`" in res["summary_text"]
+        assert "✅ *Разом буде:* `12000 грн` із 29999 грн (залишок безпечного ліміту: `17999 грн`)" in res["summary_text"]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_cod_limits_near_limit(mock_settings, tmp_path):
+    storage_file = tmp_path / "user_settings.json"
+    manager = UserSettingsManager(filepath=str(storage_file), drafts_filepath=str(tmp_path / "d.json"))
+    manager.update_user_settings(1, cod_monthly_limit_sum=30000.0, cod_monthly_limit_count=10)
+
+    client = NovaPoshtaClient(mock_settings)
+    mock_stats = CODMonthlyStats(
+        year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+        total_count=5, total_sum=23000.0, items=[]
+    )
+
+    with patch.object(client, "get_monthly_cod_stats", new_callable=AsyncMock) as m:
+        m.return_value = mock_stats
+        res = await evaluate_cod_limits(
+            user_id=1,
+            cod_val=2000.0,
+            user_np_client=client,
+            storage_manager=manager,
+            eff_settings=mock_settings,
+        )
+
+        assert res["has_cod"] is True
+        assert res["is_exceeded"] is False
+        assert res["is_near"] is True
+        assert res["new_total_sum"] == 25000.0
+        assert "⚠️ *Увага: Разом буде `25000 грн`* із 29999 грн (залишок: лише `4999 грн`!)" in res["summary_text"]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_cod_limits_exceeded(mock_settings, tmp_path):
+    storage_file = tmp_path / "user_settings.json"
+    manager = UserSettingsManager(filepath=str(storage_file), drafts_filepath=str(tmp_path / "d.json"))
+    manager.update_user_settings(1, cod_monthly_limit_sum=30000.0, cod_monthly_limit_count=10)
+
+    client = NovaPoshtaClient(mock_settings)
+    mock_stats = CODMonthlyStats(
+        year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+        total_count=7, total_sum=28000.0, items=[]
+    )
+
+    with patch.object(client, "get_monthly_cod_stats", new_callable=AsyncMock) as m:
+        m.return_value = mock_stats
+        res = await evaluate_cod_limits(
+            user_id=1,
+            cod_val=3000.0,
+            user_np_client=client,
+            storage_manager=manager,
+            eff_settings=mock_settings,
+        )
+
+        assert res["has_cod"] is True
+        assert res["is_exceeded"] is True
+        assert res["new_total_sum"] == 31000.0
+        assert res["exceeded_sum"] == 1001
+        assert "🚨 *УВАГА: Разом буде `31000 грн` — ПЕРЕТИН ВСТАНОВЛЕНОЇ МЕЖІ (29999 грн) на 1001 грн!*" in res["summary_text"]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_cod_limits_count_exceeded(mock_settings, tmp_path):
+    storage_file = tmp_path / "user_settings.json"
+    manager = UserSettingsManager(filepath=str(storage_file), drafts_filepath=str(tmp_path / "d.json"))
+    manager.update_user_settings(1, cod_monthly_limit_sum=50000.0, cod_monthly_limit_count=5)
+
+    client = NovaPoshtaClient(mock_settings)
+    mock_stats = CODMonthlyStats(
+        year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+        total_count=5, total_sum=5000.0, items=[]
+    )
+
+    with patch.object(client, "get_monthly_cod_stats", new_callable=AsyncMock) as m:
+        m.return_value = mock_stats
+        res = await evaluate_cod_limits(
+            user_id=1,
+            cod_val=500.0,
+            user_np_client=client,
+            storage_manager=manager,
+            eff_settings=mock_settings,
+        )
+
+        assert res["has_cod"] is True
+        assert res["is_exceeded"] is True
+        assert res["new_total_cnt"] == 6
+        assert res["exceeded_cnt"] == 1
+        assert "🚨 *Кількість ТТН (6 шт) перевищить встановлений ліміт (5 шт) на 1 шт!*" in res["summary_text"]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_cod_limits_editing_ref_no_double_count(mock_settings, tmp_path):
+    storage_file = tmp_path / "user_settings.json"
+    manager = UserSettingsManager(filepath=str(storage_file), drafts_filepath=str(tmp_path / "d.json"))
+    manager.update_user_settings(1, cod_monthly_limit_sum=30000.0, cod_monthly_limit_count=10)
+
+    draft_item = CODItemInfo(
+        int_doc_number="20459999999999",
+        ref="edit-draft-123",
+        date_created="2026-09-10",
+        cod_amount=5000.0,
+        cod_payment_type="cash",
+        state_id="1",
+        state_name="Чернетка",
+        recipient_name="Тест",
+        city_recipient="Київ",
+    )
+
+    client = NovaPoshtaClient(mock_settings)
+    mock_stats = CODMonthlyStats(
+        year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+        total_count=4, total_sum=20000.0, items=[draft_item]
+    )
+
+    with patch.object(client, "get_monthly_cod_stats", new_callable=AsyncMock) as m:
+        m.return_value = mock_stats
+        res = await evaluate_cod_limits(
+            user_id=1,
+            cod_val=3000.0,
+            user_np_client=client,
+            storage_manager=manager,
+            eff_settings=mock_settings,
+            editing_ref="edit-draft-123",
+        )
+
+        # Base sum without this draft is 20000 - 5000 = 15000
+        # New total sum is 15000 + 3000 = 18000 (NOT 20000 + 3000 = 23000)
+        assert res["base_sum"] == 15000.0
+        assert res["new_total_sum"] == 18000.0
+        assert res["base_cnt"] == 3
+        assert res["new_total_cnt"] == 4
+        assert res["is_exceeded"] is False
+

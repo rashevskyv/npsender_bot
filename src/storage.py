@@ -15,13 +15,41 @@ DRAFTS_STORAGE_PATH = "data/user_drafts.json"
 SCANSHEETS_STORAGE_PATH = "data/user_scansheets.json"
 
 
+class SenderProfile(BaseModel):
+    """Specific sender account / profile configuration."""
+
+    id: str
+    name: str = "Користувач 1"
+    nova_poshta_api_key: Optional[str] = None
+    sender_counterparty_ref: Optional[str] = None
+    sender_contact_ref: Optional[str] = None
+    sender_city_ref: Optional[str] = None
+    sender_city_name: Optional[str] = None
+    sender_address_ref: Optional[str] = None
+    sender_warehouse_name: Optional[str] = None
+    sender_phone: Optional[str] = None
+    sender_name: Optional[str] = None
+    sender_card_mask: Optional[str] = None
+    sender_card_ref: Optional[str] = None
+    cod_monthly_limit_sum: Optional[float] = 30000.0
+    cod_monthly_limit_count: Optional[int] = 10
+    cod_warning_enabled: bool = True
+
+
 class UserCustomSettings(BaseModel):
     """User-specific credentials and configuration."""
 
-    nova_poshta_api_key: Optional[str] = None
+    # AI Provider Settings (shared per Telegram user)
     ai_api_key: Optional[str] = None
     ai_base_url: Optional[str] = None
     ai_model: Optional[str] = None
+
+    # Multi-sender profiles
+    profiles: List[SenderProfile] = Field(default_factory=list)
+    active_profile_id: Optional[str] = None
+
+    # Mirrored active profile fields for 100% backward compatibility
+    nova_poshta_api_key: Optional[str] = None
     sender_counterparty_ref: Optional[str] = None
     sender_contact_ref: Optional[str] = None
     sender_city_ref: Optional[str] = None
@@ -161,9 +189,167 @@ class UserSettingsManager:
         except Exception as e:
             logger.error(f"Error saving user scansheets to {self.scansheets_filepath}: {e}")
 
+    def _ensure_profile_migration(self, user_settings: UserCustomSettings) -> bool:
+        """Migrate legacy top-level sender settings into profiles if profiles list is empty."""
+        changed = False
+        if not user_settings.profiles and user_settings.nova_poshta_api_key and user_settings.nova_poshta_api_key.strip():
+            prof_name = user_settings.sender_name or "Користувач 1"
+            prof = SenderProfile(
+                id="prof_1",
+                name=prof_name,
+                nova_poshta_api_key=user_settings.nova_poshta_api_key,
+                sender_counterparty_ref=user_settings.sender_counterparty_ref,
+                sender_contact_ref=user_settings.sender_contact_ref,
+                sender_city_ref=user_settings.sender_city_ref,
+                sender_city_name=user_settings.sender_city_name,
+                sender_address_ref=user_settings.sender_address_ref,
+                sender_warehouse_name=user_settings.sender_warehouse_name,
+                sender_phone=user_settings.sender_phone,
+                sender_name=user_settings.sender_name,
+                sender_card_mask=user_settings.sender_card_mask,
+                sender_card_ref=user_settings.sender_card_ref,
+                cod_monthly_limit_sum=user_settings.cod_monthly_limit_sum if user_settings.cod_monthly_limit_sum is not None else 30000.0,
+                cod_monthly_limit_count=user_settings.cod_monthly_limit_count if user_settings.cod_monthly_limit_count is not None else 10,
+                cod_warning_enabled=user_settings.cod_warning_enabled,
+            )
+            user_settings.profiles.append(prof)
+            user_settings.active_profile_id = prof.id
+            changed = True
+
+        # Ensure active_profile_id is valid
+        if user_settings.profiles:
+            if not user_settings.active_profile_id or not any(p.id == user_settings.active_profile_id for p in user_settings.profiles):
+                user_settings.active_profile_id = user_settings.profiles[0].id
+                changed = True
+            # Sync top-level mirrored fields from active profile
+            active_p = next((p for p in user_settings.profiles if p.id == user_settings.active_profile_id), user_settings.profiles[0])
+            user_settings.nova_poshta_api_key = active_p.nova_poshta_api_key
+            user_settings.sender_counterparty_ref = active_p.sender_counterparty_ref
+            user_settings.sender_contact_ref = active_p.sender_contact_ref
+            user_settings.sender_city_ref = active_p.sender_city_ref
+            user_settings.sender_city_name = active_p.sender_city_name
+            user_settings.sender_address_ref = active_p.sender_address_ref
+            user_settings.sender_warehouse_name = active_p.sender_warehouse_name
+            user_settings.sender_phone = active_p.sender_phone
+            user_settings.sender_name = active_p.sender_name
+            user_settings.sender_card_mask = active_p.sender_card_mask
+            user_settings.sender_card_ref = active_p.sender_card_ref
+            user_settings.cod_monthly_limit_sum = active_p.cod_monthly_limit_sum
+            user_settings.cod_monthly_limit_count = active_p.cod_monthly_limit_count
+            user_settings.cod_warning_enabled = active_p.cod_warning_enabled
+        return changed
+
     def get_user_settings(self, user_id: int) -> UserCustomSettings:
-        """Get custom settings for a user ID."""
-        return self.data.get(str(user_id), UserCustomSettings())
+        """Get custom settings for a user ID, ensuring profiles are migrated."""
+        uid_str = str(user_id)
+        if uid_str not in self.data:
+            return UserCustomSettings()
+        settings_obj = self.data[uid_str]
+        if self._ensure_profile_migration(settings_obj):
+            self.save_settings()
+        return settings_obj
+
+    def get_sender_profiles(self, user_id: int) -> List[SenderProfile]:
+        """Get all sender profiles for a user."""
+        u_settings = self.get_user_settings(user_id)
+        return list(u_settings.profiles)
+
+    def get_active_profile(self, user_id: int) -> Optional[SenderProfile]:
+        """Get the currently active sender profile for a user."""
+        u_settings = self.get_user_settings(user_id)
+        if not u_settings.profiles:
+            return None
+        for p in u_settings.profiles:
+            if p.id == u_settings.active_profile_id:
+                return p
+        return u_settings.profiles[0]
+
+    def set_active_profile(self, user_id: int, profile_id: str) -> Optional[SenderProfile]:
+        """Set the active sender profile by ID."""
+        uid_str = str(user_id)
+        u_settings = self.get_user_settings(user_id)
+        found = None
+        for p in u_settings.profiles:
+            if p.id == profile_id:
+                found = p
+                break
+        if not found:
+            return None
+
+        u_settings.active_profile_id = found.id
+        self._ensure_profile_migration(u_settings)
+        self.data[uid_str] = u_settings
+        self.save_settings()
+        return found
+
+    def add_sender_profile(
+        self, user_id: int, profile: SenderProfile, set_active: bool = False
+    ) -> SenderProfile:
+        """Add a new sender profile for a user."""
+        uid_str = str(user_id)
+        u_settings = self.get_user_settings(user_id)
+
+        # Check if ID already exists, generate unique if so
+        existing_ids = {p.id for p in u_settings.profiles}
+        if profile.id in existing_ids or not profile.id:
+            profile.id = f"prof_{len(u_settings.profiles) + 1}"
+
+        u_settings.profiles.append(profile)
+        if set_active or not u_settings.active_profile_id:
+            u_settings.active_profile_id = profile.id
+
+        self._ensure_profile_migration(u_settings)
+        self.data[uid_str] = u_settings
+        self.save_settings()
+        return profile
+
+    def delete_sender_profile(self, user_id: int, profile_id: str) -> bool:
+        """Delete a sender profile by ID (cannot delete if it's the only one)."""
+        uid_str = str(user_id)
+        u_settings = self.get_user_settings(user_id)
+        if len(u_settings.profiles) <= 1:
+            return False
+
+        initial_len = len(u_settings.profiles)
+        u_settings.profiles = [p for p in u_settings.profiles if p.id != profile_id]
+        if len(u_settings.profiles) == initial_len:
+            return False
+
+        if u_settings.active_profile_id == profile_id:
+            u_settings.active_profile_id = u_settings.profiles[0].id
+
+        self._ensure_profile_migration(u_settings)
+        self.data[uid_str] = u_settings
+        self.save_settings()
+        return True
+
+    def update_sender_profile(
+        self, user_id: int, profile_id: str, **kwargs
+    ) -> Optional[SenderProfile]:
+        """Update specific sender profile fields."""
+        uid_str = str(user_id)
+        u_settings = self.get_user_settings(user_id)
+        found = None
+        for p in u_settings.profiles:
+            if p.id == profile_id:
+                found = p
+                break
+        if not found:
+            return None
+
+        p_dict = found.model_dump()
+        for k, v in kwargs.items():
+            if hasattr(found, k):
+                p_dict[k] = v
+        updated_p = SenderProfile(**p_dict)
+
+        u_settings.profiles = [
+            updated_p if p.id == profile_id else p for p in u_settings.profiles
+        ]
+        self._ensure_profile_migration(u_settings)
+        self.data[uid_str] = u_settings
+        self.save_settings()
+        return updated_p
 
     def update_user_settings(
         self,
@@ -171,7 +357,7 @@ class UserSettingsManager:
         custom_settings: Optional[UserCustomSettings] = None,
         **kwargs,
     ):
-        """Update fields for a user's custom settings."""
+        """Update fields for a user's custom settings and sync with active profile."""
         uid_str = str(user_id)
         current = self.get_user_settings(user_id)
         updated_dict = current.model_dump()
@@ -184,7 +370,20 @@ class UserSettingsManager:
             if hasattr(current, k):
                 updated_dict[k] = v
 
-        self.data[uid_str] = UserCustomSettings(**updated_dict)
+        updated_obj = UserCustomSettings(**updated_dict)
+        self._ensure_profile_migration(updated_obj)
+
+        # Also sync changed sender fields into active profile
+        if updated_obj.profiles and updated_obj.active_profile_id:
+            for p in updated_obj.profiles:
+                if p.id == updated_obj.active_profile_id:
+                    for k, v in kwargs.items():
+                        if hasattr(p, k):
+                            setattr(p, k, v)
+                    break
+            self._ensure_profile_migration(updated_obj)
+
+        self.data[uid_str] = updated_obj
         self.save_settings()
 
     def reset_user_settings(self, user_id: int):
@@ -199,30 +398,57 @@ class UserSettingsManager:
         u_id = str(user_id)
         if u_id not in self.data:
             return False
-        user_cfg = self.data[u_id]
+        user_cfg = self.get_user_settings(user_id)
         has_np = bool(user_cfg.nova_poshta_api_key and user_cfg.nova_poshta_api_key.strip())
         has_ai = bool(user_cfg.ai_api_key and user_cfg.ai_api_key.strip())
         return has_np and has_ai
 
     def get_effective_settings(
-        self, user_id: int, global_settings: Settings
+        self, user_id: int, global_settings: Settings, profile_id: Optional[str] = None
     ) -> Settings:
         """Return a merged Settings object taking user overrides into account.
-        If user is not configured with credentials, blank out NP and AI credentials to prevent fallback leakage.
+        If profile_id is specified, use that profile's credentials.
+        Otherwise use the active profile.
+        If user is not configured with credentials, blank out NP and AI credentials.
         """
         user_custom = self.get_user_settings(user_id)
+        target_profile = None
+        if profile_id:
+            for p in user_custom.profiles:
+                if p.id == profile_id:
+                    target_profile = p
+                    break
+        if not target_profile:
+            target_profile = self.get_active_profile(user_id)
+
         effective_dict = global_settings.model_dump()
 
-        if user_custom.nova_poshta_api_key and user_custom.nova_poshta_api_key.strip():
-            effective_dict["nova_poshta_api_key"] = user_custom.nova_poshta_api_key
-            effective_dict["sender_counterparty_ref"] = user_custom.sender_counterparty_ref or ""
-            effective_dict["sender_contact_ref"] = user_custom.sender_contact_ref or ""
-            effective_dict["sender_city_ref"] = user_custom.sender_city_ref or ""
-            effective_dict["sender_address_ref"] = user_custom.sender_address_ref or ""
-            effective_dict["sender_phone"] = user_custom.sender_phone or ""
-            effective_dict["sender_name"] = user_custom.sender_name or ""
+        np_key = (
+            target_profile.nova_poshta_api_key
+            if target_profile
+            else user_custom.nova_poshta_api_key
+        )
+        if np_key and np_key.strip():
+            effective_dict["nova_poshta_api_key"] = np_key
+            effective_dict["sender_counterparty_ref"] = (
+                (target_profile.sender_counterparty_ref if target_profile else user_custom.sender_counterparty_ref) or ""
+            )
+            effective_dict["sender_contact_ref"] = (
+                (target_profile.sender_contact_ref if target_profile else user_custom.sender_contact_ref) or ""
+            )
+            effective_dict["sender_city_ref"] = (
+                (target_profile.sender_city_ref if target_profile else user_custom.sender_city_ref) or ""
+            )
+            effective_dict["sender_address_ref"] = (
+                (target_profile.sender_address_ref if target_profile else user_custom.sender_address_ref) or ""
+            )
+            effective_dict["sender_phone"] = (
+                (target_profile.sender_phone if target_profile else user_custom.sender_phone) or ""
+            )
+            effective_dict["sender_name"] = (
+                (target_profile.sender_name if target_profile else user_custom.sender_name) or ""
+            )
         else:
-            # User has not provided their API key: blank out user credentials
             effective_dict["nova_poshta_api_key"] = ""
             effective_dict["sender_counterparty_ref"] = ""
             effective_dict["sender_contact_ref"] = ""
@@ -237,7 +463,6 @@ class UserSettingsManager:
             if user_custom.ai_model:
                 effective_dict["ai_model"] = user_custom.ai_model
         else:
-            # Blank out AI API key and base URL to prevent inheriting global admin credentials
             effective_dict["ai_api_key"] = ""
             effective_dict["ai_base_url"] = ""
 

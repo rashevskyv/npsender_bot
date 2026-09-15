@@ -12,7 +12,13 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 
 from src.config import Settings
-from src.storage import UserSettingsManager, UserCustomSettings, SavedDraft, SavedScanSheet
+from src.storage import (
+    UserSettingsManager,
+    UserCustomSettings,
+    SavedDraft,
+    SavedScanSheet,
+    SenderProfile,
+)
 from src.ai.schemas import ParsedRecipientInfo
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
@@ -40,6 +46,12 @@ from src.bot.keyboards import (
     get_cod_shipments_keyboard,
     TrackActionCallback,
     get_tracking_keyboard,
+    get_waybill_action_keyboard,
+    get_barcode_keyboard,
+    get_limit_exceeded_confirmation_keyboard,
+    UserProfileCallback,
+    get_users_management_keyboard,
+    get_profile_delete_keyboard,
 )
 
 
@@ -59,6 +71,8 @@ USER_MESSAGE_BUFFERS: Dict[int, List[str]] = {}
 USER_DEBOUNCE_TASKS: Dict[int, asyncio.Task] = {}
 USER_LAST_MESSAGES: Dict[int, Message] = {}
 USER_TRACKING_WAITING: set = set()
+USER_ADD_PROFILE_WAITING: set = set()
+USER_BARCODE_WAITING: set = set()
 
 
 
@@ -96,6 +110,8 @@ def clear_user_active_session(user_id: int):
         PENDING_SESSIONS.pop(session_id, None)
     USER_LAST_PARSED_INFO.pop(user_id, None)
     USER_TRACKING_WAITING.discard(user_id)
+    USER_ADD_PROFILE_WAITING.discard(user_id)
+    USER_BARCODE_WAITING.discard(user_id)
 
 
 def _parse_draft_date(date_str: str) -> Optional[datetime.datetime]:
@@ -513,6 +529,20 @@ def is_tracking_intent(text: str) -> bool:
     return bool(has_inquiry and has_parcel_entity)
 
 
+def is_barcode_intent(text: str) -> bool:
+    """Check if message expresses an intent to generate barcode for a waybill."""
+    t = text.lower()
+    keywords = [
+        "штрихкод",
+        "штрих-код",
+        "штрих код",
+        "barcode",
+        "бар код",
+        "баркод",
+    ]
+    return any(k in t for k in keywords)
+
+
 def format_tracking_card(doc: TrackingDocumentDetails) -> str:
     """Format full tracking details from Nova Poshta API into an informative Telegram markdown card."""
     lines = []
@@ -658,6 +688,296 @@ def format_tracking_card(doc: TrackingDocumentDetails) -> str:
     return "\n".join(lines)
 
 
+async def evaluate_all_profiles_cod_limits(
+    user_id: int,
+    cod_val: float,
+    storage_manager: UserSettingsManager,
+    eff_settings: Settings,
+    editing_ref: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Evaluate COD limits across all configured sender profiles of a user.
+    Finds the profile with the most remaining limit and determines if an alternative should be recommended.
+    """
+    profiles = storage_manager.get_sender_profiles(user_id)
+    active_profile = storage_manager.get_active_profile(user_id)
+
+    if not profiles:
+        return {
+            "profiles_status": {},
+            "suggested_profile": None,
+            "active_profile": None,
+        }
+
+    profiles_status = {}
+
+    async def _fetch_prof_stat(p):
+        try:
+            p_settings = storage_manager.get_effective_settings(user_id, eff_settings, profile_id=p.id)
+            if not p_settings.nova_poshta_api_key or not p_settings.sender_phone:
+                s_limit = (p.cod_monthly_limit_sum - 1.0) if (p.cod_monthly_limit_sum and p.cod_monthly_limit_sum > 0) else 29999.0
+                return p.id, {
+                    "profile": p,
+                    "used_sum": 0.0,
+                    "used_cnt": 0,
+                    "rem_sum": s_limit,
+                    "safe_limit": s_limit,
+                    "new_sum": cod_val,
+                    "is_exceeded": False,
+                }
+
+            p_client = NovaPoshtaClient(p_settings)
+            stats = await p_client.get_monthly_cod_stats(
+                user_phone=p_settings.sender_phone,
+                user_cp_ref=p_settings.sender_counterparty_ref,
+            )
+            u_sum = stats.total_sum
+            u_cnt = stats.total_count
+
+            if editing_ref and stats.items:
+                for item in stats.items:
+                    if item.ref == editing_ref or item.int_doc_number == editing_ref:
+                        u_sum = max(0.0, u_sum - item.cod_amount)
+                        u_cnt = max(0, u_cnt - 1)
+                        break
+
+            s_limit = (p.cod_monthly_limit_sum - 1.0) if (p.cod_monthly_limit_sum and p.cod_monthly_limit_sum > 0) else 29999.0
+            r_sum = max(0.0, s_limit - u_sum)
+            new_s = u_sum + cod_val
+            is_exc = bool(p.cod_monthly_limit_sum and new_s >= p.cod_monthly_limit_sum)
+            return p.id, {
+                "profile": p,
+                "used_sum": u_sum,
+                "used_cnt": u_cnt,
+                "rem_sum": r_sum,
+                "safe_limit": s_limit,
+                "new_sum": new_s,
+                "is_exceeded": is_exc,
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch COD stats for profile {p.name} ({p.id}): {e}")
+            s_limit = (p.cod_monthly_limit_sum - 1.0) if (p.cod_monthly_limit_sum and p.cod_monthly_limit_sum > 0) else 29999.0
+            return p.id, {
+                "profile": p,
+                "used_sum": 0.0,
+                "used_cnt": 0,
+                "rem_sum": s_limit,
+                "safe_limit": s_limit,
+                "new_sum": cod_val,
+                "is_exceeded": False,
+            }
+
+    results = await asyncio.gather(*[_fetch_prof_stat(p) for p in profiles])
+    for pid, pdata in results:
+        profiles_status[pid] = pdata
+
+    suggested_profile = None
+    if len(profiles) > 1 and active_profile:
+        act_stat = profiles_status.get(active_profile.id)
+        other_stats = [st for pid, st in profiles_status.items() if pid != active_profile.id]
+
+        if act_stat and other_stats:
+            act_rem = act_stat["rem_sum"]
+            act_exceeded = act_stat["is_exceeded"]
+            act_near = bool(act_stat["safe_limit"] and (act_stat["new_sum"] / (act_stat["safe_limit"] + 1.0)) >= 0.8)
+
+            non_exceeded_others = [st for st in other_stats if not st["is_exceeded"]]
+            candidates = non_exceeded_others if non_exceeded_others else other_stats
+            best_other = max(candidates, key=lambda st: st["rem_sum"])
+
+            should_suggest = False
+            if act_exceeded and not best_other["is_exceeded"]:
+                should_suggest = True
+            elif act_near and best_other["rem_sum"] > act_rem:
+                should_suggest = True
+            elif cod_val > 0 and best_other["rem_sum"] > (act_rem + 500.0):
+                should_suggest = True
+
+            if should_suggest:
+                b_prof = best_other["profile"]
+                suggested_profile = {
+                    "id": b_prof.id,
+                    "name": b_prof.name or b_prof.sender_name or "Користувач",
+                    "rem_sum": best_other["rem_sum"],
+                    "used_sum": best_other["used_sum"],
+                    "safe_limit": best_other["safe_limit"],
+                    "is_exceeded": best_other["is_exceeded"],
+                }
+
+    return {
+        "profiles_status": profiles_status,
+        "suggested_profile": suggested_profile,
+        "active_profile": active_profile,
+    }
+
+
+async def evaluate_cod_limits(
+    user_id: int,
+    cod_val: float,
+    user_np_client: NovaPoshtaClient,
+    storage_manager: UserSettingsManager,
+    eff_settings: Settings,
+    editing_ref: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Evaluate current monthly COD statistics, calculate new totals, and check limits."""
+    if cod_val <= 0:
+        return {
+            "has_cod": False,
+            "is_exceeded": False,
+            "is_near": False,
+            "summary_text": "",
+            "warn_line": "",
+            "base_sum": 0.0,
+            "base_cnt": 0,
+            "new_total_sum": 0.0,
+            "new_total_cnt": 0,
+            "safe_limit": None,
+            "sum_limit": None,
+            "count_limit": None,
+            "rem_sum": 0.0,
+            "rem_cnt": 0,
+            "suggested_profile": None,
+        }
+
+    u_custom = storage_manager.get_user_settings(user_id)
+    warning_enabled = getattr(u_custom, "cod_warning_enabled", True)
+    sum_limit = u_custom.cod_monthly_limit_sum
+    count_limit = u_custom.cod_monthly_limit_count
+
+    try:
+        stats = await user_np_client.get_monthly_cod_stats(
+            user_phone=eff_settings.sender_phone,
+            user_cp_ref=eff_settings.sender_counterparty_ref,
+        )
+        base_sum = stats.total_sum
+        base_cnt = stats.total_count
+
+        # If editing existing draft, subtract its previous COD amount to prevent double-counting
+        if editing_ref and stats.items:
+            for item in stats.items:
+                if item.ref == editing_ref or item.int_doc_number == editing_ref:
+                    base_sum = max(0.0, base_sum - item.cod_amount)
+                    base_cnt = max(0, base_cnt - 1)
+                    break
+
+        new_total_sum = base_sum + cod_val
+        new_total_cnt = base_cnt + 1
+
+        safe_limit = (sum_limit - 1.0) if (sum_limit and sum_limit > 0) else None
+
+        is_sum_exceeded = bool(sum_limit and sum_limit > 0 and new_total_sum >= sum_limit)
+        is_sum_near = bool(
+            sum_limit and sum_limit > 0 and not is_sum_exceeded and (new_total_sum / sum_limit) >= 0.8
+        )
+        rem_sum = max(0.0, (safe_limit - new_total_sum)) if safe_limit else 0.0
+        exceeded_sum = int(new_total_sum - safe_limit) if (is_sum_exceeded and safe_limit) else 0
+
+        is_cnt_exceeded = bool(count_limit and count_limit > 0 and new_total_cnt > count_limit)
+        is_cnt_near = bool(
+            count_limit and count_limit > 0 and not is_cnt_exceeded and new_total_cnt >= int(count_limit * 0.8)
+        )
+        rem_cnt = max(0, (count_limit - new_total_cnt)) if count_limit else 0
+        exceeded_cnt = (new_total_cnt - count_limit) if is_cnt_exceeded else 0
+
+        is_exceeded = bool((is_sum_exceeded or is_cnt_exceeded) and warning_enabled)
+        is_near = bool((is_sum_near or is_cnt_near) and warning_enabled)
+
+        # Build informative markdown block
+        lines = []
+        lines.append("📊 *Контроль місячного ліміту післяплати:*")
+        lines.append(f"• Використано наразі: `{int(base_sum)} грн` ({base_cnt} ТТН)")
+        lines.append(f"• Ця накладна: `+{int(cod_val)} грн`")
+
+        if sum_limit and sum_limit > 0:
+            if is_sum_exceeded:
+                lines.append(
+                    f"• 🚨 *УВАГА: Разом буде `{int(new_total_sum)} грн` — ПЕРЕТИН ВСТАНОВЛЕНОЇ МЕЖІ ({int(safe_limit)} грн) на {exceeded_sum} грн!*"
+                )
+            elif is_sum_near:
+                lines.append(
+                    f"• ⚠️ *Увага: Разом буде `{int(new_total_sum)} грн`* із {int(safe_limit)} грн (залишок: лише `{int(rem_sum)} грн`!)"
+                )
+            else:
+                lines.append(
+                    f"• ✅ *Разом буде:* `{int(new_total_sum)} грн` із {int(safe_limit)} грн (залишок безпечного ліміту: `{int(rem_sum)} грн`)"
+                )
+        else:
+            lines.append(f"• Разом буде: `{int(new_total_sum)} грн` (_ліміт суми вимкнено_)")
+
+        if count_limit and count_limit > 0:
+            if is_cnt_exceeded:
+                lines.append(
+                    f"• 🚨 *Кількість ТТН ({new_total_cnt} шт) перевищить встановлений ліміт ({count_limit} шт) на {exceeded_cnt} шт!*"
+                )
+            elif is_cnt_near:
+                lines.append(
+                    f"• ⚠️ Кількість ТТН: {new_total_cnt} із {count_limit} шт (залишок: {rem_cnt} шт)"
+                )
+            else:
+                lines.append(
+                    f"• ✅ Кількість ТТН: {new_total_cnt} із {count_limit} шт"
+                )
+
+        # Check other profiles for recommendation
+        all_profs_eval = await evaluate_all_profiles_cod_limits(
+            user_id=user_id,
+            cod_val=cod_val,
+            storage_manager=storage_manager,
+            eff_settings=eff_settings,
+            editing_ref=editing_ref,
+        )
+        suggested_profile = all_profs_eval.get("suggested_profile")
+        if suggested_profile:
+            s_name = suggested_profile["name"]
+            s_rem = int(suggested_profile["rem_sum"])
+            s_used = int(suggested_profile["used_sum"])
+            lines.append(
+                f"\n💡 *Пропозиція:* У користувача *«{s_name}»* залишилося більше ліміту: `{s_rem} грн` (використано лише `{s_used} грн`).\n"
+                f"Ви можете переключити відправника кнопкою нижче!"
+            )
+
+        info_block = "\n" + "\n".join(lines) + "\n"
+        summary_text = "\n".join(lines)
+
+        return {
+            "has_cod": True,
+            "is_exceeded": is_exceeded,
+            "is_near": is_near,
+            "summary_text": summary_text,
+            "warn_line": info_block,
+            "base_sum": base_sum,
+            "base_cnt": base_cnt,
+            "new_total_sum": new_total_sum,
+            "new_total_cnt": new_total_cnt,
+            "safe_limit": safe_limit,
+            "sum_limit": sum_limit,
+            "count_limit": count_limit,
+            "exceeded_sum": exceeded_sum,
+            "exceeded_cnt": exceeded_cnt,
+            "rem_sum": rem_sum,
+            "rem_cnt": rem_cnt,
+            "suggested_profile": suggested_profile,
+        }
+    except Exception as e:
+        logger.warning(f"Error evaluating COD limits: {e}")
+        return {
+            "has_cod": True,
+            "is_exceeded": False,
+            "is_near": False,
+            "summary_text": "",
+            "warn_line": "",
+            "base_sum": 0.0,
+            "base_cnt": 0,
+            "new_total_sum": cod_val,
+            "new_total_cnt": 1,
+            "safe_limit": None,
+            "sum_limit": None,
+            "count_limit": None,
+            "rem_sum": 0.0,
+            "rem_cnt": 0,
+            "suggested_profile": None,
+        }
+
+
 def register_handlers(
 
     settings: Settings,
@@ -747,7 +1067,221 @@ def register_handlers(
             if flt:
                 res += f", кв. {flt}"
             return res
-        return "Відділення Нової Пошти"
+    async def _render_users_dashboard(target_msg_or_callback: Any, user_id: int):
+        """Render or update multi-user sender profiles dashboard with live COD balances."""
+        profiles = storage_manager.get_sender_profiles(user_id)
+        if not profiles:
+            text = (
+                "👥 *Керування користувачами (відправниками):*\n\n"
+                "У вас ще не додано жодного профілю відправника Нової Пошти.\n\n"
+                "💡 *Як додати відправника:*\n"
+                "• Надішліть команду `/add_user ВАШ_КЛЮЧ [Назва]` для додавання користувача\n"
+                "• Або надішліть `/set_np_key ВАШ_КЛЮЧ` для прив'язки основного ключа"
+            )
+            if isinstance(target_msg_or_callback, CallbackQuery):
+                await target_msg_or_callback.message.edit_text(text, parse_mode="Markdown")
+            else:
+                await target_msg_or_callback.answer(text, parse_mode="Markdown")
+            return
+
+        eff_s = storage_manager.get_effective_settings(user_id, settings)
+        all_eval = await evaluate_all_profiles_cod_limits(
+            user_id=user_id,
+            cod_val=0.0,
+            storage_manager=storage_manager,
+            eff_settings=eff_s,
+        )
+        balances_map = all_eval.get("profiles_status", {})
+        active_profile = storage_manager.get_active_profile(user_id)
+        active_id = active_profile.id if active_profile else None
+
+        card_lines = ["👥 *Керування користувачами (відправниками Нової Пошти):*\n"]
+
+        if active_profile:
+            act_bal = balances_map.get(active_profile.id, {})
+            used_s = int(act_bal.get("used_sum", 0))
+            safe_l = int(act_bal.get("safe_limit", 29999))
+            rem_s = int(act_bal.get("rem_sum", 29999))
+            used_c = act_bal.get("used_cnt", 0)
+
+            card_lines.append("📌 *Поточний активний відправник:*")
+            card_lines.append(f"✅ *{active_profile.name}* (`{active_profile.sender_phone or 'тел. не вказано'}`)")
+            card_lines.append(f"   📊 *Післяплата:* `{used_s} грн` із {safe_l} грн (вільно: `{rem_s} грн`) | {used_c} ТТН")
+            card_lines.append(f"   🏙 *Відправка:* {active_profile.sender_city_name or 'Місто не вказано'}, {active_profile.sender_warehouse_name or 'Відділення не вказано'}\n")
+
+        other_profs = [p for p in profiles if p.id != active_id]
+        if other_profs:
+            card_lines.append("📋 *Інші налаштовані користувачі:*")
+            for p in other_profs:
+                p_bal = balances_map.get(p.id, {})
+                p_used = int(p_bal.get("used_sum", 0))
+                p_safe = int(p_bal.get("safe_limit", 29999))
+                p_rem = int(p_bal.get("rem_sum", 29999))
+                p_cnt = p_bal.get("used_cnt", 0)
+
+                card_lines.append(f"▫️ *{p.name}* (`{p.sender_phone or 'тел. не вказано'}`)")
+                card_lines.append(f"   📊 *Післяплата:* `{p_used} грн` із {p_safe} грн (вільно: `{p_rem} грн`) | {p_cnt} ТТН")
+                card_lines.append(f"   🏙 *Відправка:* {p.sender_city_name or 'Не вказано'}, {p.sender_warehouse_name or 'Не вказано'}\n")
+
+        card_lines.append("💡 *Оптимізація післяплати:*")
+        card_lines.append("Безпечна межа накладеного платежу становить **29 999 грн** на людину в місяць. Бот автоматично пропонує перемкнути користувача, коли у поточного закінчується ліміт!")
+
+        kb = get_users_management_keyboard(profiles, active_id, balances_map)
+        card_text = "\n".join(card_lines)
+
+        if isinstance(target_msg_or_callback, CallbackQuery):
+            await target_msg_or_callback.message.edit_text(card_text, parse_mode="Markdown", reply_markup=kb)
+        else:
+            await target_msg_or_callback.edit_text(card_text, parse_mode="Markdown", reply_markup=kb)
+
+    async def _handle_add_profile_with_key(message: Message, user_id: int, api_key: str, custom_name: str = ""):
+        """Fetch sender info for new API key and add a new sender profile."""
+        USER_ADD_PROFILE_WAITING.discard(user_id)
+        status_msg = await message.answer(
+            "⏳ *Перевірка API-ключа та підтягування даних контрагента з Нової Пошти...*",
+            parse_mode="Markdown",
+        )
+        try:
+            profile_data = await np_client.fetch_sender_profile(api_key)
+            prof_name = (
+                custom_name
+                or profile_data.get("sender_name")
+                or f"Користувач {len(storage_manager.get_sender_profiles(user_id)) + 1}"
+            )
+            new_id = f"prof_{int(datetime.datetime.now().timestamp())}"
+            new_profile = SenderProfile(
+                id=new_id,
+                name=prof_name,
+                nova_poshta_api_key=api_key,
+                sender_counterparty_ref=profile_data.get("sender_counterparty_ref"),
+                sender_contact_ref=profile_data.get("sender_contact_ref"),
+                sender_city_ref=profile_data.get("sender_city_ref"),
+                sender_address_ref=profile_data.get("sender_address_ref"),
+                sender_phone=profile_data.get("sender_phone"),
+                sender_name=profile_data.get("sender_name"),
+                cod_monthly_limit_sum=30000.0,
+                cod_monthly_limit_count=10,
+                cod_warning_enabled=True,
+            )
+            storage_manager.add_sender_profile(user_id, new_profile, set_active=False)
+            await status_msg.edit_text(
+                f"✅ *Користувача «{prof_name}» успішно додано!*\n\n"
+                f"👤 *ПІБ:* `{profile_data.get('sender_name')}`\n"
+                f"📞 *Телефон:* `{profile_data.get('sender_phone') or 'Не вказано'}`\n"
+                f"🔑 *API-ключ:* `{api_key[:6]}...{api_key[-4:]}`\n\n"
+                "🏙 Не забудьте перевірити або встановити місто (`/set_city Назва`) та відділення (`/set_warehouse Номер`) після перемикання на цей профіль.\n\n"
+                "Натисніть кнопку `👥 Користувачі`, щоб переглянути баланси або обрати активного користувача.",
+                parse_mode="Markdown",
+                reply_markup=get_main_reply_keyboard(),
+            )
+        except Exception as e:
+            logger.error(f"Failed to add sender profile: {e}")
+            await status_msg.edit_text(
+                f"❌ *Помилка перевірки API-ключа:* {str(e)}", parse_mode="Markdown"
+            )
+
+    @router.message(Command("users"))
+    @router.message(Command("profiles"))
+    @router.message(Command("senders"))
+    @router.message(F.text == "👥 Користувачі")
+    async def cmd_users(message: Message):
+        """Display sender profiles management dashboard with live COD limit balances."""
+        clear_user_active_session(message.from_user.id)
+        user_id = message.from_user.id
+        profiles = storage_manager.get_sender_profiles(user_id)
+
+        if not profiles:
+            await message.answer(
+                "👥 *Керування користувачами (відправниками):*\n\n"
+                "У вас ще не додано жодного профілю відправника Нової Пошти.\n\n"
+                "💡 *Як додати відправника:*\n"
+                "• Надішліть команду `/add_user ВАШ_КЛЮЧ [Назва]` для додавання користувача\n"
+                "• Або надішліть команду `/set_np_key ВАШ_КЛЮЧ` для налаштування основного профілю",
+                parse_mode="Markdown",
+                reply_markup=get_main_reply_keyboard(),
+            )
+            return
+
+        status_msg = await message.answer(
+            "⏳ *Отримання актуальних балансів накладеного платежу для всіх користувачів...*",
+            parse_mode="Markdown",
+        )
+        await _render_users_dashboard(status_msg, user_id)
+
+    @router.message(Command("add_user"))
+    async def cmd_add_user(message: Message):
+        """Add a new sender user profile via command."""
+        clear_user_active_session(message.from_user.id)
+        user_id = message.from_user.id
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 2:
+            USER_ADD_PROFILE_WAITING.add(user_id)
+            await message.answer(
+                "➕ *Додавання нового користувача (відправника Нової Пошти):*\n\n"
+                "⚠️ *Використання:* `/add_user ВАШ_API_КЛЮЧ_НП [Назва/Ярлик]`\n\n"
+                "Або просто надішліть API-ключ Нової Пошти у наступному повідомленні.",
+                parse_mode="Markdown",
+            )
+            return
+
+        api_key = parts[1].strip()
+        custom_name = parts[2].strip() if len(parts) > 2 else ""
+        await _handle_add_profile_with_key(message, user_id, api_key, custom_name)
+
+    @router.callback_query(UserProfileCallback.filter())
+    async def process_user_profile_callback(callback: CallbackQuery, callback_data: UserProfileCallback):
+        """Handle inline actions for sender user profiles."""
+        user_id = callback.from_user.id
+        action = callback_data.action
+        profile_id = callback_data.profile_id
+
+        if action == "select":
+            switched = storage_manager.set_active_profile(user_id, profile_id)
+            if switched:
+                await callback.answer(f"✅ Активним обрано «{switched.name}»!")
+            else:
+                await callback.answer("❌ Профіль не знайдено", show_alert=True)
+            await _render_users_dashboard(callback, user_id)
+            return
+
+        if action == "refresh":
+            await callback.answer("🔄 Оновлення балансів...")
+            await _render_users_dashboard(callback, user_id)
+            return
+
+        if action == "delete_prompt":
+            profiles = storage_manager.get_sender_profiles(user_id)
+            active_p = storage_manager.get_active_profile(user_id)
+            active_id = active_p.id if active_p else None
+            del_kb = get_profile_delete_keyboard(profiles, active_id)
+            await callback.message.edit_text(
+                "🗑 *Оберіть користувача, якого бажаєте видалити:*\n\n"
+                "_(Активного користувача видалити не можна; спочатку перемкніться на іншого)_",
+                parse_mode="Markdown",
+                reply_markup=del_kb,
+            )
+            await callback.answer()
+            return
+
+        if action == "delete":
+            deleted = storage_manager.delete_sender_profile(user_id, profile_id)
+            if deleted:
+                await callback.answer("🗑 Користувача успішно видалено!")
+            else:
+                await callback.answer("❌ Не вдалося видалити (не можна видалити єдиного користувача)", show_alert=True)
+            await _render_users_dashboard(callback, user_id)
+            return
+
+        if action == "add":
+            USER_ADD_PROFILE_WAITING.add(user_id)
+            await callback.message.answer(
+                "➕ *Додавання нового користувача (відправника Нової Пошти):*\n\n"
+                "Надішліть ваш API-ключ Нової Пошти для цього користувача прямо в чат (або введіть команду `/add_user КЛЮЧ [Назва]`).\n\n"
+                "💡 Бот автоматично перевірить ключ, підтягне ПІБ, телефон і контрагента з бази Нової Пошти.",
+                parse_mode="Markdown",
+            )
+            await callback.answer()
+            return
 
     @router.message(Command("settings"))
     @router.message(Command("profile"))
@@ -772,6 +1306,11 @@ def register_handlers(
         ai_url_display = u_settings.ai_base_url or "https://api.openai.com/v1"
         ai_model_display = u_settings.ai_model or settings.ai_model
 
+        active_prof = storage_manager.get_active_profile(message.from_user.id)
+        profiles = storage_manager.get_sender_profiles(message.from_user.id)
+        active_prof_name = active_prof.name if active_prof else "Основний"
+        prof_cnt_str = f"{len(profiles)} налаштовано" if profiles else "0"
+
         sum_lim_str = f"`{int(u_settings.cod_monthly_limit_sum)} грн`" if u_settings.cod_monthly_limit_sum else "_Без ліміту_"
         cnt_lim_str = f"`{u_settings.cod_monthly_limit_count} шт`" if u_settings.cod_monthly_limit_count else "_Без ліміту_"
 
@@ -779,6 +1318,7 @@ def register_handlers(
             f"⚙️ *Персональний профіль користувача:* [{message.from_user.full_name}]\n\n"
             f"📊 *Загальний статус:* {status_icon}\n\n"
             "📮 *Дані Нової Пошти:*\n"
+            f"• 👥 *Активний відправник:* «{active_prof_name}» (всього: {prof_cnt_str}) | `/users`\n"
             f"• 🔑 *API-ключ НП:* {masked_np_key}\n"
             f"• 👤 *ПІБ відправника:* `{u_settings.sender_name or 'Не підтягнуто'}`\n"
             f"• 📞 *Телефон:* `{u_settings.sender_phone or 'Не підтягнуто'}`\n"
@@ -790,6 +1330,8 @@ def register_handlers(
             f"• 🌐 *URL API:* `{ai_url_display}`\n"
             f"• 🤖 *Модель AI:* `{ai_model_display}`\n\n"
             "💡 *Команди для керування:*\n"
+            "• `/users` — керування користувачами та лімітами післяплати\n"
+            "• `/add_user КЛЮЧ [Назва]` — додати нового користувача\n"
             "• `/set_np_key ВАШ_КЛЮЧ` — прив'язати API-ключ НП\n"
             "• `/set_ai_key ВАШ_КЛЮЧ` — прив'язати AI API-ключ\n"
             "• `/set_ai_url URL` — змінити URL AI-провайдера\n"
@@ -1190,6 +1732,98 @@ def register_handlers(
             "• `20450123456789`\n"
             "• `2045 0123 4567 89`\n\n"
             "💡 _Ви також можете просто скинути номер накладної у будь-який момент без натискання кнопок!_"
+        )
+        await message.answer(
+            prompt_text,
+            parse_mode="Markdown",
+            reply_markup=get_main_reply_keyboard(),
+        )
+
+    async def send_waybill_barcode(target_msg_or_callback, doc_number: str):
+        """Generate and send Code128 barcode photo for a waybill."""
+        clean_num = "".join(filter(str.isdigit, str(doc_number)))
+        is_callback = isinstance(target_msg_or_callback, CallbackQuery) or (
+            hasattr(target_msg_or_callback, "message")
+            and not hasattr(target_msg_or_callback, "chat")
+        )
+
+        if not clean_num or len(clean_num) < 11:
+            err_text = "❌ *Некоректний номер ТТН для генерації штрих-коду.*"
+            if is_callback and hasattr(target_msg_or_callback, "answer"):
+                try:
+                    await target_msg_or_callback.answer("❌ Некоректний номер ТТН.", show_alert=True)
+                except Exception:
+                    pass
+            elif hasattr(target_msg_or_callback, "answer"):
+                try:
+                    await target_msg_or_callback.answer(err_text, parse_mode="Markdown")
+                except Exception:
+                    pass
+            return
+
+        try:
+            barcode_bytes = generate_code128_barcode(clean_num)
+            photo_file = BufferedInputFile(barcode_bytes, filename=f"ttn_{clean_num}.png")
+            caption = (
+                f"📱 *Штрихкод для експрес-накладної (ТТН):*\n`{clean_num}`\n\n"
+                f"Покажіть цей штрихкод оператору у відділенні Нової Пошти для швидкого сканування або скористайтеся поштоматом."
+            )
+            kb = get_barcode_keyboard(clean_num)
+            if is_callback:
+                await target_msg_or_callback.message.answer_photo(
+                    photo=photo_file,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    reply_markup=kb,
+                )
+                if hasattr(target_msg_or_callback, "answer"):
+                    try:
+                        await target_msg_or_callback.answer("✅ Штрих-код згенеровано!")
+                    except Exception:
+                        pass
+            else:
+                await target_msg_or_callback.answer_photo(
+                    photo=photo_file,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    reply_markup=kb,
+                )
+        except Exception as e:
+            logger.error(f"Error generating waybill barcode: {e}", exc_info=True)
+            err_msg = f"❌ *Не вдалося згенерувати штрих-код:* {e}"
+            if is_callback and hasattr(target_msg_or_callback, "answer"):
+                try:
+                    await target_msg_or_callback.answer(f"❌ Помилка генерації: {e}", show_alert=True)
+                except Exception:
+                    pass
+            elif hasattr(target_msg_or_callback, "answer"):
+                try:
+                    await target_msg_or_callback.answer(err_msg, parse_mode="Markdown")
+                except Exception:
+                    pass
+
+    @router.message(Command("barcode"))
+    @router.message(Command("code128"))
+    @router.message(Command("штрихкод"))
+    async def cmd_barcode(message: Message):
+        """Generate barcode for a waybill by number or prompt user."""
+        user_id = message.from_user.id
+        clear_user_active_session(user_id)
+
+        parts = message.text.strip().split()
+        if len(parts) > 1:
+            raw_target = parts[1]
+            ttn = extract_ttn_from_text(raw_target) or "".join(filter(str.isdigit, raw_target))
+            if ttn and len(ttn) >= 11:
+                USER_BARCODE_WAITING.discard(user_id)
+                await send_waybill_barcode(message, ttn)
+                return
+
+        USER_BARCODE_WAITING.add(user_id)
+        prompt_text = (
+            "📱 *Генерація штрих-коду для накладної (ТТН)*\n\n"
+            "Надішліть номер накладної (14 цифр) у повідомленні.\n"
+            "Бот згенерує штрих-код для швидкого сканування оператором на касі або в поштоматі."
         )
         await message.answer(
             prompt_text,
@@ -2246,47 +2880,26 @@ def register_handlers(
             logger.error(f"Error processing text message: {e}", exc_info=True)
             await status_msg.edit_text(f"❌ *Сталася помилка:* {str(e)}", parse_mode="Markdown")
 
+    _evaluate_cod_limits = evaluate_cod_limits
+
     async def _check_cod_warning(
         user_id: int,
         cod_val: float,
         user_np_client: NovaPoshtaClient,
         storage_manager: UserSettingsManager,
         eff_settings: Settings,
+        editing_ref: Optional[str] = None,
     ) -> str:
-        """Return warning message if current COD parcel approaches or exceeds user's monthly limits."""
-        if cod_val <= 0:
-            return ""
-        u_custom = storage_manager.get_user_settings(user_id)
-        if not getattr(u_custom, "cod_warning_enabled", True):
-            return ""
-        sum_limit = u_custom.cod_monthly_limit_sum
-        count_limit = u_custom.cod_monthly_limit_count
-        if not sum_limit and not count_limit:
-            return ""
-
-        try:
-            # Query live API every single time without caching
-            stats = await user_np_client.get_monthly_cod_stats(
-                user_phone=eff_settings.sender_phone,
-                user_cp_ref=eff_settings.sender_counterparty_ref,
-            )
-            new_total_sum = stats.total_sum + cod_val
-            new_total_cnt = stats.total_count + 1
-
-            if sum_limit and sum_limit > 0:
-                safe_limit = sum_limit - 1.0
-                if new_total_sum >= sum_limit:
-                    exceeded_by = int(new_total_sum - safe_limit)
-                    return f"\n🚨 *УВАГА: Ця ТТН перевищить безпечний місячний ліміт наложки (макс. {int(safe_limit)} грн) на {exceeded_by} грн (загалом буде {int(new_total_sum)} грн)!*\n"
-                elif (new_total_sum / sum_limit) >= 0.8:
-                    rem = max(0, int(safe_limit - new_total_sum))
-                    return f"\n⚠️ *Увага: Залишок безпечного ліміту наложки після цієї ТТН складе лише {rem} грн (із {int(safe_limit)} грн)!*\n"
-
-            if count_limit and count_limit > 0 and new_total_cnt > count_limit:
-                return f"\n⚠️ *УВАГА: Кількість наложок за місяць ({new_total_cnt} шт) перевищить ваш ліміт ({count_limit} шт)!*\n"
-        except Exception as e:
-            logger.warning(f"Error checking COD warning: {e}")
-        return ""
+        """Return warning and status message for COD limits."""
+        res = await evaluate_cod_limits(
+            user_id=user_id,
+            cod_val=cod_val,
+            user_np_client=user_np_client,
+            storage_manager=storage_manager,
+            eff_settings=eff_settings,
+            editing_ref=editing_ref,
+        )
+        return res.get("warn_line", "")
 
 
     async def _continue_processing_recipient_info(
@@ -2665,16 +3278,26 @@ def register_handlers(
 
         cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
-        warn_line = await _check_cod_warning(
+        eval_res = await evaluate_cod_limits(
             user_id=user_id,
             cod_val=cod_val,
             user_np_client=user_np_client,
             storage_manager=storage_manager,
             eff_settings=eff_settings,
+            editing_ref=editing_ref,
         )
+        warn_line = eval_res.get("warn_line", "")
+        suggested_prof = eval_res.get("suggested_profile")
+
+        profiles = storage_manager.get_sender_profiles(user_id)
+        active_p = storage_manager.get_active_profile(user_id)
+        has_multiple_profiles = len(profiles) > 1
+        active_name = active_p.name if active_p else None
+        sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple_profiles) else ""
 
         card_text = (
             "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+            f"{sender_prefix}"
             f"👤 *Отримувач:* {parsed_info.full_name}\n"
             f"📞 *Телефон:* `{parsed_info.phone}`\n"
             f"🏙 *Місто:* {matched_city.description}\n"
@@ -2685,7 +3308,6 @@ def register_handlers(
             f"{warn_line}\n"
             "Перевірте дані та оберіть дію нижче:"
         )
-
 
         u_custom = storage_manager.get_user_settings(user_id)
         card_mask = u_custom.sender_card_mask
@@ -2701,6 +3323,9 @@ def register_handlers(
                 cod_payment_type=cod_type,
                 sender_card_mask=card_mask,
                 session_id=session_id,
+                suggested_profile=suggested_prof,
+                active_profile_name=active_name,
+                has_multiple_profiles=has_multiple_profiles,
             ),
         )
 
@@ -2740,22 +3365,71 @@ def register_handlers(
             )
             return
 
-        # Check if user sent a TTN or asked to track a parcel
+        # Check if user is waiting to add a sender profile with an NP API key
+        if user_id in USER_ADD_PROFILE_WAITING:
+            clean_key = text.strip()
+            if len(clean_key) >= 20 and " " not in clean_key:
+                await _handle_add_profile_with_key(message, user_id, clean_key)
+                return
+            else:
+                USER_ADD_PROFILE_WAITING.discard(user_id)
+
+        # Check if user sent a TTN or asked to track a parcel / generate barcode
         ttn = extract_ttn_from_text(text)
-        is_tracking_req = (
+
+        # 1. Waiting for barcode
+        if user_id in USER_BARCODE_WAITING and ttn is not None:
+            USER_BARCODE_WAITING.discard(user_id)
+            await send_waybill_barcode(message, ttn)
+            return
+
+        # 2. Explicit barcode request with TTN
+        if ttn is not None and is_barcode_intent(text):
+            USER_BARCODE_WAITING.discard(user_id)
+            await send_waybill_barcode(message, ttn)
+            return
+
+        # 3. Explicit tracking request or waiting for tracking
+        is_explicit_track = (
             (user_id in USER_TRACKING_WAITING and ttn is not None)
             or (ttn is not None and is_tracking_intent(text))
-            or (
-                ttn is not None
-                and len(text.strip()) <= 35
-                and not any(w in text.lower() for w in ["реєстр", "scansheet", "чернетк", "створ"])
-            )
         )
-
-        if is_tracking_req and ttn:
+        if is_explicit_track and ttn:
             USER_TRACKING_WAITING.discard(user_id)
             await handle_track_document(message, ttn, user_id)
             return
+
+        # 4. User dropped / sent just a waybill number -> present both Track & Barcode buttons
+        if (
+            ttn is not None
+            and len(text.strip()) <= 35
+            and not any(w in text.lower() for w in ["реєстр", "scansheet", "чернетк", "створ"])
+        ):
+            USER_TRACKING_WAITING.discard(user_id)
+            USER_BARCODE_WAITING.discard(user_id)
+            kb = get_waybill_action_keyboard(ttn)
+            await message.answer(
+                f"📦 *Отримано номер накладної (ТТН):*\n`{ttn}`\n\n"
+                "Оберіть потрібну дію:",
+                parse_mode="Markdown",
+                reply_markup=kb,
+            )
+            return
+
+        # If user was in barcode waiting mode but input wasn't recognized as TTN
+        if user_id in USER_BARCODE_WAITING:
+            alpha_chars = [c for c in text if c.isalpha()]
+            if len(alpha_chars) < 10:
+                await message.answer(
+                    "⚠️ *Номер ТТН не розпізнано.*\n"
+                    "Номер накладної Нової Пошти зазвичай містить 14 цифр (наприклад, `20450123456789`).\n"
+                    "Спробуйте ще раз або скористайтеся меню нижче.",
+                    parse_mode="Markdown",
+                    reply_markup=get_main_reply_keyboard(),
+                )
+                return
+            else:
+                USER_BARCODE_WAITING.discard(user_id)
 
         # If user was in tracking waiting mode but input wasn't recognized as TTN
         if user_id in USER_TRACKING_WAITING:
@@ -2800,7 +3474,14 @@ def register_handlers(
         eff_settings = storage_manager.get_effective_settings(user_id, settings)
         user_np_client = NovaPoshtaClient(eff_settings)
 
-        if action == "refresh":
+        if action == "track":
+            await callback.answer("⏳ Отримання даних ТТН...")
+            await handle_track_document(
+                callback.message, doc_number, user_id, status_msg=callback.message
+            )
+            return
+
+        elif action == "refresh":
             await callback.answer("⏳ Оновлення статусу ТТН...")
             try:
                 tracking_info = await user_np_client.track_document(doc_number)
@@ -2825,19 +3506,7 @@ def register_handlers(
 
         elif action == "barcode":
             await callback.answer("⏳ Генерація штрих-коду...")
-            barcode_bytes = generate_code128_barcode(doc_number)
-            photo_file = BufferedInputFile(
-                barcode_bytes, filename=f"ttn_{doc_number}.png"
-            )
-            caption = (
-                f"📱 *Штрихкод для експрес-накладної:*\n`{doc_number}`\n\n"
-                f"Покажіть цей штрихкод оператору у відділенні Нової Пошти для швидкого сканування."
-            )
-            await callback.message.answer_photo(
-                photo=photo_file,
-                caption=caption,
-                parse_mode="Markdown",
-            )
+            await send_waybill_barcode(callback, doc_number)
 
     @router.callback_query(WaybillActionCallback.filter())
     async def process_waybill_callback(
@@ -2920,16 +3589,26 @@ def register_handlers(
             cod_type = session.get("cod_payment_type", "cash")
             cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
-            warn_line = await _check_cod_warning(
+            eval_res = await _evaluate_cod_limits(
                 user_id=user_id,
                 cod_val=cod_val,
                 user_np_client=user_np_client,
                 storage_manager=storage_manager,
                 eff_settings=eff_settings,
+                editing_ref=session.get("editing_draft_ref"),
             )
+            warn_line = eval_res.get("warn_line", "")
+            s_prof = eval_res.get("suggested_profile")
+
+            profiles = storage_manager.get_sender_profiles(user_id)
+            active_p = storage_manager.get_active_profile(user_id)
+            has_multiple = len(profiles) > 1
+            active_name = active_p.name if active_p else None
+            sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple) else ""
 
             card_text = (
                 "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+                f"{sender_prefix}"
                 f"👤 *Отримувач:* {parsed_info.full_name}\n"
                 f"📞 *Телефон:* `{parsed_info.phone}`\n"
                 f"🏙 *Місто:* {city.description}\n"
@@ -2941,6 +3620,9 @@ def register_handlers(
                 "Перевірте дані та оберіть дію нижче:"
             )
 
+            u_custom = storage_manager.get_user_settings(user_id)
+            card_mask = u_custom.sender_card_mask
+
             await callback.message.edit_text(
                 card_text,
                 parse_mode="Markdown",
@@ -2950,7 +3632,11 @@ def register_handlers(
                     declared_value=next_val,
                     cod_amount=cod_val,
                     cod_payment_type=cod_type,
+                    sender_card_mask=card_mask,
                     session_id=session_id,
+                    suggested_profile=s_prof,
+                    active_profile_name=active_name,
+                    has_multiple_profiles=has_multiple,
                 ),
             )
             await callback.answer(f"Оціночну вартість встановлено: {int(next_val)} грн")
@@ -2979,16 +3665,26 @@ def register_handlers(
             cod_type = session.get("cod_payment_type", "cash")
             cod_str = "❌ Немає" if next_cod <= 0 else f"{int(next_cod)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
 
-            warn_line = await _check_cod_warning(
+            eval_res = await _evaluate_cod_limits(
                 user_id=user_id,
                 cod_val=next_cod,
                 user_np_client=user_np_client,
                 storage_manager=storage_manager,
                 eff_settings=eff_settings,
+                editing_ref=session.get("editing_draft_ref"),
             )
+            warn_line = eval_res.get("warn_line", "")
+            s_prof = eval_res.get("suggested_profile")
+
+            profiles = storage_manager.get_sender_profiles(user_id)
+            active_p = storage_manager.get_active_profile(user_id)
+            has_multiple = len(profiles) > 1
+            active_name = active_p.name if active_p else None
+            sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple) else ""
 
             card_text = (
                 "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+                f"{sender_prefix}"
                 f"👤 *Отримувач:* {parsed_info.full_name}\n"
                 f"📞 *Телефон:* `{parsed_info.phone}`\n"
                 f"🏙 *Місто:* {city.description}\n"
@@ -3011,6 +3707,9 @@ def register_handlers(
                     cod_payment_type=cod_type,
                     sender_card_mask=card_mask,
                     session_id=session_id,
+                    suggested_profile=s_prof,
+                    active_profile_name=active_name,
+                    has_multiple_profiles=has_multiple,
                 ),
             )
             msg_str = "Скасовано" if next_cod <= 0 else f"{int(next_cod)} грн"
@@ -3038,16 +3737,26 @@ def register_handlers(
             cod_val = session.get("cod_amount", 0.0)
             cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if new_type == 'card' else 'Готівка'})"
 
-            warn_line = await _check_cod_warning(
+            eval_res = await _evaluate_cod_limits(
                 user_id=user_id,
                 cod_val=cod_val,
                 user_np_client=user_np_client,
                 storage_manager=storage_manager,
                 eff_settings=eff_settings,
+                editing_ref=session.get("editing_draft_ref"),
             )
+            warn_line = eval_res.get("warn_line", "")
+            s_prof = eval_res.get("suggested_profile")
+
+            profiles = storage_manager.get_sender_profiles(user_id)
+            active_p = storage_manager.get_active_profile(user_id)
+            has_multiple = len(profiles) > 1
+            active_name = active_p.name if active_p else None
+            sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple) else ""
 
             card_text = (
                 "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+                f"{sender_prefix}"
                 f"👤 *Отримувач:* {parsed_info.full_name}\n"
                 f"📞 *Телефон:* `{parsed_info.phone}`\n"
                 f"🏙 *Місто:* {city.description}\n"
@@ -3070,14 +3779,275 @@ def register_handlers(
                     cod_payment_type=new_type,
                     sender_card_mask=card_mask,
                     session_id=session_id,
+                    suggested_profile=s_prof,
+                    active_profile_name=active_name,
+                    has_multiple_profiles=has_multiple,
                 ),
             )
             type_ua = "На картку" if new_type == "card" else "Готівкою у відділенні"
             await callback.answer(f"Виплату змінено на: {type_ua}")
             return
 
-        if action == "confirm":
+        if action == "switch_profile":
+            eval_res = await _evaluate_cod_limits(
+                user_id=user_id,
+                cod_val=session.get("cod_amount", 0.0),
+                user_np_client=user_np_client,
+                storage_manager=storage_manager,
+                eff_settings=eff_settings,
+                editing_ref=session.get("editing_draft_ref"),
+            )
+            s_prof = eval_res.get("suggested_profile")
+            target_pid = s_prof["id"] if s_prof else None
+
+            profiles = storage_manager.get_sender_profiles(user_id)
+            active_p = storage_manager.get_active_profile(user_id)
+            if not target_pid and len(profiles) > 1 and active_p:
+                curr_idx = next((i for i, p in enumerate(profiles) if p.id == active_p.id), 0)
+                target_pid = profiles[(curr_idx + 1) % len(profiles)].id
+
+            if target_pid:
+                switched = storage_manager.set_active_profile(user_id, target_pid)
+                eff_settings = storage_manager.get_effective_settings(user_id, settings)
+                user_np_client = NovaPoshtaClient(eff_settings)
+                switched_name = switched.name if switched else "іншого"
+                ans_text = f"✅ Відправника перемкнуто на «{switched_name}»! Баланс оновлено."
+            else:
+                ans_text = "⚠️ Немає інших користувачів"
+
+            parsed_info = session["parsed_info"]
+            city = session["city"]
+            dest_desc = session.get("destination_description")
+            cargo_desc = session["cargo_description"]
+            declared_val = session["declared_value"]
+            cod_val = session.get("cod_amount", 0.0)
+            cod_type = session.get("cod_payment_type", "cash")
+            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+
+            eval_res2 = await _evaluate_cod_limits(
+                user_id=user_id,
+                cod_val=cod_val,
+                user_np_client=user_np_client,
+                storage_manager=storage_manager,
+                eff_settings=eff_settings,
+                editing_ref=session.get("editing_draft_ref"),
+            )
+            warn_line = eval_res2.get("warn_line", "")
+            s_prof2 = eval_res2.get("suggested_profile")
+
+            profiles2 = storage_manager.get_sender_profiles(user_id)
+            active_p2 = storage_manager.get_active_profile(user_id)
+            has_multiple2 = len(profiles2) > 1
+            active_name2 = active_p2.name if active_p2 else None
+            sender_prefix = f"👤 *Відправник:* {active_name2}\n" if (active_name2 and has_multiple2) else ""
+
+            card_text = (
+                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+                f"{sender_prefix}"
+                f"👤 *Отримувач:* {parsed_info.full_name}\n"
+                f"📞 *Телефон:* `{parsed_info.phone}`\n"
+                f"🏙 *Місто:* {city.description}\n"
+                f"📦 *Пункт призначення:* {dest_desc}\n"
+                f"📝 *Опис вантажу:* {cargo_desc}\n"
+                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
+                f"💵 *Накладений платіж:* {cod_str}\n"
+                f"{warn_line}\n"
+                "Перевірте дані та оберіть дію нижче:"
+            )
+
+            u_custom = storage_manager.get_user_settings(user_id)
+            card_mask = u_custom.sender_card_mask
+
+            await callback.message.edit_text(
+                card_text,
+                parse_mode="Markdown",
+                reply_markup=get_confirmation_keyboard(
+                    payer_type=session["payer_type"],
+                    cargo_type=session["cargo_type"],
+                    declared_value=declared_val,
+                    cod_amount=cod_val,
+                    cod_payment_type=cod_type,
+                    sender_card_mask=card_mask,
+                    session_id=session_id,
+                    suggested_profile=s_prof2,
+                    active_profile_name=active_name2,
+                    has_multiple_profiles=has_multiple2,
+                ),
+            )
+            await callback.answer(ans_text)
+            return
+
+        if action == "cycle_sender":
+            profiles = storage_manager.get_sender_profiles(user_id)
+            active_p = storage_manager.get_active_profile(user_id)
+            if len(profiles) > 1 and active_p:
+                curr_idx = next((i for i, p in enumerate(profiles) if p.id == active_p.id), 0)
+                next_p = profiles[(curr_idx + 1) % len(profiles)]
+                storage_manager.set_active_profile(user_id, next_p.id)
+                eff_settings = storage_manager.get_effective_settings(user_id, settings)
+                user_np_client = NovaPoshtaClient(eff_settings)
+                ans_text = f"👤 Обрано відправника: «{next_p.name}»"
+            else:
+                ans_text = "⚠️ Лише один користувач"
+
+            parsed_info = session["parsed_info"]
+            city = session["city"]
+            dest_desc = session.get("destination_description")
+            cargo_desc = session["cargo_description"]
+            declared_val = session["declared_value"]
+            cod_val = session.get("cod_amount", 0.0)
+            cod_type = session.get("cod_payment_type", "cash")
+            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+
+            eval_res = await _evaluate_cod_limits(
+                user_id=user_id,
+                cod_val=cod_val,
+                user_np_client=user_np_client,
+                storage_manager=storage_manager,
+                eff_settings=eff_settings,
+                editing_ref=session.get("editing_draft_ref"),
+            )
+            warn_line = eval_res.get("warn_line", "")
+            s_prof = eval_res.get("suggested_profile")
+
+            profiles2 = storage_manager.get_sender_profiles(user_id)
+            active_p2 = storage_manager.get_active_profile(user_id)
+            has_multiple2 = len(profiles2) > 1
+            active_name2 = active_p2.name if active_p2 else None
+            sender_prefix = f"👤 *Відправник:* {active_name2}\n" if (active_name2 and has_multiple2) else ""
+
+            card_text = (
+                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+                f"{sender_prefix}"
+                f"👤 *Отримувач:* {parsed_info.full_name}\n"
+                f"📞 *Телефон:* `{parsed_info.phone}`\n"
+                f"🏙 *Місто:* {city.description}\n"
+                f"📦 *Пункт призначення:* {dest_desc}\n"
+                f"📝 *Опис вантажу:* {cargo_desc}\n"
+                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
+                f"💵 *Накладений платіж:* {cod_str}\n"
+                f"{warn_line}\n"
+                "Перевірте дані та оберіть дію нижче:"
+            )
+
+            u_custom = storage_manager.get_user_settings(user_id)
+            card_mask = u_custom.sender_card_mask
+
+            await callback.message.edit_text(
+                card_text,
+                parse_mode="Markdown",
+                reply_markup=get_confirmation_keyboard(
+                    payer_type=session["payer_type"],
+                    cargo_type=session["cargo_type"],
+                    declared_value=declared_val,
+                    cod_amount=cod_val,
+                    cod_payment_type=cod_type,
+                    sender_card_mask=card_mask,
+                    session_id=session_id,
+                    suggested_profile=s_prof,
+                    active_profile_name=active_name2,
+                    has_multiple_profiles=has_multiple2,
+                ),
+            )
+            await callback.answer(ans_text)
+            return
+
+        if action == "back_to_card":
+            parsed_info = session["parsed_info"]
+            city = session["city"]
+            dest_desc = session.get("destination_description")
+            cargo_desc = session["cargo_description"]
+            declared_val = session["declared_value"]
+            cod_val = session.get("cod_amount", 0.0)
+            cod_type = session.get("cod_payment_type", "cash")
+            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+
+            eval_res = await _evaluate_cod_limits(
+                user_id=user_id,
+                cod_val=cod_val,
+                user_np_client=user_np_client,
+                storage_manager=storage_manager,
+                eff_settings=eff_settings,
+                editing_ref=session.get("editing_draft_ref"),
+            )
+            warn_line = eval_res.get("warn_line", "")
+            s_prof = eval_res.get("suggested_profile")
+
+            profiles = storage_manager.get_sender_profiles(user_id)
+            active_p = storage_manager.get_active_profile(user_id)
+            has_multiple = len(profiles) > 1
+            active_name = active_p.name if active_p else None
+            sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple) else ""
+
+            card_text = (
+                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+                f"{sender_prefix}"
+                f"👤 *Отримувач:* {parsed_info.full_name}\n"
+                f"📞 *Телефон:* `{parsed_info.phone}`\n"
+                f"🏙 *Місто:* {city.description}\n"
+                f"📦 *Пункт призначення:* {dest_desc}\n"
+                f"📝 *Опис вантажу:* {cargo_desc}\n"
+                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
+                f"💵 *Накладений платіж:* {cod_str}\n"
+                f"{warn_line}\n"
+                "Перевірте дані та оберіть дію нижче:"
+            )
+
+            u_custom = storage_manager.get_user_settings(user_id)
+            card_mask = u_custom.sender_card_mask
+
+            await callback.message.edit_text(
+                card_text,
+                parse_mode="Markdown",
+                reply_markup=get_confirmation_keyboard(
+                    payer_type=session["payer_type"],
+                    cargo_type=session["cargo_type"],
+                    declared_value=declared_val,
+                    cod_amount=cod_val,
+                    cod_payment_type=cod_type,
+                    sender_card_mask=card_mask,
+                    session_id=session_id,
+                    suggested_profile=s_prof,
+                    active_profile_name=active_name,
+                    has_multiple_profiles=has_multiple,
+                ),
+            )
+            await callback.answer()
+            return
+
+        if action in ("confirm", "force_confirm"):
             editing_ref = session.get("editing_draft_ref")
+            cod_amount = session.get("cod_amount", 0.0)
+
+            # Check for COD limit exceeded unless user already force-confirmed
+            if action == "confirm" and cod_amount and cod_amount > 0:
+                eval_res = await _evaluate_cod_limits(
+                    user_id=user_id,
+                    cod_val=cod_amount,
+                    user_np_client=user_np_client,
+                    storage_manager=storage_manager,
+                    eff_settings=eff_settings,
+                    editing_ref=editing_ref,
+                )
+                if eval_res.get("is_exceeded"):
+                    s_prof = eval_res.get("suggested_profile")
+                    warn_card = (
+                        "🚨 *УВАГА: Створення цієї ТТН перетне встановлену межу післяплати!*\n\n"
+                        f"{eval_res['summary_text']}\n\n"
+                        "⚠️ *Фінансовий моніторинг:* Перевищення встановленої безпечної межі може призвести до блокування або перевірки картки/рахунку у системі NovaPay.\n\n"
+                        "Ви дійсно бажаєте зареєструвати накладну попри перевищення встановленого ліміту?"
+                    )
+                    await callback.message.edit_text(
+                        warn_card,
+                        parse_mode="Markdown",
+                        reply_markup=get_limit_exceeded_confirmation_keyboard(
+                            session_id=session_id,
+                            suggested_profile=s_prof,
+                        ),
+                    )
+                    await callback.answer("🚨 Увага: ліміт післяплати буде перевищено!", show_alert=True)
+                    return
+
             action_title = "Оновлення" if editing_ref else "Генерація"
             await callback.answer(f"{action_title} express-накладної...")
             await callback.message.edit_text(
@@ -3193,8 +4163,24 @@ def register_handlers(
                     f"https://novaposhta.ua/tracking/?cargo_number={wb_res.int_doc_number}"
                 )
                 payer_ua = "Отримувач" if payer_type == "Recipient" else "Відправник"
-                success_title = "одно успішно оновлено" if editing_ref else "о успішно створено"
+                success_title = " успішно оновлено" if editing_ref else " успішно створено"
                 cod_str = "❌ Немає" if not cod_amount or cod_amount <= 0 else f"{int(cod_amount)} грн"
+
+                cod_limit_line = ""
+                if cod_amount and cod_amount > 0:
+                    eval_post = await _evaluate_cod_limits(
+                        user_id=user_id,
+                        cod_val=cod_amount,
+                        user_np_client=user_np_client,
+                        storage_manager=storage_manager,
+                        eff_settings=eff_settings,
+                        editing_ref=editing_ref,
+                    )
+                    new_tot = int(eval_post.get("new_total_sum", 0))
+                    safe_l = eval_post.get("safe_limit")
+                    if safe_l and safe_l > 0:
+                        rem_val = max(0, int(safe_l - new_tot))
+                        cod_limit_line = f"📊 *Місячний обсяг післяплати:* `{new_tot} грн` із {int(safe_l)} грн (залишок ліміту: `{rem_val} грн`)\n"
 
                 success_card = (
                     f"✅ *Express-накладну{success_title}!*\n\n"
@@ -3207,6 +4193,7 @@ def register_handlers(
                     f"💳 *Платник:* {payer_ua}\n"
                     f"💰 *Доставка:* ~{wb_res.cost} грн | *Оцінка:* {int(declared_value)} грн\n"
                     f"💵 *Накладений платіж:* {cod_str}\n"
+                    f"{cod_limit_line}"
                     f"📅 *Очікувана дата доставки:* {wb_res.estimated_delivery_date or 'Не вказано'}\n\n"
                     f"🔗 [Відстежити ТТН на сайті Нової Пошти]({tracking_url})"
                 )

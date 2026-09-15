@@ -338,3 +338,196 @@ async def test_waybill_action_toggle_cod_type_and_cycles_no_unbound_local_error(
         await waybill_callback_handler(mock_cb, cb_val)
         mock_cb.message.edit_text.assert_called()
 
+
+@pytest.mark.asyncio
+async def test_waybill_confirm_intercepts_when_limit_exceeded(setup_handlers):
+    from src.nova_poshta.models import CODMonthlyStats
+
+    manager = setup_handlers
+    user_id = 1001
+    session_id = "test-session-exceed"
+    manager.update_user_settings(user_id, cod_monthly_limit_sum=30000.0)
+
+    city = CityInfo(Ref="city-ref-1", Description="Київ")
+    wh = WarehouseInfo(Ref="wh-ref-1", Description="Відділення №1", Number="1", TypeOfWarehouse="Warehouse", CityRef="city-ref-1")
+    parsed_info = ParsedRecipientInfo(
+        first_name="Олександр", last_name="Тест", phone="380991234567",
+        city_name="Київ", warehouse_number=1, declared_value=15000.0,
+        cargo_description="ноутбук", cod_amount=15000.0, cod_payment_type="card",
+    )
+
+    PENDING_SESSIONS[session_id] = {
+        "parsed_info": parsed_info,
+        "city": city,
+        "warehouse": wh,
+        "destination_description": "Відділення №1",
+        "payer_type": "Recipient",
+        "cargo_type": "Parcel",
+        "declared_value": 15000.0,
+        "cargo_description": "ноутбук",
+        "cod_amount": 15000.0,
+        "cod_payment_type": "card",
+        "user_id": user_id,
+        "updated_at": time.time(),
+    }
+    USER_ACTIVE_SESSIONS[user_id] = session_id
+
+    waybill_callback_handler = _get_callback_handler("process_waybill_callback")
+
+    mock_cb = MagicMock()
+    mock_cb.from_user.id = user_id
+    mock_cb.message.edit_text = AsyncMock()
+    mock_cb.answer = AsyncMock()
+
+    mock_stats = CODMonthlyStats(
+        year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+        total_count=4, total_sum=20000.0, items=[]
+    )
+
+    cb_confirm = WaybillActionCallback(action="confirm", session_id=session_id)
+    with patch("src.nova_poshta.client.NovaPoshtaClient.get_monthly_cod_stats", new_callable=AsyncMock) as m_stats, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.create_waybill", new_callable=AsyncMock) as m_create:
+        m_stats.return_value = mock_stats
+        await waybill_callback_handler(mock_cb, cb_confirm)
+
+        # create_waybill should NOT be called!
+        m_create.assert_not_called()
+        # edit_text should display warning screen
+        mock_cb.message.edit_text.assert_called_once()
+        args, kwargs = mock_cb.message.edit_text.call_args
+        assert "перетне встановлену межу післяплати" in args[0]
+        assert "35000 грн" in args[0]
+        # alert must be shown
+        mock_cb.answer.assert_called_with("🚨 Увага: ліміт післяплати буде перевищено!", show_alert=True)
+
+
+@pytest.mark.asyncio
+async def test_waybill_force_confirm_creates_waybill_and_shows_cod_limit(setup_handlers):
+    from src.nova_poshta.models import CODMonthlyStats, WaybillCreateResult, CounterpartyRecipientResult
+
+    manager = setup_handlers
+    user_id = 1002
+    session_id = "test-session-force"
+    manager.update_user_settings(user_id, cod_monthly_limit_sum=30000.0)
+
+    city = CityInfo(Ref="city-ref-1", Description="Київ")
+    wh = WarehouseInfo(Ref="wh-ref-1", Description="Відділення №1", Number="1", TypeOfWarehouse="Warehouse", CityRef="city-ref-1")
+    parsed_info = ParsedRecipientInfo(
+        first_name="Олександр", last_name="Тест", phone="380991234567",
+        city_name="Київ", warehouse_number=1, declared_value=15000.0,
+        cargo_description="ноутбук", cod_amount=15000.0, cod_payment_type="card",
+    )
+
+    PENDING_SESSIONS[session_id] = {
+        "parsed_info": parsed_info,
+        "city": city,
+        "warehouse": wh,
+        "destination_description": "Відділення №1",
+        "payer_type": "Recipient",
+        "cargo_type": "Parcel",
+        "declared_value": 15000.0,
+        "cargo_description": "ноутбук",
+        "cod_amount": 15000.0,
+        "cod_payment_type": "card",
+        "user_id": user_id,
+        "updated_at": time.time(),
+    }
+    USER_ACTIVE_SESSIONS[user_id] = session_id
+
+    waybill_callback_handler = _get_callback_handler("process_waybill_callback")
+
+    mock_cb = MagicMock()
+    mock_cb.from_user.id = user_id
+    mock_cb.message.edit_text = AsyncMock()
+    mock_cb.answer = AsyncMock()
+
+    mock_stats = CODMonthlyStats(
+        year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+        total_count=4, total_sum=20000.0, items=[]
+    )
+    mock_recipient = CounterpartyRecipientResult(
+        counterparty_ref="cp-recip-1",
+        contact_person_ref="cp-contact-1",
+    )
+    mock_created_wb = WaybillCreateResult(
+        int_doc_number="20450011223344",
+        ref="wb-ref-created-1",
+        cost=95.0,
+        estimated_delivery_date="15.09.2026",
+    )
+
+    cb_force = WaybillActionCallback(action="force_confirm", session_id=session_id)
+    with patch("src.nova_poshta.client.NovaPoshtaClient.get_monthly_cod_stats", new_callable=AsyncMock) as m_stats, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.create_recipient_counterparty", new_callable=AsyncMock) as m_recip, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.create_waybill", new_callable=AsyncMock) as m_create:
+        m_stats.return_value = mock_stats
+        m_recip.return_value = mock_recipient
+        m_create.return_value = mock_created_wb
+
+        await waybill_callback_handler(mock_cb, cb_force)
+
+        # create_waybill was called!
+        m_create.assert_called_once()
+        # Final success card has COD limit line
+        assert mock_cb.message.edit_text.call_count >= 2
+        last_call_args = mock_cb.message.edit_text.call_args[0][0]
+        assert "Express-накладну успішно створено" in last_call_args
+        assert "Місячний обсяг післяплати:" in last_call_args
+        assert "35000 грн" in last_call_args
+
+
+@pytest.mark.asyncio
+async def test_waybill_back_to_card(setup_handlers):
+    from src.nova_poshta.models import CODMonthlyStats
+
+    manager = setup_handlers
+    user_id = 1003
+    session_id = "test-session-back"
+
+    city = CityInfo(Ref="city-ref-1", Description="Київ")
+    wh = WarehouseInfo(Ref="wh-ref-1", Description="Відділення №1", Number="1", TypeOfWarehouse="Warehouse", CityRef="city-ref-1")
+    parsed_info = ParsedRecipientInfo(
+        first_name="Іван", last_name="Іванов", phone="380991112233",
+        city_name="Київ", warehouse_number=1, declared_value=5000.0,
+        cargo_description="одяг", cod_amount=2000.0, cod_payment_type="cash",
+    )
+
+    PENDING_SESSIONS[session_id] = {
+        "parsed_info": parsed_info,
+        "city": city,
+        "warehouse": wh,
+        "destination_description": "Відділення №1",
+        "payer_type": "Recipient",
+        "cargo_type": "Parcel",
+        "declared_value": 5000.0,
+        "cargo_description": "одяг",
+        "cod_amount": 2000.0,
+        "cod_payment_type": "cash",
+        "user_id": user_id,
+        "updated_at": time.time(),
+    }
+    USER_ACTIVE_SESSIONS[user_id] = session_id
+
+    waybill_callback_handler = _get_callback_handler("process_waybill_callback")
+
+    mock_cb = MagicMock()
+    mock_cb.from_user.id = user_id
+    mock_cb.message.edit_text = AsyncMock()
+    mock_cb.answer = AsyncMock()
+
+    mock_stats = CODMonthlyStats(
+        year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+        total_count=1, total_sum=5000.0, items=[]
+    )
+
+    cb_back = WaybillActionCallback(action="back_to_card", session_id=session_id)
+    with patch("src.nova_poshta.client.NovaPoshtaClient.get_monthly_cod_stats", new_callable=AsyncMock) as m_stats:
+        m_stats.return_value = mock_stats
+        await waybill_callback_handler(mock_cb, cb_back)
+
+        mock_cb.message.edit_text.assert_called_once()
+        card_text = mock_cb.message.edit_text.call_args[0][0]
+        assert "Розпарсені дані отримувача для перевірки:" in card_text
+        assert "Контроль місячного ліміту післяплати:" in card_text
+
+

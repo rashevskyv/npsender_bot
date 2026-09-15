@@ -3,18 +3,23 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiogram.types import CallbackQuery, Message, User
 from src.config import Settings
 from src.nova_poshta.client import NovaPoshtaClient
 from src.nova_poshta.models import TrackingDocumentDetails
 from src.bot.handlers import (
     extract_ttn_from_text,
     is_tracking_intent,
+    is_barcode_intent,
     format_tracking_card,
     USER_TRACKING_WAITING,
+    USER_BARCODE_WAITING,
 )
 from src.bot.keyboards import (
     TrackActionCallback,
     get_tracking_keyboard,
+    get_waybill_action_keyboard,
+    get_barcode_keyboard,
     get_main_reply_keyboard,
 )
 
@@ -66,6 +71,16 @@ def test_is_tracking_intent():
 
     assert is_tracking_intent("привіт як справи") is False
     assert is_tracking_intent("створи накладну на Київ") is False
+
+
+def test_is_barcode_intent():
+    """Test detecting user barcode generation intent."""
+    assert is_barcode_intent("штрихкод") is True
+    assert is_barcode_intent("згенеруй штрих-код") is True
+    assert is_barcode_intent("штрих код для посилки") is True
+    assert is_barcode_intent("barcode please") is True
+    assert is_barcode_intent("покажи баркод") is True
+    assert is_barcode_intent("привіт як справи") is False
 
 
 def test_tracking_document_details_from_api_dict():
@@ -233,7 +248,7 @@ def test_keyboards_tracking():
     assert len(kb.inline_keyboard) == 2
 
     row0 = kb.inline_keyboard[0]
-    assert row0[0].text == "📱 Показати штрихкод"
+    assert "штрих" in row0[0].text.lower()
     assert row0[1].text == "🔄 Оновити"
 
     row1 = kb.inline_keyboard[1]
@@ -247,6 +262,30 @@ def test_keyboards_tracking():
     main_kb = get_main_reply_keyboard()
     button_texts = [btn.text for row in main_kb.keyboard for btn in row]
     assert "🔍 Відстежити ТТН" in button_texts
+
+
+def test_waybill_action_and_barcode_keyboards():
+    """Test waybill action selection keyboard and barcode reply keyboard."""
+    # 1. Action keyboard with both buttons
+    action_kb = get_waybill_action_keyboard("20450123456789")
+    assert len(action_kb.inline_keyboard) == 2
+    row0 = action_kb.inline_keyboard[0]
+    assert row0[0].text == "🔍 Відстежити"
+    assert row0[1].text == "📱 Згенерувати штрих-код"
+
+    cb_track = TrackActionCallback.unpack(row0[0].callback_data)
+    assert cb_track.action == "track"
+    assert cb_track.doc_number == "20450123456789"
+
+    cb_barcode = TrackActionCallback.unpack(row0[1].callback_data)
+    assert cb_barcode.action == "barcode"
+    assert cb_barcode.doc_number == "20450123456789"
+
+    # 2. Barcode keyboard
+    bc_kb = get_barcode_keyboard("20450123456789")
+    assert len(bc_kb.inline_keyboard) == 1
+    assert bc_kb.inline_keyboard[0][0].text == "🔍 Відстежити ТТН"
+
 
 
 def _get_msg_handler(name: str):
@@ -346,13 +385,37 @@ async def test_cmd_track_without_args(setup_track_handlers):
 
 @pytest.mark.asyncio
 async def test_process_text_message_ttn_direct(setup_track_handlers):
-    """Test sending a 14-digit TTN in chat directly triggers tracking."""
+    """Test sending a 14-digit TTN in chat presents Track and Barcode action buttons."""
     user_id = 998879
     text_handler = _get_msg_handler("process_text_message")
 
     message = MagicMock()
     message.from_user.id = user_id
     message.text = "2045 0123 4567 89"
+    message.answer = AsyncMock()
+
+    await text_handler(message)
+
+    message.answer.assert_called_once()
+    call_args = message.answer.call_args[0][0]
+    assert "20450123456789" in call_args
+    assert "Оберіть потрібну дію:" in call_args
+
+    kb = message.answer.call_args[1]["reply_markup"]
+    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row if btn.callback_data]
+    assert "trk:track:20450123456789" in callbacks
+    assert "trk:barcode:20450123456789" in callbacks
+
+
+@pytest.mark.asyncio
+async def test_process_text_message_ttn_explicit_tracking(setup_track_handlers):
+    """Test sending a TTN with explicit tracking words directly triggers tracking."""
+    user_id = 998879
+    text_handler = _get_msg_handler("process_text_message")
+
+    message = MagicMock()
+    message.from_user.id = user_id
+    message.text = "відстеж 20450123456789"
     status_msg = MagicMock()
     status_msg.edit_text = AsyncMock()
     message.answer = AsyncMock(return_value=status_msg)
@@ -377,16 +440,65 @@ async def test_process_text_message_ttn_direct(setup_track_handlers):
 
 
 @pytest.mark.asyncio
-async def test_process_track_callback_refresh_and_barcode(setup_track_handlers):
-    """Test TrackActionCallback refresh and barcode handling."""
+async def test_process_text_message_ttn_explicit_barcode(setup_track_handlers):
+    """Test sending a TTN with barcode keyword directly generates barcode photo."""
+    user_id = 998879
+    text_handler = _get_msg_handler("process_text_message")
+
+    message = MagicMock()
+    message.from_user.id = user_id
+    message.text = "штрихкод 20450123456789"
+    message.answer_photo = AsyncMock()
+
+    await text_handler(message)
+
+    message.answer_photo.assert_called_once()
+    caption = message.answer_photo.call_args[1]["caption"]
+    assert "20450123456789" in caption
+
+
+@pytest.mark.asyncio
+async def test_cmd_barcode(setup_track_handlers):
+    """Test /barcode command with argument and without argument."""
+    user_id = 998881
+    cmd_handler = _get_msg_handler("cmd_barcode")
+
+    # 1. With argument
+    msg_with_arg = MagicMock()
+    msg_with_arg.from_user.id = user_id
+    msg_with_arg.text = "/barcode 20450123456789"
+    msg_with_arg.answer_photo = AsyncMock()
+
+    await cmd_handler(msg_with_arg)
+    msg_with_arg.answer_photo.assert_called_once()
+    assert "20450123456789" in msg_with_arg.answer_photo.call_args[1]["caption"]
+
+    # 2. Without argument -> prompts and enters waiting state
+    msg_no_arg = MagicMock()
+    msg_no_arg.from_user.id = user_id
+    msg_no_arg.text = "/barcode"
+    msg_no_arg.answer = AsyncMock()
+
+    USER_BARCODE_WAITING.discard(user_id)
+    await cmd_handler(msg_no_arg)
+    assert user_id in USER_BARCODE_WAITING
+    msg_no_arg.answer.assert_called_once()
+    assert "Генерація штрих-коду" in msg_no_arg.answer.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_process_track_callback_actions(setup_track_handlers):
+    """Test TrackActionCallback track, refresh, and barcode handling."""
     user_id = 998880
     cb_handler = _get_cb_handler("process_track_callback")
 
-    # 1. Test refresh
-    cb_refresh = MagicMock()
-    cb_refresh.from_user.id = user_id
-    cb_refresh.answer = AsyncMock()
-    cb_refresh.message.edit_text = AsyncMock()
+    # 1. Test track
+    test_user = User(id=user_id, is_bot=False, first_name="Tester")
+    cb_track = AsyncMock(spec=CallbackQuery)
+    cb_track.from_user = test_user
+    cb_track.answer = AsyncMock()
+    cb_track.message = AsyncMock()
+    cb_track.message.edit_text = AsyncMock()
 
     fake_details = TrackingDocumentDetails(
         number="20450123456789",
@@ -396,17 +508,32 @@ async def test_process_track_callback_refresh_and_barcode(setup_track_handlers):
 
     with patch("src.nova_poshta.client.NovaPoshtaClient.track_document", new_callable=AsyncMock) as mock_track:
         mock_track.return_value = fake_details
+        await cb_handler(cb_track, TrackActionCallback(action="track", doc_number="20450123456789"))
+
+        mock_track.assert_called_once_with("20450123456789")
+        cb_track.message.edit_text.assert_called()
+        assert "Прибув у відділення" in cb_track.message.edit_text.call_args[0][0]
+
+    # 2. Test refresh
+    cb_refresh = AsyncMock(spec=CallbackQuery)
+    cb_refresh.from_user = test_user
+    cb_refresh.answer = AsyncMock()
+    cb_refresh.message = AsyncMock()
+    cb_refresh.message.edit_text = AsyncMock()
+
+    with patch("src.nova_poshta.client.NovaPoshtaClient.track_document", new_callable=AsyncMock) as mock_track:
+        mock_track.return_value = fake_details
         await cb_handler(cb_refresh, TrackActionCallback(action="refresh", doc_number="20450123456789"))
 
         mock_track.assert_called_once_with("20450123456789")
         cb_refresh.message.edit_text.assert_called_once()
-        text_arg = cb_refresh.message.edit_text.call_args[0][0]
-        assert "Прибув у відділення" in text_arg
+        assert "Прибув у відділення" in cb_refresh.message.edit_text.call_args[0][0]
 
-    # 2. Test barcode
-    cb_barcode = MagicMock()
-    cb_barcode.from_user.id = user_id
+    # 3. Test barcode
+    cb_barcode = AsyncMock(spec=CallbackQuery)
+    cb_barcode.from_user = test_user
     cb_barcode.answer = AsyncMock()
+    cb_barcode.message = AsyncMock()
     cb_barcode.message.answer_photo = AsyncMock()
 
     await cb_handler(cb_barcode, TrackActionCallback(action="barcode", doc_number="20450123456789"))
