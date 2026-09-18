@@ -62,6 +62,7 @@ router = Router()
 PENDING_SESSIONS: Dict[str, Dict[str, Any]] = {}
 USER_ACTIVE_SESSIONS: Dict[int, str] = {}  # user_id -> active session_id
 USER_LAST_PARSED_INFO: Dict[int, ParsedRecipientInfo] = {}  # user_id -> last parsed recipient info for natural language follow-up edits
+USER_INITIAL_MESSAGE_TEXT: Dict[int, str] = {}  # user_id -> initial message text introducing recipient/settlement details
 USER_LAST_SCANSHEET_CONTEXT: Dict[int, Dict[str, Any]] = {}  # user_id -> last created or viewed register context
 VALUE_OPTIONS = [500.0, 1000.0, 2000.0, 5000.0, 10000.0]
 SESSION_TIMEOUT_SECONDS: float = 15 * 60  # 15 minutes TTL for active parcel creation sessions
@@ -91,6 +92,7 @@ def _cleanup_expired_sessions():
             if u_id and USER_ACTIVE_SESSIONS.get(u_id) == s_id:
                 USER_ACTIVE_SESSIONS.pop(u_id, None)
                 USER_LAST_PARSED_INFO.pop(u_id, None)
+                USER_INITIAL_MESSAGE_TEXT.pop(u_id, None)
 
 
 def get_user_active_session_id(user_id: int) -> Optional[str]:
@@ -109,6 +111,7 @@ def clear_user_active_session(user_id: int):
     if session_id:
         PENDING_SESSIONS.pop(session_id, None)
     USER_LAST_PARSED_INFO.pop(user_id, None)
+    USER_INITIAL_MESSAGE_TEXT.pop(user_id, None)
     USER_TRACKING_WAITING.discard(user_id)
     USER_ADD_PROFILE_WAITING.discard(user_id)
     USER_BARCODE_WAITING.discard(user_id)
@@ -2848,11 +2851,30 @@ def register_handlers(
             existing_session = PENDING_SESSIONS.get(session_id) if session_id in PENDING_SESSIONS else None
             address_choice_made = existing_session.get("address_choice_made", False) if existing_session else False
 
+            # Track conversation history and initial message
+            existing_init = existing_session.get("initial_raw_text") if existing_session else None
+            existing_all = existing_session.get("all_raw_texts", []) if existing_session else []
+
+            if prev_parsed_info or existing_init:
+                init_text = existing_init or USER_INITIAL_MESSAGE_TEXT.get(actual_user_id) or text
+            else:
+                init_text = text
+            USER_INITIAL_MESSAGE_TEXT[actual_user_id] = init_text
+
+            all_texts = list(existing_all)
+            if text and text not in all_texts:
+                all_texts.append(text)
+            if init_text and init_text not in all_texts:
+                all_texts.insert(0, init_text)
+
             if parsed_info.has_address_suspicion and not address_choice_made:
                 PENDING_SESSIONS[session_id] = {
                     "parsed_info": parsed_info,
                     "user_id": actual_user_id,
                     "updated_at": datetime.datetime.now().timestamp(),
+                    "initial_raw_text": init_text,
+                    "all_raw_texts": all_texts,
+                    "raw_text": text,
                 }
                 USER_ACTIVE_SESSIONS[actual_user_id] = session_id
 
@@ -2876,6 +2898,8 @@ def register_handlers(
                 status_msg=status_msg,
                 prev_parsed_info=prev_parsed_info,
                 raw_text=text,
+                initial_raw_text=init_text,
+                all_raw_texts=all_texts,
             )
         except Exception as e:
             logger.error(f"Error processing text message: {e}", exc_info=True)
@@ -2911,6 +2935,8 @@ def register_handlers(
         status_msg: Message,
         prev_parsed_info: Optional[ParsedRecipientInfo] = None,
         raw_text: Optional[str] = None,
+        initial_raw_text: Optional[str] = None,
+        all_raw_texts: Optional[List[str]] = None,
     ):
         """Resolve city, warehouse or street address, and display verification confirmation card."""
         eff_settings = storage_manager.get_effective_settings(user_id, settings)
@@ -2922,6 +2948,20 @@ def register_handlers(
             raw_text = existing_session.get("raw_text") or (
                 message.text if hasattr(message, "text") and message.text else None
             )
+
+        if not initial_raw_text:
+            initial_raw_text = (
+                existing_session.get("initial_raw_text")
+                or USER_INITIAL_MESSAGE_TEXT.get(user_id)
+                or raw_text
+            )
+
+        if not all_raw_texts:
+            all_raw_texts = list(existing_session.get("all_raw_texts", []))
+            if raw_text and raw_text not in all_raw_texts:
+                all_raw_texts.append(raw_text)
+            if initial_raw_text and initial_raw_text not in all_raw_texts:
+                all_raw_texts.insert(0, initial_raw_text)
 
         is_address_deliv = bool(parsed_info.is_address_delivery)
 
@@ -2949,6 +2989,9 @@ def register_handlers(
                 "user_id": user_id,
                 "is_address_delivery": is_address_deliv,
                 "updated_at": now_ts,
+                "raw_text": raw_text,
+                "initial_raw_text": initial_raw_text,
+                "all_raw_texts": all_raw_texts,
             }
             USER_ACTIVE_SESSIONS[user_id] = session_id
 
@@ -3117,6 +3160,9 @@ def register_handlers(
                         "cod_payment_type": cod_type,
                         "user_id": user_id,
                         "updated_at": now_ts,
+                        "raw_text": raw_text,
+                        "initial_raw_text": initial_raw_text,
+                        "all_raw_texts": all_raw_texts,
                     }
                     editing_ref = existing_session.get("editing_draft_ref")
                     if editing_ref:
@@ -3167,18 +3213,24 @@ def register_handlers(
                     matched_city, warehouse = matching_candidates[0]
                     dest_desc = warehouse.description
                 else:
-                    # Attempt AI and heuristic candidate disambiguation if raw_text contains address details
+                    # Attempt AI and heuristic candidate disambiguation if initial_raw_text, raw_text, or any accumulated messages contain address details
+                    texts_for_disambig = []
+                    for t in [initial_raw_text, raw_text] + (all_raw_texts or []):
+                        if t and t.strip() and t.strip() not in texts_for_disambig:
+                            texts_for_disambig.append(t.strip())
+                    combined_disambig_text = "\n\n".join(texts_for_disambig)
+
                     chosen_idx = None
-                    if raw_text:
+                    if combined_disambig_text:
                         try:
                             user_ai_extractor = AIExtractor(eff_settings)
                             chosen_idx = await user_ai_extractor.disambiguate_candidates(
-                                text=raw_text, candidates=matching_candidates
+                                text=combined_disambig_text, candidates=matching_candidates
                             )
                         except Exception as disambig_err:
                             logger.warning(f"Error during candidate disambiguation: {disambig_err}")
                             chosen_idx = AIExtractor.heuristic_disambiguate_candidates(
-                                text=raw_text, candidates=matching_candidates
+                                text=combined_disambig_text, candidates=matching_candidates
                             )
 
                     if chosen_idx is not None and 0 <= chosen_idx < len(matching_candidates):
@@ -3197,6 +3249,8 @@ def register_handlers(
                             "user_id": user_id,
                             "updated_at": now_ts,
                             "raw_text": raw_text,
+                            "initial_raw_text": initial_raw_text,
+                            "all_raw_texts": all_raw_texts,
                         }
                         editing_ref = existing_session.get("editing_draft_ref")
                         if editing_ref:
@@ -3298,6 +3352,8 @@ def register_handlers(
             "user_id": user_id,
             "updated_at": now_ts,
             "raw_text": raw_text,
+            "initial_raw_text": initial_raw_text,
+            "all_raw_texts": all_raw_texts,
         }
         if editing_ref:
             session_payload["editing_draft_ref"] = editing_ref
@@ -4362,8 +4418,11 @@ def register_handlers(
                 "editing_draft_ref": target_dict["ref"],
                 "user_id": user_id,
                 "raw_text": dummy_text,
+                "initial_raw_text": dummy_text,
+                "all_raw_texts": [dummy_text],
             }
             USER_ACTIVE_SESSIONS[user_id] = session_id
+            USER_INITIAL_MESSAGE_TEXT[user_id] = dummy_text
 
             await _continue_processing_recipient_info(
                 message=callback.message,
@@ -4372,6 +4431,8 @@ def register_handlers(
                 parsed_info=parsed_info,
                 status_msg=status_msg,
                 raw_text=dummy_text,
+                initial_raw_text=dummy_text,
+                all_raw_texts=[dummy_text],
             )
 
         elif action == "barcode":
@@ -4714,6 +4775,8 @@ def register_handlers(
             parsed_info=parsed_info,
             status_msg=status_msg,
             raw_text=session.get("raw_text"),
+            initial_raw_text=session.get("initial_raw_text"),
+            all_raw_texts=session.get("all_raw_texts"),
         )
 
     router._handle_combined_text_message = _handle_combined_text_message

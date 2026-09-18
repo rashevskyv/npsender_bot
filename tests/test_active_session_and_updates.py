@@ -608,4 +608,116 @@ async def test_auto_disambiguate_settlement_by_address_in_text(setup_handlers):
         assert "вул. Героїв Майдану, 237" in last_card
 
 
+@pytest.mark.asyncio
+async def test_auto_disambiguate_settlement_multi_turn_initial_message(setup_handlers):
+    """Verify that follow-up messages (e.g. 'Оцінка 7500, в посилці планшет') preserve initial message address clues."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from src.nova_poshta.models import CityInfo, WarehouseInfo
+    from src.ai.schemas import ParsedRecipientInfo
+    from src.bot.handlers import router, PENDING_SESSIONS, USER_ACTIVE_SESSIONS, clear_user_active_session
+
+    user_id = 99887766
+    clear_user_active_session(user_id)
+
+    c1 = CityInfo(Ref="c1_ref", Description="Берегомет", AreaDescription="Чернівецька")
+    w1 = WarehouseInfo(
+        Ref="w1_ref",
+        Description="Відділення №1: вул. Героїв Майдану, 237",
+        Number="1",
+        TypeOfWarehouse="branch",
+        CityRef="c1_ref",
+    )
+
+    c2 = CityInfo(Ref="c2_ref", Description="Берегомет (Кіцманський р-н)", AreaDescription="Чернівецька")
+    w2 = WarehouseInfo(
+        Ref="w2_ref",
+        Description="Пункт приймання-видачі (до 30 кг): вул. Головна, 13а",
+        Number="1",
+        TypeOfWarehouse="branch",
+        CityRef="c2_ref",
+    )
+
+    parsed_turn1 = ParsedRecipientInfo(
+        is_recipient_info=True,
+        first_name="Олександр",
+        last_name="Данелюк",
+        phone="0990723343",
+        city_name="Берегомет",
+        region_name="Чернівецька",
+        warehouse_number=1,
+    )
+
+    parsed_turn2 = ParsedRecipientInfo(
+        is_recipient_info=True,
+        first_name="Олександр",
+        last_name="Данелюк",
+        phone="0990723343",
+        city_name="Берегомет",
+        region_name="Чернівецька",
+        warehouse_number=1,
+        declared_value=7500.0,
+        cargo_description="планшет",
+    )
+
+    mock_msg1 = MagicMock()
+    mock_msg1.from_user.id = user_id
+    mock_msg1.chat.id = user_id
+    mock_msg1.text = "хНЯ:\n0990723343 Данелюк Олександр Чернівецька обл. Смт. Берегомет 1 відділення, героїв Майдану 237."
+
+    status_msg1 = MagicMock()
+    status_msg1.edit_text = AsyncMock()
+    mock_msg1.answer = AsyncMock(return_value=status_msg1)
+
+    manager = setup_handlers
+    manager.update_user_settings(
+        user_id,
+        nova_poshta_api_key="test_np_key",
+        ai_api_key="test_ai_key",
+    )
+
+    with patch("src.ai.extractor.AIExtractor.parse_text", new_callable=AsyncMock) as m_parse, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.search_city", new_callable=AsyncMock) as m_city, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_warehouse", new_callable=AsyncMock) as m_wh:
+
+        m_parse.return_value = parsed_turn1
+        m_city.return_value = [c1, c2]
+
+        async def _fake_get_wh(city_ref, warehouse_number, is_postomat=False):
+            if city_ref == "c1_ref":
+                return w1
+            elif city_ref == "c2_ref":
+                return w2
+            return None
+
+        m_wh.side_effect = _fake_get_wh
+
+        # Turn 1: Process initial recipient message
+        await router._handle_combined_text_message(mock_msg1, mock_msg1.text, user_id=user_id)
+
+        # Turn 2: User sends update with only value and cargo description, no address info
+        mock_msg2 = MagicMock()
+        mock_msg2.from_user.id = user_id
+        mock_msg2.chat.id = user_id
+        mock_msg2.text = "Оцінка 7500, в посилці планшет"
+
+        status_msg2 = MagicMock()
+        status_msg2.edit_text = AsyncMock()
+        mock_msg2.answer = AsyncMock(return_value=status_msg2)
+
+        m_parse.return_value = parsed_turn2
+
+        await router._handle_combined_text_message(mock_msg2, mock_msg2.text, user_id=user_id)
+
+        # Verify Turn 2 output: status_msg2 must NOT show disambiguation keyboard!
+        calls2 = [c[0][0] for c in status_msg2.edit_text.call_args_list if c[0]]
+        assert not any("Знайдено декілька населених пунктів" in call for call in calls2)
+
+        last_card2 = calls2[-1]
+        assert "Розпарсені дані отримувача для перевірки:" in last_card2
+        assert "вул. Героїв Майдану, 237" in last_card2
+        assert "7500" in last_card2
+        assert "планшет" in last_card2
+
+
+
 

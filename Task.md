@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.2
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.3
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -194,5 +194,15 @@
   - [x] Зберегти показ клавіатури вибору населеного пункту `get_city_selection_keyboard` при відсутності адреси або низькій впевненості
   - [x] Додати юніт-тести для AI та евристики в `tests/test_ai_extractor.py` та інтеграційний тест у `tests/test_active_session_and_updates.py`
   - [x] Запустити всі 113 тестів паралельно (`pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 22: Збереження першочергового повідомлення та мультидіалогова дисамбігуація населених пунктів за адресою (v0.24.3)**
+  - [x] Забезпечити збереження першочергового тексту (`initial_raw_text`) та списку всіх повідомлень сесії (`all_raw_texts`) у `PENDING_SESSIONS` та `USER_INITIAL_MESSAGE_TEXT`
+  - [x] Автоматично підхоплювати `initial_raw_text` при доповненні реквізитів наступними повідомленнями (оцінка, опис, тощо)
+  - [x] Оновлювати `_continue_processing_recipient_info` та передавати комбінований текст усіх повідомлень користувача до `disambiguate_candidates`
+  - [x] Покращити евристику `heuristic_disambiguate_candidates`: витяг вулиці після `:`, відсікання типів вулиць, співставлення номерів будинків з літерами (наприклад, `13а`, `237`)
+  - [x] Очищати `USER_INITIAL_MESSAGE_TEXT` у `clear_user_active_session` та `_cleanup_expired_sessions`
+  - [x] Написати мультидіалоговий юніт-тест `test_auto_disambiguate_settlement_multi_turn_initial_message` у `tests/test_active_session_and_updates.py`
+  - [x] Запустити всі 114 тестів паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
 

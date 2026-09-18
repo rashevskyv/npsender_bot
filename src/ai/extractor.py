@@ -662,14 +662,34 @@ class AIExtractor:
 
             # Check full street matching from warehouse description (e.g. "вул. Героїв Майдану, 237")
             street_match = re.search(
-                r'(?:вул\.|вулиця|просп\.|пров\.|бульв\.|майдан|площа)\s*([^,\n]+)',
+                r'(?:вул\.|вулиця|просп\.|проспект|пров\.|провулок|бульв\.|бульвар|майдан|площа)\s*([^,\n]+)',
                 wh_desc,
                 re.IGNORECASE,
             )
             if street_match:
                 street_name = street_match.group(1).strip().lower()
                 if street_name and len(street_name) >= 3 and street_name in text_lower:
-                    scores[idx] += 10
+                    scores[idx] += 12
+
+            # Also extract street part after colon if present (e.g. "Відділення №1: вул. Героїв Майдану, 237")
+            if ":" in wh_desc:
+                after_colon = wh_desc.split(":", 1)[1].strip()
+                colon_street_part = after_colon.split(",")[0].strip()
+                clean_street = re.sub(
+                    r'^(?:вул\.|вулиця|просп\.|проспект|пров\.|провулок|бульв\.|бульвар|майдан|площа)\s*',
+                    '',
+                    colon_street_part,
+                    flags=re.IGNORECASE,
+                ).strip().lower()
+                if clean_street and len(clean_street) >= 3 and clean_street in text_lower:
+                    scores[idx] += 12
+
+            # Check house number match from warehouse description (e.g. ", 237" or ", 13а")
+            house_match = re.search(r',\s*(\d+[a-zA-Zа-яА-ЯіїєґІЇЄҐ]?)\b', wh_desc)
+            if house_match:
+                house_no = house_match.group(1).lower()
+                if house_no and re.search(rf'\b{re.escape(house_no)}\b', text_lower):
+                    scores[idx] += 6
 
             # Check district/raion in city description or region (e.g. "Кіцманський р-н")
             district_match = re.search(r'\(([^)]+)\)', city_desc)
