@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.3
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.4
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -203,6 +203,12 @@
   - [x] Покращити евристику `heuristic_disambiguate_candidates`: витяг вулиці після `:`, відсікання типів вулиць, співставлення номерів будинків з літерами (наприклад, `13а`, `237`)
   - [x] Очищати `USER_INITIAL_MESSAGE_TEXT` у `clear_user_active_session` та `_cleanup_expired_sessions`
   - [x] Написати мультидіалоговий юніт-тест `test_auto_disambiguate_settlement_multi_turn_initial_message` у `tests/test_active_session_and_updates.py`
+  - [x] Запустити всі 114 тестів паралельно (`pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 23: Розширене діагностичне логування дисамбігуації кандидатів та моніторинг виконання (v0.24.4)**
+  - [x] Додати логування запиту дисамбігуації `Attempting candidate disambiguation across X candidates with query text`
+  - [x] Додати логування результату `Candidate disambiguation result: chosen_idx`
   - [x] Запустити всі 114 тестів паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
 

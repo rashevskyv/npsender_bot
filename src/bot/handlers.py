@@ -3222,6 +3222,9 @@ def register_handlers(
 
                     chosen_idx = None
                     if combined_disambig_text:
+                        logger.info(
+                            f"Attempting candidate disambiguation across {len(matching_candidates)} candidates with query text: {combined_disambig_text!r}"
+                        )
                         try:
                             user_ai_extractor = AIExtractor(eff_settings)
                             chosen_idx = await user_ai_extractor.disambiguate_candidates(
@@ -3232,6 +3235,9 @@ def register_handlers(
                             chosen_idx = AIExtractor.heuristic_disambiguate_candidates(
                                 text=combined_disambig_text, candidates=matching_candidates
                             )
+                        logger.info(
+                            f"Candidate disambiguation result: chosen_idx={chosen_idx} (None = fallback to keyboard)"
+                        )
 
                     if chosen_idx is not None and 0 <= chosen_idx < len(matching_candidates):
                         matched_city, warehouse = matching_candidates[chosen_idx]
