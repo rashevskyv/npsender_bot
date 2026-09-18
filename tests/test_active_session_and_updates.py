@@ -719,5 +719,122 @@ async def test_auto_disambiguate_settlement_multi_turn_initial_message(setup_han
         assert "планшет" in last_card2
 
 
+@pytest.mark.asyncio
+async def test_followup_message_does_not_cancel_active_processing_task(setup_handlers):
+    """Regression test: sending a follow-up message while first message is being processed
+    by AI/API must not cancel the first message mid-flight or trigger missing required fields."""
+    user_id = 161101
+    clear_user_active_session(user_id)
+    PENDING_SESSIONS.clear()
+    USER_ACTIVE_SESSIONS.clear()
+
+    manager = setup_handlers
+    manager.update_user_settings(
+        user_id,
+        nova_poshta_api_key="test_np_key",
+        ai_api_key="test_ai_key",
+    )
+
+    text_handler = _get_message_handler("process_text_message")
+
+    # Turn 1 Message
+    mock_msg1 = MagicMock()
+    mock_msg1.from_user.id = user_id
+    mock_msg1.chat.id = user_id
+    mock_msg1.text = "0990723343 Данелюк Олександр Чернівецька обл. Смт. Берегомет 1 відділення, героїв Майдану 237."
+
+    status_msg1 = MagicMock()
+    status_msg1.edit_text = AsyncMock()
+    status_msg1.delete = AsyncMock()
+    mock_msg1.answer = AsyncMock(return_value=status_msg1)
+
+    # Turn 2 Message
+    mock_msg2 = MagicMock()
+    mock_msg2.from_user.id = user_id
+    mock_msg2.chat.id = user_id
+    mock_msg2.text = "Оцінка 7500, в посилці планшет"
+
+    status_msg2 = MagicMock()
+    status_msg2.edit_text = AsyncMock()
+    status_msg2.delete = AsyncMock()
+    mock_msg2.answer = AsyncMock(return_value=status_msg2)
+
+    parsed_turn1 = ParsedRecipientInfo(
+        is_recipient_info=True,
+        last_name="Данелюк",
+        first_name="Олександр",
+        phone="0990723343",
+        city_name="Берегомет",
+        warehouse_number=1,
+        declared_value=500.0,
+        cargo_description="Документи",
+    )
+
+    parsed_turn2 = ParsedRecipientInfo(
+        is_recipient_info=True,
+        last_name="Данелюк",
+        first_name="Олександр",
+        phone="0990723343",
+        city_name="Берегомет",
+        warehouse_number=1,
+        declared_value=7500.0,
+        cargo_description="планшет",
+    )
+
+    city = CityInfo(Ref="city-ref-beregomet", Description="Берегомет", Area="Чернівецька")
+    wh = WarehouseInfo(
+        Ref="wh-ref-1",
+        Description="Відділення №1: вул. Героїв Майдану, 237",
+        Number="1",
+        TypeOfWarehouse="Warehouse",
+        CityRef="city-ref-beregomet",
+    )
+
+    async def _mock_parse(text, previous_info=None):
+        if "7500" in text:
+            return parsed_turn2
+        else:
+            await asyncio.sleep(0.3)
+            return parsed_turn1
+
+    with patch("src.ai.extractor.AIExtractor.parse_text", side_effect=_mock_parse), \
+         patch("src.nova_poshta.client.NovaPoshtaClient.search_city", new_callable=AsyncMock) as m_city, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_warehouse", new_callable=AsyncMock) as m_wh:
+
+        m_city.return_value = [city]
+        m_wh.return_value = wh
+
+        # Send Turn 1
+        await text_handler(mock_msg1)
+
+        # Wait 1.1s: debounce sleep (1.0s) finishes, Turn 1 enters _process_user_accumulated_messages
+        # and starts awaiting _mock_parse (which sleeps 0.3s)
+        await asyncio.sleep(1.1)
+
+        # While Turn 1 is actively running in _mock_parse, send Turn 2
+        await text_handler(mock_msg2)
+
+        # Wait for both tasks to complete (Turn 1 finishes in ~0.2s, Turn 2 debounces for 1.0s and runs)
+        await asyncio.sleep(1.5)
+
+        # Verify Turn 1 was NOT cancelled! status_msg1 was edited
+        assert status_msg1.edit_text.called
+
+        # Verify active session exists and holds merged data
+        active_sess_id = get_user_active_session_id(user_id)
+        assert active_sess_id is not None
+        final_sess = PENDING_SESSIONS[active_sess_id]
+        assert final_sess["parsed_info"].full_name == "Данелюк Олександр"
+        assert final_sess["parsed_info"].phone == "0990723343"
+        assert final_sess["declared_value"] == 7500.0
+        assert final_sess["cargo_description"] == "планшет"
+
+        # Verify Turn 2 edit_text was called and did NOT complain about missing fields
+        calls2 = [c[0][0] for c in status_msg2.edit_text.call_args_list if c[0]]
+        assert not any("Очікую решту даних" in c for c in calls2)
+        assert any("7500" in c for c in calls2)
+
+
+
 
 

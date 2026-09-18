@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.4
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.5
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -210,5 +210,14 @@
   - [x] Додати логування запиту дисамбігуації `Attempting candidate disambiguation across X candidates with query text`
   - [x] Додати логування результату `Candidate disambiguation result: chosen_idx`
   - [x] Запустити всі 114 тестів паралельно (`pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 24: Усунення стану перегонів у дебаунсері та захист активних задач від скасування (v0.24.5)**
+  - [x] Додати `USER_PROCESSING_LOCKS` та `get_user_processing_lock(user_id)` у `src/bot/handlers.py`
+  - [x] Відокремити таймер дебаунсингу (`_debounce_and_dispatch`) від послідовного виконання під блокуванням (`_process_user_accumulated_messages`)
+  - [x] Видаляти завершений таймер із `USER_DEBOUNCE_TASKS` у блоці `finally` одразу після 1.0с очікування, унеможливлюючи скасування активної обробки наступними повідомленнями
+  - [x] Забезпечити коректне успадкування активної сесії при надсиланні доповнень (оцінка, опис тощо) без помилкових попереджень `missing_fields`
+  - [x] Написати регресійний юніт-тест `test_followup_message_does_not_cancel_active_processing_task` у `tests/test_active_session_and_updates.py`
+  - [x] Запустити всі 115 тестів паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
 

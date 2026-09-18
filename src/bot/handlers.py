@@ -71,9 +71,17 @@ SESSION_TIMEOUT_SECONDS: float = 15 * 60  # 15 minutes TTL for active parcel cre
 USER_MESSAGE_BUFFERS: Dict[int, List[str]] = {}
 USER_DEBOUNCE_TASKS: Dict[int, asyncio.Task] = {}
 USER_LAST_MESSAGES: Dict[int, Message] = {}
+USER_PROCESSING_LOCKS: Dict[int, asyncio.Lock] = {}
 USER_TRACKING_WAITING: set = set()
 USER_ADD_PROFILE_WAITING: set = set()
 USER_BARCODE_WAITING: set = set()
+
+
+def get_user_processing_lock(user_id: int) -> asyncio.Lock:
+    """Get or create a per-user asyncio.Lock for sequential message processing."""
+    if user_id not in USER_PROCESSING_LOCKS:
+        USER_PROCESSING_LOCKS[user_id] = asyncio.Lock()
+    return USER_PROCESSING_LOCKS[user_id]
 
 
 
@@ -3421,12 +3429,15 @@ def register_handlers(
             ),
         )
 
-    async def _process_user_accumulated_messages(user_id: int):
-        """Wait for rapid forwarded messages to accumulate before parsing."""
+    async def _debounce_and_dispatch(user_id: int):
+        """Wait for rapid forwarded messages to accumulate before dispatching for processing."""
         try:
             await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             return
+        finally:
+            if USER_DEBOUNCE_TASKS.get(user_id) is asyncio.current_task():
+                USER_DEBOUNCE_TASKS.pop(user_id, None)
 
         buffered_texts = USER_MESSAGE_BUFFERS.pop(user_id, [])
         last_message = USER_LAST_MESSAGES.pop(user_id, None)
@@ -3435,7 +3446,30 @@ def register_handlers(
             return
 
         combined_text = "\n".join(buffered_texts)
-        await _handle_combined_text_message(last_message, combined_text)
+        await _process_user_accumulated_messages(user_id, last_message, combined_text)
+
+    async def _process_user_accumulated_messages(
+        user_id: int,
+        last_message: Optional[Message] = None,
+        combined_text: Optional[str] = None,
+    ):
+        """Sequentially process accumulated messages under user lock without cancellation risk."""
+        lock = get_user_processing_lock(user_id)
+        async with lock:
+            if last_message is None or combined_text is None:
+                buffered_texts = USER_MESSAGE_BUFFERS.pop(user_id, [])
+                last_message = USER_LAST_MESSAGES.pop(user_id, None)
+                if not buffered_texts or not last_message:
+                    return
+                combined_text = "\n".join(buffered_texts)
+
+            try:
+                await _handle_combined_text_message(last_message, combined_text)
+            except Exception as e:
+                logger.error(
+                    f"Error handling combined text message for user {user_id}: {e}",
+                    exc_info=True,
+                )
 
     @router.message(F.text)
     async def process_text_message(message: Message):
@@ -3546,12 +3580,12 @@ def register_handlers(
         USER_MESSAGE_BUFFERS[user_id].append(text)
         USER_LAST_MESSAGES[user_id] = message
 
-        # Cancel existing pending debounce task if running, restart 1.0s timer
+        # Cancel existing pending debounce task if running in sleep phase, restart 1.0s timer
         if user_id in USER_DEBOUNCE_TASKS and not USER_DEBOUNCE_TASKS[user_id].done():
             USER_DEBOUNCE_TASKS[user_id].cancel()
 
         USER_DEBOUNCE_TASKS[user_id] = asyncio.create_task(
-            _process_user_accumulated_messages(user_id)
+            _debounce_and_dispatch(user_id)
         )
 
     @router.callback_query(TrackActionCallback.filter())
