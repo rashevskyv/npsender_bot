@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.1
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.2
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -183,3 +183,16 @@
   - [x] Написати юніт-тести в `tests/test_tracking.py`
   - [x] Запустити всі 108 тестів паралельно (`pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 21: Інтелектуальне визначення населеного пункту та відділення за адресою через AI (v0.24.2)**
+  - [x] Створити Pydantic-схему `AICandidateDisambiguationResult` у `src/ai/schemas.py`
+  - [x] Реалізувати системний промпт `DISAMBIGUATION_SYSTEM_PROMPT` у `src/ai/extractor.py`
+  - [x] Реалізувати метод `disambiguate_candidates` у `AIExtractor` з перевіркою високої впевненості (`confidence == "high"`)
+  - [x] Реалізувати детерміністичний евристичний fallback `heuristic_disambiguate_candidates` для токенного співставлення вулиці та номера будинку
+  - [x] Зберігати `raw_text` в об'єкті сесії `PENDING_SESSIONS[session_id]` та передавати у `_continue_processing_recipient_info`
+  - [x] Інтегрувати авто-вибір кандидата у `src/bot/handlers.py` при наявності декількох збігів
+  - [x] Зберегти показ клавіатури вибору населеного пункту `get_city_selection_keyboard` при відсутності адреси або низькій впевненості
+  - [x] Додати юніт-тести для AI та евристики в `tests/test_ai_extractor.py` та інтеграційний тест у `tests/test_active_session_and_updates.py`
+  - [x] Запустити всі 113 тестів паралельно (`pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+

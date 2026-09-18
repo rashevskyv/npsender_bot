@@ -2875,6 +2875,7 @@ def register_handlers(
                 parsed_info=parsed_info,
                 status_msg=status_msg,
                 prev_parsed_info=prev_parsed_info,
+                raw_text=text,
             )
         except Exception as e:
             logger.error(f"Error processing text message: {e}", exc_info=True)
@@ -2909,6 +2910,7 @@ def register_handlers(
         parsed_info: ParsedRecipientInfo,
         status_msg: Message,
         prev_parsed_info: Optional[ParsedRecipientInfo] = None,
+        raw_text: Optional[str] = None,
     ):
         """Resolve city, warehouse or street address, and display verification confirmation card."""
         eff_settings = storage_manager.get_effective_settings(user_id, settings)
@@ -2916,6 +2918,10 @@ def register_handlers(
         now_ts = datetime.datetime.now().timestamp()
 
         existing_session = PENDING_SESSIONS.get(session_id, {})
+        if not raw_text:
+            raw_text = existing_session.get("raw_text") or (
+                message.text if hasattr(message, "text") and message.text else None
+            )
 
         is_address_deliv = bool(parsed_info.is_address_delivery)
 
@@ -3161,38 +3167,61 @@ def register_handlers(
                     matched_city, warehouse = matching_candidates[0]
                     dest_desc = warehouse.description
                 else:
-                    # Save candidates in session and present city disambiguation keyboard
-                    existing_session = PENDING_SESSIONS.get(session_id, {})
-                    session_payload = {
-                        "parsed_info": parsed_info,
-                        "candidates": matching_candidates,
-                        "user_id": user_id,
-                        "updated_at": now_ts,
-                    }
-                    editing_ref = existing_session.get("editing_draft_ref")
-                    if editing_ref:
-                        session_payload["editing_draft_ref"] = editing_ref
-                    for k in ["payer_type", "cargo_type", "declared_value", "cargo_description", "cod_amount", "cod_payment_type"]:
-                        if k in existing_session:
-                            session_payload[k] = existing_session[k]
+                    # Attempt AI and heuristic candidate disambiguation if raw_text contains address details
+                    chosen_idx = None
+                    if raw_text:
+                        try:
+                            user_ai_extractor = AIExtractor(eff_settings)
+                            chosen_idx = await user_ai_extractor.disambiguate_candidates(
+                                text=raw_text, candidates=matching_candidates
+                            )
+                        except Exception as disambig_err:
+                            logger.warning(f"Error during candidate disambiguation: {disambig_err}")
+                            chosen_idx = AIExtractor.heuristic_disambiguate_candidates(
+                                text=raw_text, candidates=matching_candidates
+                            )
 
-                    PENDING_SESSIONS[session_id] = session_payload
-                    USER_ACTIVE_SESSIONS[user_id] = session_id
+                    if chosen_idx is not None and 0 <= chosen_idx < len(matching_candidates):
+                        matched_city, warehouse = matching_candidates[chosen_idx]
+                        dest_desc = warehouse.description
+                        logger.info(
+                            f"Automatically selected candidate {chosen_idx + 1} "
+                            f"({matched_city.description}, {dest_desc}) based on address in user text"
+                        )
+                    else:
+                        # Save candidates in session and present city disambiguation keyboard
+                        existing_session = PENDING_SESSIONS.get(session_id, {})
+                        session_payload = {
+                            "parsed_info": parsed_info,
+                            "candidates": matching_candidates,
+                            "user_id": user_id,
+                            "updated_at": now_ts,
+                            "raw_text": raw_text,
+                        }
+                        editing_ref = existing_session.get("editing_draft_ref")
+                        if editing_ref:
+                            session_payload["editing_draft_ref"] = editing_ref
+                        for k in ["payer_type", "cargo_type", "declared_value", "cargo_description", "cod_amount", "cod_payment_type"]:
+                            if k in existing_session:
+                                session_payload[k] = existing_session[k]
 
-                    candidate_text_lines = [
-                        f"⚠️ *Знайдено декілька населених пунктів з назвою '{parsed_info.city_name}', де є {w_type} № {parsed_info.warehouse_number}:*\n"
-                    ]
-                    for idx, (c, w) in enumerate(matching_candidates, 1):
-                        area_info = f" ({c.area})" if c.area else ""
-                        candidate_text_lines.append(f"*{idx}.* {c.description}{area_info}\n📍 `{w.description}`\n")
-                    candidate_text_lines.append("Будь ласка, оберіть потрібний населений пункт нижче:")
+                        PENDING_SESSIONS[session_id] = session_payload
+                        USER_ACTIVE_SESSIONS[user_id] = session_id
 
-                    await status_msg.edit_text(
-                        "\n".join(candidate_text_lines),
-                        parse_mode="Markdown",
-                        reply_markup=get_city_selection_keyboard(matching_candidates, session_id),
-                    )
-                    return
+                        candidate_text_lines = [
+                            f"⚠️ *Знайдено декілька населених пунктів з назвою '{parsed_info.city_name}', де є {w_type} № {parsed_info.warehouse_number}:*\n"
+                        ]
+                        for idx, (c, w) in enumerate(matching_candidates, 1):
+                            area_info = f" ({c.area})" if c.area else ""
+                            candidate_text_lines.append(f"*{idx}.* {c.description}{area_info}\n📍 `{w.description}`\n")
+                        candidate_text_lines.append("Будь ласка, оберіть потрібний населений пункт нижче:")
+
+                        await status_msg.edit_text(
+                            "\n".join(candidate_text_lines),
+                            parse_mode="Markdown",
+                            reply_markup=get_city_selection_keyboard(matching_candidates, session_id),
+                        )
+                        return
 
         existing_session = PENDING_SESSIONS.get(session_id, {})
 
@@ -3268,6 +3297,7 @@ def register_handlers(
             "cod_payment_type": cod_type,
             "user_id": user_id,
             "updated_at": now_ts,
+            "raw_text": raw_text,
         }
         if editing_ref:
             session_payload["editing_draft_ref"] = editing_ref
@@ -4331,6 +4361,7 @@ def register_handlers(
                 "parsed_info": parsed_info,
                 "editing_draft_ref": target_dict["ref"],
                 "user_id": user_id,
+                "raw_text": dummy_text,
             }
             USER_ACTIVE_SESSIONS[user_id] = session_id
 
@@ -4340,6 +4371,7 @@ def register_handlers(
                 session_id=session_id,
                 parsed_info=parsed_info,
                 status_msg=status_msg,
+                raw_text=dummy_text,
             )
 
         elif action == "barcode":
@@ -4681,6 +4713,7 @@ def register_handlers(
             session_id=session_id,
             parsed_info=parsed_info,
             status_msg=status_msg,
+            raw_text=session.get("raw_text"),
         )
 
     router._handle_combined_text_message = _handle_combined_text_message

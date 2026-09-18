@@ -202,3 +202,38 @@ class ParsedRecipientInfo(BaseModel):
         """Construct full name string."""
         parts = [p for p in [self.last_name, self.first_name, self.middle_name] if p]
         return " ".join(parts) if parts else "N/A"
+
+
+class AICandidateDisambiguationResult(BaseModel):
+    """Structured AI output for selecting the matching candidate settlement/warehouse from multiple candidates."""
+
+    selected_index: Optional[int] = Field(
+        default=None,
+        description="1-based integer index of the candidate matching the address/district in user message (e.g. 1, 2). None if cannot determine or no address provided.",
+    )
+    confidence: str = Field(
+        default="low",
+        description="'high' if there is clear matching evidence in the user text, 'low' otherwise",
+    )
+    matched_details: Optional[str] = Field(
+        default=None,
+        description="Matched address/street/district text snippet from user message",
+    )
+    explanation: Optional[str] = Field(
+        default=None,
+        description="Short reasoning of the choice in Ukrainian",
+    )
+
+    @field_validator("selected_index", mode="before")
+    @classmethod
+    def parse_selected_index(cls, v):
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            digits = "".join(filter(str.isdigit, v))
+            return int(digits) if digits else None
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return None
+

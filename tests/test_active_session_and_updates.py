@@ -531,3 +531,81 @@ async def test_waybill_back_to_card(setup_handlers):
         assert "Контроль місячного ліміту післяплати:" in card_text
 
 
+@pytest.mark.asyncio
+async def test_auto_disambiguate_settlement_by_address_in_text(setup_handlers):
+    """Verify that when 2 settlements match, but text has the warehouse street, Candidate 1 is auto-selected."""
+    user_id = 99887766
+    c1 = CityInfo(Ref="c1_ref", Description="Берегомет", AreaDescription="Чернівецька")
+    w1 = WarehouseInfo(
+        Ref="w1_ref",
+        Description="Відділення №1: вул. Героїв Майдану, 237",
+        Number="1",
+        TypeOfWarehouse="branch",
+        CityRef="c1_ref",
+    )
+
+    c2 = CityInfo(Ref="c2_ref", Description="Берегомет (Кіцманський р-н)", AreaDescription="Чернівецька")
+    w2 = WarehouseInfo(
+        Ref="w2_ref",
+        Description="Пункт приймання-видачі (до 30 кг): вул. Головна, 13а",
+        Number="1",
+        TypeOfWarehouse="branch",
+        CityRef="c2_ref",
+    )
+
+    parsed = ParsedRecipientInfo(
+        is_recipient_info=True,
+        first_name="Олександр",
+        last_name="Данелюк",
+        phone="0990723343",
+        city_name="Берегомет",
+        region_name="Чернівецька",
+        warehouse_number=1,
+    )
+
+    mock_msg = MagicMock()
+    mock_msg.from_user.id = user_id
+    mock_msg.chat.id = user_id
+    mock_msg.text = "0990723343 Данелюк Олександр Чернівецька обл. Смт. Берегомет 1 відділення, героїв Майдану 237."
+
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+    mock_msg.answer = AsyncMock(return_value=status_msg)
+
+    manager = setup_handlers
+    manager.update_user_settings(
+        user_id,
+        nova_poshta_api_key="test_np_key",
+        ai_api_key="test_ai_key",
+    )
+
+    with patch("src.ai.extractor.AIExtractor.parse_text", new_callable=AsyncMock) as m_parse, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.search_city", new_callable=AsyncMock) as m_city, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_warehouse", new_callable=AsyncMock) as m_wh:
+
+        m_parse.return_value = parsed
+        m_city.return_value = [c1, c2]
+
+        async def _fake_get_wh(city_ref, warehouse_number, is_postomat=False):
+            if city_ref == "c1_ref":
+                return w1
+            elif city_ref == "c2_ref":
+                return w2
+            return None
+
+        m_wh.side_effect = _fake_get_wh
+
+        await router._handle_combined_text_message(mock_msg, mock_msg.text, user_id=user_id)
+
+        # Check status_msg.edit_text calls
+        calls = [c[0][0] for c in status_msg.edit_text.call_args_list if c[0]]
+        # Did NOT display the disambiguation keyboard!
+        assert not any("Знайдено декілька населених пунктів" in call for call in calls)
+
+        # Verification card was displayed with Candidate 1's warehouse!
+        last_card = calls[-1]
+        assert "Розпарсені дані отримувача для перевірки:" in last_card
+        assert "вул. Героїв Майдану, 237" in last_card
+
+
+

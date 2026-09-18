@@ -8,7 +8,11 @@ from typing import Optional, List, Dict, Any
 from openai import AsyncOpenAI
 
 from src.config import Settings
-from src.ai.schemas import ParsedRecipientInfo, AIRegisterFilterResult
+from src.ai.schemas import (
+    ParsedRecipientInfo,
+    AIRegisterFilterResult,
+    AICandidateDisambiguationResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +150,48 @@ Your task:
   "target_recipient": "Кожин",
   "summary": "Короткий опис дії (наприклад: 'Вилучення накладної №2 (Кожин Олександр)' або '3 накладні за вчора')",
   "explanation": "Коротке пояснення логіки вибору українською мовою"
+}
+"""
+
+
+DISAMBIGUATION_SYSTEM_PROMPT = """You are an intelligent Nova Poshta logistics assistant specialized in Ukrainian geographic and warehouse disambiguation.
+
+The user has submitted shipment details, and multiple candidate settlements/warehouses matched the city and branch number in Nova Poshta database.
+You will receive:
+1. `user_text`: The raw text message submitted by the user.
+2. `candidates`: A JSON array of candidate locations. Each candidate contains:
+   - `index`: 1-based integer index
+   - `city_name`: Settlement name (e.g. "Берегомет")
+   - `area`: Oblast/Region (e.g. "Чернівецька")
+   - `region`: District/Raion or additional description if any (e.g. "Кіцманський р-н")
+   - `warehouse_description`: Full branch/postomat description (e.g. "Відділення №1: вул. Героїв Майдану, 237" or "Пункт приймання-видачі (до 30 кг): вул. Головна, 13а")
+   - `warehouse_address`: Address or street of the branch if available
+
+Your task:
+Analyze `user_text` to see if the user specified a street address, house number, former/current district/raion, landmark, or specific location details that unambiguously identify one specific candidate.
+
+Rules:
+1. If the user's text contains a street name, house number, or branch address that matches the address in a candidate's `warehouse_description` (e.g. user text mentions "героїв Майдану 237" which matches "Відділення №1: вул. Героїв Майдану, 237" and not "вул. Головна, 13а"):
+   - Set `selected_index` to the matching candidate's 1-based index (e.g. 1)
+   - Set `confidence` to "high"
+   - Set `matched_details` to the matched snippet from `user_text` (e.g. "героїв Майдану 237")
+   - Set `explanation` to a concise explanation in Ukrainian (e.g. "Адреса в повідомленні 'героїв Майдану 237' відповідає Відділенню №1 (вул. Героїв Майдану, 237)")
+2. If the user's text specifies a distinct district / raion (e.g. "Кіцманський") that matches one candidate and not others:
+   - Set `selected_index` to that candidate's index, `confidence: "high"`.
+   - Set `matched_details` to the district name matched.
+   - Set `explanation` to a concise explanation in Ukrainian.
+3. If the user's text does NOT contain any distinguishing address, street, house number, or district details (e.g. only "Берегомет 1 відділення"), or if the information matches multiple candidates equally or is ambiguous:
+   - Set `selected_index`: null
+   - Set `confidence`: "low"
+   - Set `matched_details`: null
+   - Set `explanation`: "Недостатньо даних в повідомленні для однозначного вибору"
+
+Return ONLY valid JSON matching this schema:
+{
+  "selected_index": 1,
+  "confidence": "high" | "low",
+  "matched_details": "string or null",
+  "explanation": "string"
 }
 """
 
@@ -581,3 +627,144 @@ class AIExtractor:
                     summary=f"Усі активні чернетки ({len(all_nums)})" if all_nums else None,
                     explanation="Автоматичний вибір усіх чернеток через недоступність AI",
                 )
+
+    @classmethod
+    def heuristic_disambiguate_candidates(
+        cls, text: str, candidates: List[Any]
+    ) -> Optional[int]:
+        """Deterministic heuristic to disambiguate candidates by matching street/address/district tokens in text."""
+        if not text or not candidates or len(candidates) < 2:
+            return None
+
+        text_lower = text.lower()
+
+        # Helper to extract significant tokens
+        def _extract_tokens(s: str) -> List[str]:
+            clean = re.sub(
+                r'\b(?:відділення|пункт|приймання|видачі|поштомат|почтомат|до|кг|вул|вулиця|буд|будинок|проспект|просп|пров|провулок|шосе|тракт|площа|майдан|смт|село|місто|обл|область|район|р-н)\b',
+                ' ',
+                s,
+                flags=re.IGNORECASE,
+            )
+            return [t.lower() for t in re.findall(r"[\w']+", clean) if len(t) >= 2]
+
+        scores = [0] * len(candidates)
+
+        for idx, item in enumerate(candidates):
+            city_obj = item[0] if isinstance(item, (tuple, list)) else item.get("city")
+            wh_obj = item[1] if isinstance(item, (tuple, list)) else item.get("warehouse")
+
+            wh_desc = getattr(wh_obj, "description", "") if wh_obj else str(item)
+            wh_addr = getattr(wh_obj, "short_address", "") or getattr(wh_obj, "address", "") or ""
+            city_desc = getattr(city_obj, "description", "") if city_obj else ""
+            city_area = getattr(city_obj, "area", "") if city_obj else ""
+            city_region = getattr(city_obj, "region", "") if city_obj else ""
+
+            # Check full street matching from warehouse description (e.g. "вул. Героїв Майдану, 237")
+            street_match = re.search(
+                r'(?:вул\.|вулиця|просп\.|пров\.|бульв\.|майдан|площа)\s*([^,\n]+)',
+                wh_desc,
+                re.IGNORECASE,
+            )
+            if street_match:
+                street_name = street_match.group(1).strip().lower()
+                if street_name and len(street_name) >= 3 and street_name in text_lower:
+                    scores[idx] += 10
+
+            # Check district/raion in city description or region (e.g. "Кіцманський р-н")
+            district_match = re.search(r'\(([^)]+)\)', city_desc)
+            if district_match:
+                dist_content = district_match.group(1).lower()
+                dist_tokens = [d for d in re.findall(r"[\w']+", dist_content) if len(d) >= 4 and d not in ["обл", "область", "район"]]
+                for dt in dist_tokens:
+                    if dt in text_lower:
+                        scores[idx] += 8
+
+            if city_region:
+                cr_tokens = [d for d in re.findall(r"[\w']+", city_region.lower()) if len(d) >= 4 and d not in ["обл", "область", "район"]]
+                for ct in cr_tokens:
+                    if ct in text_lower:
+                        scores[idx] += 8
+
+            combined_target = f"{wh_desc} {wh_addr}"
+            tokens = _extract_tokens(combined_target)
+
+            for token in set(tokens):
+                if token.isdigit():
+                    # Exact house or branch number
+                    if re.search(rf'\b{re.escape(token)}\b', text_lower):
+                        scores[idx] += 5
+                else:
+                    if len(token) >= 4 and token in text_lower:
+                        scores[idx] += 3
+
+        max_score = max(scores)
+        if max_score >= 5:
+            winners = [i for i, s in enumerate(scores) if s == max_score]
+            if len(winners) == 1:
+                runner_up = max([s for i, s in enumerate(scores) if i != winners[0]], default=0)
+                if max_score - runner_up >= 3:
+                    return winners[0]
+
+        return None
+
+    async def disambiguate_candidates(
+        self, text: str, candidates: List[Any]
+    ) -> Optional[int]:
+        """Disambiguate matching settlement/warehouse candidates using AI with heuristic fallback."""
+        if not text or not candidates or len(candidates) < 2:
+            return None
+
+        # Build candidate representations for AI
+        formatted_candidates = []
+        for idx, item in enumerate(candidates, 1):
+            city_obj = item[0] if isinstance(item, (tuple, list)) else item.get("city")
+            wh_obj = item[1] if isinstance(item, (tuple, list)) else item.get("warehouse")
+
+            city_name = getattr(city_obj, "description", "") if city_obj else ""
+            area = getattr(city_obj, "area", "") if city_obj else ""
+            region = getattr(city_obj, "region", "") if city_obj else ""
+            wh_desc = getattr(wh_obj, "description", "") if wh_obj else ""
+
+            formatted_candidates.append({
+                "index": idx,
+                "city_name": city_name,
+                "area": area,
+                "region": region,
+                "warehouse_description": wh_desc,
+            })
+
+        user_content = (
+            f"User Text:\n{text}\n\n"
+            f"Candidate Locations ({len(candidates)}):\n"
+            f"{json.dumps(formatted_candidates, ensure_ascii=False, indent=2)}"
+        )
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": DISAMBIGUATION_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content
+            if content:
+                data = json.loads(content)
+                result = AICandidateDisambiguationResult(**data)
+                if (
+                    result.confidence == "high"
+                    and result.selected_index is not None
+                    and 1 <= result.selected_index <= len(candidates)
+                ):
+                    logger.info(
+                        f"AI disambiguated candidate {result.selected_index}: "
+                        f"{result.matched_details} ({result.explanation})"
+                    )
+                    return result.selected_index - 1
+        except Exception as e:
+            logger.warning(f"AI candidate disambiguation call failed: {e}. Falling back to heuristic.")
+
+        return self.heuristic_disambiguate_candidates(text, candidates)
+

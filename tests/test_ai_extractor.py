@@ -277,3 +277,133 @@ async def test_parse_text_heals_when_ai_returns_empty(monkeypatch):
     assert result.first_name == "Тарас"
     assert result.phone == "0971234567"
 
+
+def test_heuristic_disambiguate_candidates_with_matching_address():
+    """Verify heuristic disambiguation correctly selects Candidate 1 when address matches."""
+    from src.ai.extractor import AIExtractor
+    from src.nova_poshta.models import CityInfo, WarehouseInfo
+
+    c1 = CityInfo(Ref="c1_ref", Description="Берегомет", AreaDescription="Чернівецька")
+    w1 = WarehouseInfo(
+        Ref="w1_ref",
+        Description="Відділення №1: вул. Героїв Майдану, 237",
+        Number="1",
+        TypeOfWarehouse="9a68de70-0268-11e5-80e3-005056801329",
+        CityRef="c1_ref",
+    )
+
+    c2 = CityInfo(Ref="c2_ref", Description="Берегомет (Кіцманський р-н)", AreaDescription="Чернівецька")
+    w2 = WarehouseInfo(
+        Ref="w2_ref",
+        Description="Пункт приймання-видачі (до 30 кг): вул. Головна, 13а",
+        Number="1",
+        TypeOfWarehouse="9a68de70-0268-11e5-80e3-005056801329",
+        CityRef="c2_ref",
+    )
+
+    candidates = [(c1, w1), (c2, w2)]
+    text = "0990723343 Данелюк Олександр Чернівецька обл. Смт. Берегомет 1 відділення, героїв Майдану 237."
+
+    chosen_idx = AIExtractor.heuristic_disambiguate_candidates(text, candidates)
+    assert chosen_idx == 0
+
+    # Opposite test: text specifying Candidate 2's street
+    text2 = "Данелюк Олександр Берегомет 1 відділення вул. Головна, 13а"
+    chosen_idx2 = AIExtractor.heuristic_disambiguate_candidates(text2, candidates)
+    assert chosen_idx2 == 1
+
+
+def test_heuristic_disambiguate_candidates_no_address():
+    """Verify heuristic returns None when no distinguishing address info is in text."""
+    from src.ai.extractor import AIExtractor
+    from src.nova_poshta.models import CityInfo, WarehouseInfo
+
+    c1 = CityInfo(Ref="c1_ref", Description="Берегомет", AreaDescription="Чернівецька")
+    w1 = WarehouseInfo(Ref="w1_ref", Description="Відділення №1: вул. Героїв Майдану, 237", Number="1", TypeOfWarehouse="branch", CityRef="c1_ref")
+
+    c2 = CityInfo(Ref="c2_ref", Description="Берегомет (Кіцманський р-н)", AreaDescription="Чернівецька")
+    w2 = WarehouseInfo(Ref="w2_ref", Description="Пункт приймання-видачі: вул. Головна, 13а", Number="1", TypeOfWarehouse="branch", CityRef="c2_ref")
+
+    candidates = [(c1, w1), (c2, w2)]
+    text = "Данелюк Олександр Смт. Берегомет 1 відділення 0990723343"
+
+    chosen_idx = AIExtractor.heuristic_disambiguate_candidates(text, candidates)
+    assert chosen_idx is None
+
+
+@pytest.mark.asyncio
+async def test_disambiguate_candidates_ai_success(monkeypatch):
+    """Verify AI candidate disambiguation parses JSON and selects candidate index."""
+    import json
+    from unittest.mock import AsyncMock, MagicMock
+    from src.config import Settings
+    from src.ai.extractor import AIExtractor
+    from src.nova_poshta.models import CityInfo, WarehouseInfo
+
+    settings = Settings(
+        telegram_bot_token="fake_bot_token",
+        nova_poshta_api_key="fake_np_key",
+        ai_api_key="fake_ai_key",
+    )
+    extractor = AIExtractor(settings)
+
+    c1 = CityInfo(Ref="c1_ref", Description="Берегомет", AreaDescription="Чернівецька")
+    w1 = WarehouseInfo(Ref="w1_ref", Description="Відділення №1: вул. Героїв Майдану, 237", Number="1", TypeOfWarehouse="branch", CityRef="c1_ref")
+    c2 = CityInfo(Ref="c2_ref", Description="Берегомет (Кіцманський р-н)", AreaDescription="Чернівецька")
+    w2 = WarehouseInfo(Ref="w2_ref", Description="Пункт приймання-видачі: вул. Головна, 13а", Number="1", TypeOfWarehouse="branch", CityRef="c2_ref")
+
+    candidates = [(c1, w1), (c2, w2)]
+
+    mock_chat = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.choices = [
+        MagicMock(
+            message=MagicMock(
+                content=json.dumps({
+                    "selected_index": 1,
+                    "confidence": "high",
+                    "matched_details": "героїв Майдану 237",
+                    "explanation": "Адреса співпадає з варіантом 1",
+                })
+            )
+        )
+    ]
+    mock_chat.completions.create = AsyncMock(return_value=mock_resp)
+    monkeypatch.setattr(extractor, "client", MagicMock(chat=mock_chat))
+
+    text = "0990723343 Данелюк Олександр Чернівецька обл. Смт. Берегомет 1 відділення, героїв Майдану 237."
+    chosen = await extractor.disambiguate_candidates(text, candidates)
+    assert chosen == 0
+
+
+@pytest.mark.asyncio
+async def test_disambiguate_candidates_ai_fallback_to_heuristic(monkeypatch):
+    """Verify that when AI call fails, disambiguate_candidates falls back to heuristic matching."""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.config import Settings
+    from src.ai.extractor import AIExtractor
+    from src.nova_poshta.models import CityInfo, WarehouseInfo
+
+    settings = Settings(
+        telegram_bot_token="fake_bot_token",
+        nova_poshta_api_key="fake_np_key",
+        ai_api_key="fake_ai_key",
+    )
+    extractor = AIExtractor(settings)
+
+    c1 = CityInfo(Ref="c1_ref", Description="Берегомет", AreaDescription="Чернівецька")
+    w1 = WarehouseInfo(Ref="w1_ref", Description="Відділення №1: вул. Героїв Майдану, 237", Number="1", TypeOfWarehouse="branch", CityRef="c1_ref")
+    c2 = CityInfo(Ref="c2_ref", Description="Берегомет (Кіцманський р-н)", AreaDescription="Чернівецька")
+    w2 = WarehouseInfo(Ref="w2_ref", Description="Пункт приймання-видачі: вул. Головна, 13а", Number="1", TypeOfWarehouse="branch", CityRef="c2_ref")
+
+    candidates = [(c1, w1), (c2, w2)]
+
+    mock_chat = MagicMock()
+    mock_chat.completions.create = AsyncMock(side_effect=RuntimeError("AI API connection failed"))
+    monkeypatch.setattr(extractor, "client", MagicMock(chat=mock_chat))
+
+    text = "Данелюк Олександр Берегомет 1 відділення, вул. Головна, 13а"
+    chosen = await extractor.disambiguate_candidates(text, candidates)
+    assert chosen == 1
+
+
