@@ -3,6 +3,8 @@
 from typing import Optional, List
 from pydantic import BaseModel, Field, field_validator
 
+from src.utils.text_cleaner import normalize_apostrophes
+
 
 class AIRegisterFilterResult(BaseModel):
     """Structured AI output for selecting, matching, or modifying waybill drafts for register (ScanSheet)."""
@@ -153,6 +155,24 @@ class ParsedRecipientInfo(BaseModel):
         default=None,
         description="Time period filter if requested by user: 'today', 'yesterday', 'yesterday_before_noon', 'all'",
     )
+
+    @field_validator(
+        "city_name",
+        "region_name",
+        "district_name",
+        "street_name",
+        "last_name",
+        "first_name",
+        "middle_name",
+        "cargo_description",
+        mode="before",
+    )
+    @classmethod
+    def clean_apostrophes(cls, v):
+        if isinstance(v, str):
+            cleaned = normalize_apostrophes(v).strip()
+            return cleaned if cleaned else None
+        return v
 
     @field_validator("is_postomat", "is_address_delivery", "has_address_suspicion", mode="before")
     @classmethod

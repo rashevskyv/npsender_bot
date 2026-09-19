@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any
 from openai import AsyncOpenAI
 
 from src.config import Settings
+from src.utils.text_cleaner import normalize_apostrophes, get_city_search_variants
 from src.ai.schemas import (
     ParsedRecipientInfo,
     AIRegisterFilterResult,
@@ -235,6 +236,8 @@ class AIExtractor:
         if not text or not text.strip():
             return parsed
 
+        text = normalize_apostrophes(text)
+
         if parsed.is_register_intent:
             return parsed
 
@@ -286,8 +289,14 @@ class AIExtractor:
         # 3. City extraction
         if not parsed.city_name:
             for city in UKRAINIAN_CITIES_REFERENCE:
-                if re.search(rf'\b{re.escape(city)}\b', text, re.IGNORECASE):
-                    parsed.city_name = city
+                variants = get_city_search_variants(city)
+                matched = False
+                for v in variants:
+                    if re.search(rf'\b{re.escape(v)}\b', text, re.IGNORECASE):
+                        parsed.city_name = city
+                        matched = True
+                        break
+                if matched:
                     break
             if not parsed.city_name:
                 city_prefix_match = re.search(
@@ -308,35 +317,42 @@ class AIExtractor:
             clean_body = "\n".join(clean_lines)
 
             # Check initials format: "Мартинюк Є.В." or "Мартинюк Є. В."
-            initials_match = re.search(
-                r'\b([А-ЯЄІЇҐ][а-яєіїґ\']+)\s+([А-ЯЄІЇҐ]\.(?:\s*[А-ЯЄІЇҐ]\.)?)', clean_body
-            )
-            if initials_match:
-                parsed.last_name = initials_match.group(1)
-                raw_initials = initials_match.group(2).replace(" ", "").split(".")
-                parsed.first_name = (
-                    raw_initials[0] + "." if len(raw_initials) > 0 and raw_initials[0] else None
+            for line in clean_lines:
+                initials_match = re.search(
+                    r'\b([А-ЯЄІЇҐ][а-яєіїґ\']+)[^\S\r\n]+([А-ЯЄІЇҐ]\.(?:[^\S\r\n]*[А-ЯЄІЇҐ]\.)?)',
+                    line,
                 )
-                parsed.middle_name = (
-                    raw_initials[1] + "." if len(raw_initials) > 1 and raw_initials[1] else None
-                )
-            else:
-                # Check 2 or 3 word name: "Мартинюк Євген Васильович"
-                name_match = re.search(
-                    r'\b([А-ЯЄІЇҐ][а-яєіїґ\']+)\s+([А-ЯЄІЇҐ][а-яєіїґ\']+)(?:\s+([А-ЯЄІЇҐ][а-яєіїґ\']+))?\b',
-                    clean_body,
-                )
-                if name_match:
-                    candidate_last = name_match.group(1)
-                    candidate_first = name_match.group(2)
-                    if (
-                        candidate_last not in UKRAINIAN_CITIES_REFERENCE
-                        and candidate_first not in UKRAINIAN_CITIES_REFERENCE
+                if initials_match:
+                    parsed.last_name = initials_match.group(1)
+                    raw_initials = initials_match.group(2).replace(" ", "").split(".")
+                    parsed.first_name = (
+                        raw_initials[0] + "." if len(raw_initials) > 0 and raw_initials[0] else None
+                    )
+                    parsed.middle_name = (
+                        raw_initials[1] + "." if len(raw_initials) > 1 and raw_initials[1] else None
+                    )
+                    break
+
+            if not parsed.last_name:
+                # Check 2 or 3 word name on same line: "Мартинюк Євген Васильович"
+                for line in clean_lines:
+                    for name_match in re.finditer(
+                        r'\b([А-ЯЄІЇҐ][а-яєіїґ\']+)[^\S\r\n]+([А-ЯЄІЇҐ][а-яєіїґ\']+)(?:[^\S\r\n]+([А-ЯЄІЇҐ][а-яєіїґ\']+))?\b',
+                        line,
                     ):
-                        parsed.last_name = candidate_last
-                        parsed.first_name = candidate_first
-                        if name_match.group(3):
-                            parsed.middle_name = name_match.group(3)
+                        candidate_last = name_match.group(1)
+                        candidate_first = name_match.group(2)
+                        if (
+                            candidate_last not in UKRAINIAN_CITIES_REFERENCE
+                            and candidate_first not in UKRAINIAN_CITIES_REFERENCE
+                        ):
+                            parsed.last_name = candidate_last
+                            parsed.first_name = candidate_first
+                            if name_match.group(3):
+                                parsed.middle_name = name_match.group(3)
+                            break
+                    if parsed.last_name:
+                        break
 
         # 5. Prevent false address delivery suspicion if postomat/branch number was detected
         if parsed.warehouse_number:
@@ -444,6 +460,7 @@ class AIExtractor:
         self, text: str, previous_info: Optional[ParsedRecipientInfo] = None
     ) -> ParsedRecipientInfo:
         """Parse unstructured text with optional previous context for merging updates."""
+        text = normalize_apostrophes(text)
         user_prompt = text
         if previous_info and previous_info.is_recipient_info:
             prev_json = previous_info.model_dump_json(exclude_none=True)

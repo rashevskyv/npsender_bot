@@ -23,6 +23,7 @@ from src.ai.schemas import ParsedRecipientInfo
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
 from src.utils.barcode_gen import generate_code128_barcode
+from src.utils.text_cleaner import normalize_apostrophes, is_city_matched
 from src.nova_poshta.models import CODItemInfo, CODMonthlyStats, TrackingDocumentDetails
 from src.bot.keyboards import (
     get_main_reply_keyboard,
@@ -1386,7 +1387,7 @@ def register_handlers(
             await message.answer("⚠️ *Використання:* `/set_city НазваМіста` (наприклад, `/set_city Київ`)", parse_mode="Markdown")
             return
 
-        city_query = parts[1].strip()
+        city_query = normalize_apostrophes(parts[1]).strip()
         status_msg = await message.answer(f"🔍 *Пошук міста `{city_query}` у базі Нової Пошти...*", parse_mode="Markdown")
         try:
             eff_settings = storage_manager.get_effective_settings(message.from_user.id, settings)
@@ -3034,11 +3035,7 @@ def register_handlers(
         existing_is_addr = existing_session.get("is_address_delivery", False)
 
         def _is_city_matched(p_city: Optional[str], e_city: Optional[str]) -> bool:
-            if not p_city or not e_city:
-                return False
-            p_clean = p_city.strip().lower()
-            e_clean = e_city.strip().lower()
-            return p_clean == e_clean or p_clean in e_clean or e_clean in p_clean
+            return is_city_matched(p_city, e_city)
 
         matched_city = None
         warehouse = None

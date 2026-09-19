@@ -10,6 +10,7 @@ from typing import Optional, List, Dict, Any, Tuple
 import httpx
 
 from src.config import Settings
+from src.utils.text_cleaner import normalize_apostrophes, get_city_search_variants
 from src.nova_poshta.models import (
     CityInfo,
     WarehouseInfo,
@@ -291,11 +292,12 @@ class NovaPoshtaClient:
         if not city_name:
             return None
 
+        norm_city_name = normalize_apostrophes(city_name).strip()
         try:
             res = await self._post(
                 model_name="Address",
                 called_method="searchSettlements",
-                method_properties={"CityName": city_name, "Limit": "10"},
+                method_properties={"CityName": norm_city_name, "Limit": "10"},
             )
             for grp in res.get("data", []):
                 for addr in grp.get("Addresses", []):
@@ -311,19 +313,30 @@ class NovaPoshtaClient:
         return NovaPoshtaClient._city_settlement_cache.get(city_ref)
 
     async def search_city(self, city_name: str) -> List[CityInfo]:
-        """Search for a city by name."""
-        res = await self._post(
-            model_name="Address",
-            called_method="getCities",
-            method_properties={"FindByString": city_name, "Limit": "10"},
-        )
+        """Search for a city by name with intelligent apostrophe normalization and variants."""
+        variants = get_city_search_variants(city_name)
+        if not variants:
+            return []
+
+        res = {"data": []}
+        chosen_variant = variants[0]
+        for v in variants:
+            resp = await self._post(
+                model_name="Address",
+                called_method="getCities",
+                method_properties={"FindByString": v, "Limit": "10"},
+            )
+            if resp.get("data"):
+                res = resp
+                chosen_variant = v
+                break
 
         settlement_map: Dict[str, str] = {}
         try:
             res_settle = await self._post(
                 model_name="Address",
                 called_method="searchSettlements",
-                method_properties={"CityName": city_name, "Limit": "10"},
+                method_properties={"CityName": chosen_variant, "Limit": "10"},
             )
             for grp in res_settle.get("data", []):
                 for addr in grp.get("Addresses", []):
@@ -406,7 +419,7 @@ class NovaPoshtaClient:
         city_name: Optional[str] = None,
     ) -> List[StreetInfo]:
         """Search for streets by name within a city with intelligent variations, settlement streets integration, and ranking."""
-        raw_name = street_name.strip()
+        raw_name = normalize_apostrophes(street_name).strip()
         if not raw_name or not city_ref:
             return []
 
@@ -574,9 +587,9 @@ class NovaPoshtaClient:
             model_name="Counterparty",
             called_method="save",
             method_properties={
-                "FirstName": first_name.strip(),
-                "MiddleName": middle_name.strip(),
-                "LastName": last_name.strip(),
+                "FirstName": normalize_apostrophes(first_name).strip(),
+                "MiddleName": normalize_apostrophes(middle_name).strip(),
+                "LastName": normalize_apostrophes(last_name).strip(),
                 "Phone": phone_clean,
                 "Email": "",
                 "CounterpartyType": "PrivatePerson",

@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.5
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.6
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -219,5 +219,14 @@
   - [x] Забезпечити коректне успадкування активної сесії при надсиланні доповнень (оцінка, опис тощо) без помилкових попереджень `missing_fields`
   - [x] Написати регресійний юніт-тест `test_followup_message_does_not_cancel_active_processing_task` у `tests/test_active_session_and_updates.py`
   - [x] Запустити всі 115 тестів паралельно (`pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 25: Нормалізація українського апострофа в пошуку Нової Пошти, AI-екстракторі та валідаторах (v0.24.6)**
+  - [x] Створити модуль утиліт `src/utils/text_cleaner.py` з функціями `normalize_apostrophes`, `get_city_search_variants`, `is_city_matched`
+  - [x] Інтегрувати нормалізацію апострофа та варіативний пошук у `src/nova_poshta/client.py` (`search_city`, `search_street`, `get_settlement_ref`, `create_recipient_counterparty`)
+  - [x] Додати автоматичну нормалізацію апострофів у валідатори `ParsedRecipientInfo` у `src/ai/schemas.py`
+  - [x] Забезпечити нормалізацію апострофів у вхідних текстах та регулярних виразах `AIExtractor` у `src/ai/extractor.py`
+  - [x] Оновити обробники бота `src/bot/handlers.py` для використання нормалізованого зіставлення міст
+  - [x] Створити набір тестів `tests/test_apostrophes.py` та запустити всі тести паралельно (`python -m pytest -n auto` -> 124 пройдено)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
 
