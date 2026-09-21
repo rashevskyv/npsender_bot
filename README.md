@@ -6,6 +6,22 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **💳 Digital Nova Poshta Client Card & High-Resolution Scannable Barcodes ("💳 Картка клієнта" / `/client_card`)**:
+  - **Direct In-Bot Customer Card**: Open your customer loyalty card directly in Telegram without needing to open the official Nova Poshta mobile app at the branch counter or self-service terminal.
+  - **Official API Loyalty Data**: Automatically queries Nova Poshta API 2.0 (`LoyaltyUser/getLoyaltyInfoByApiKey`) to fetch verified sender details, including Full Name, Phone number, Loyalty Card ID (`CID1428940191989`), and User Login.
+  - **High-Resolution Scannable PNG Card**: Generates a high-contrast digital card image featuring Nova Poshta signature branding (`#DA291C`), sender credentials, and a high-resolution Code128 barcode (300 DPI) specifically optimized for optical and laser handheld barcode scanners at Nova Poshta branch desks.
+  - **Dual Barcode Toggle**: Easily switch on the fly between Loyalty Card (CID) barcode and Phone Number barcode via one-tap inline buttons (`📱 Штрихкод телефону` vs `💳 Штрихкод картки (CID)`).
+  - **One-Click Access**: Available from the persistent bottom reply keyboard (`💳 Картка клієнта`), the settings dashboard (`⚙️ Налаштування`), the slash command `/client_card` (or `/card`), and the Telegram bot commands menu.
+
+- **🖥️ Desktop & Mobile Telegram Persistent Menu Button (`set_my_commands` + `set_chat_menu_button`)**:
+  - **Always-Accessible Menu Button**: Registers system-wide bot commands with Telegram Bot API (`bot.set_my_commands`) and activates the persistent chat menu button (`bot.set_chat_menu_button(menu_button=MenuButtonCommands())`).
+  - **Full Desktop Support**: Guarantees the presence of the permanent bottom-left "Меню" (Menu) button across Telegram Desktop (Windows, macOS, Linux) as well as iOS and Android clients, providing instant access to all core features (`/start`, `/users`, `/settings`, `/client_card`, `/outgoing`, `/incoming`, `/drafts`, `/scansheet`, `/cod`, `/track`, `/help`).
+
+- **✨ Streamlined Users Dashboard & Multi-Line Balance Buttons ("👥 Користувачі" / `/users`)**:
+  - **Zero Truncation on Mobile Screens**: Replaced cluttered inline button text by eliminating redundant `"Обрати: "` prefixes and `"(Активний)"` markers.
+  - **Multi-Line Labels**: Remaining monthly COD balances are placed on an explicit second line (`\n(залишок: X грн)`) within each button, ensuring full visibility of both sender name and limit without ellipsis cutoffs.
+  - **Safe Onboarding**: Fixed `TelegramBadRequest` when adding user profiles via `/add_user`, ensuring seamless onboarding and status cleanup.
+
 - **🔍 Universal Express Waybill Tracking & Code128 Barcodes ("🔍 Відстежити ТТН" / `/track [НОМЕР]` / `/barcode [НОМЕР]`)**:
   - **Instant Action Prompt (Dual Buttons)**: When sending a 14-digit (or 11-digit) waybill number into the chat, the bot immediately provides dedicated action buttons:
     - `[ 🔍 Відстежити ]` — Fetches real-time tracking status, full route, financial details, and parcel parameters directly from Nova Poshta API.

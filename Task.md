@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.6
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.7
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -229,4 +229,15 @@
   - [x] Оновити обробники бота `src/bot/handlers.py` для використання нормалізованого зіставлення міст
   - [x] Створити набір тестів `tests/test_apostrophes.py` та запустити всі тести паралельно (`python -m pytest -n auto` -> 124 пройдено)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 26: Виправлення TelegramBadRequest при додаванні користувача, постійна кнопка Меню в Desktop/Mobile, редизайн кнопок дашборду та цифрова Картка клієнта (v0.24.7)**
+  - [x] Виправити `TelegramBadRequest` у `_handle_add_profile_with_key`: видалити `status_msg` перед відправкою повідомлення з `ReplyKeyboardMarkup`
+  - [x] Зареєструвати команди бота `bot.set_my_commands` та налаштувати постійну кнопку меню `bot.set_chat_menu_button` у `src/bot/main.py`
+  - [x] Оптимізувати кнопки дашборду користувачів у `get_users_management_keyboard`: прибрати `Обрати:`, прибрати `(Активний)`, перенести залишок на `\n` другого рядка кнопки
+  - [x] Додати метод API `get_loyalty_info` у `src/nova_poshta/client.py` (`LoyaltyUser/getLoyaltyInfoByApiKey`) для отримання даних картки клієнта/лояльності
+  - [x] Реалізувати генератор контрастного цифрового зображення картки клієнта `generate_client_card_image` у `src/utils/barcode_gen.py`
+  - [x] Створити команду `/client_card`, кнопку у налаштуваннях та інлайн-клавіатуру перемикання штрихкоду (Телефон vs Картка CID)
+  - [x] Додати юніт-тести в `tests/test_client_card_and_ui.py` та виконати всі 132 тести паралельно (`python -m pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
 

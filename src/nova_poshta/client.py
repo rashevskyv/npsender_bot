@@ -279,6 +279,48 @@ class NovaPoshtaClient:
         finally:
             self.api_key = orig_key
 
+    async def get_loyalty_info(self, api_key_override: Optional[str] = None) -> Dict[str, Any]:
+        """Fetch client loyalty card details via LoyaltyUser/getLoyaltyInfoByApiKey."""
+        orig_key = self.api_key
+        if api_key_override:
+            self.api_key = api_key_override
+
+        try:
+            res = await self._post(
+                model_name="LoyaltyUser",
+                called_method="getLoyaltyInfoByApiKey",
+                method_properties={},
+            )
+            data = res.get("data", [])
+            if not data:
+                return {}
+            card_info = data[0]
+            first = card_info.get("FirstName", "")
+            last = card_info.get("LastName", "")
+            middle = card_info.get("MiddleName", "")
+            full_name = f"{last} {first} {middle}".strip()
+            if not full_name:
+                full_name = str(card_info.get("FullName") or card_info.get("FullNameCounterparty") or "").strip()
+
+            return {
+                "full_name": full_name,
+                "phone": card_info.get("Phone", ""),
+                "loyalty_card": card_info.get("LoyaltyCard", ""),
+                "loyalty_card_ref": card_info.get("LoyaltyCardRef", ""),
+                "user_login": card_info.get("UserLogin", ""),
+                "barcode_number": card_info.get("BarcodeNumber", ""),
+                "card_type": card_info.get("LoyaltyCardType", ""),
+                "card_subtype": card_info.get("LoyaltyCardSubtype", ""),
+                "discount": card_info.get("Discount", 0),
+                "email": card_info.get("Email", ""),
+                "cid": card_info.get("Cid", ""),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch loyalty info: {e}")
+            return {}
+        finally:
+            self.api_key = orig_key
+
     async def get_settlement_ref(
         self, city_ref: str, city_name: Optional[str] = None
     ) -> Optional[str]:

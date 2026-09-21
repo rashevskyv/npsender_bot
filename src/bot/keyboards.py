@@ -29,6 +29,7 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="⚙️ Налаштування"),
             ],
             [
+                KeyboardButton(text="💳 Картка клієнта"),
                 KeyboardButton(text="❓ Допомога"),
             ],
         ],
@@ -42,6 +43,14 @@ class UserProfileCallback(CallbackData, prefix="uprof"):
 
     action: str  # "select", "add", "delete_prompt", "delete", "refresh"
     profile_id: str  # profile ID or "none"
+
+
+class ClientCardCallback(CallbackData, prefix="npcard"):
+    """Callback data schema for Nova Poshta client loyalty card actions."""
+
+    action: str  # "show", "switch_phone", "switch_card", "refresh"
+    profile_id: str  # profile ID or "active"
+    mode: str  # "card" or "phone"
 
 
 def get_users_management_keyboard(
@@ -59,9 +68,9 @@ def get_users_management_keyboard(
         rem_sum = bal.get("rem_sum")
 
         if is_active:
-            label = f"✅ {p.name} (Активний)"
+            label = f"✅ {p.name}"
             if rem_sum is not None:
-                label += f" | Ліміт: {int(rem_sum)} грн"
+                label += f"\n(залишок: {int(rem_sum)} грн)"
             rows.append([
                 InlineKeyboardButton(
                     text=label,
@@ -69,9 +78,9 @@ def get_users_management_keyboard(
                 )
             ])
         else:
-            label = f"🔄 Обрати: {p.name}"
+            label = f"🔄 {p.name}"
             if rem_sum is not None:
-                label += f" (залишок {int(rem_sum)} грн)"
+                label += f"\n(залишок: {int(rem_sum)} грн)"
             rows.append([
                 InlineKeyboardButton(
                     text=label,
@@ -99,6 +108,58 @@ def get_users_management_keyboard(
             )
         ])
 
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_settings_keyboard() -> InlineKeyboardMarkup:
+    """Build inline action buttons for settings/profile screen."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💳 Картка клієнта (штрихкод)",
+                    callback_data=ClientCardCallback(action="show", profile_id="active", mode="card").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👥 Керування користувачами",
+                    callback_data=UserProfileCallback(action="refresh", profile_id="none").pack(),
+                ),
+            ],
+        ]
+    )
+
+
+def get_client_card_keyboard(
+    profile_id: str = "active", current_mode: str = "card"
+) -> InlineKeyboardMarkup:
+    """Build action buttons below Nova Poshta client card image."""
+    rows = []
+    if current_mode == "card":
+        mode_btn = InlineKeyboardButton(
+            text="📱 Штрихкод телефону",
+            callback_data=ClientCardCallback(action="switch_phone", profile_id=profile_id, mode="phone").pack(),
+        )
+    else:
+        mode_btn = InlineKeyboardButton(
+            text="💳 Штрихкод картки (CID)",
+            callback_data=ClientCardCallback(action="switch_card", profile_id=profile_id, mode="card").pack(),
+        )
+
+    rows.append([
+        mode_btn,
+        InlineKeyboardButton(
+            text="🔄 Оновити",
+            callback_data=ClientCardCallback(action="refresh", profile_id=profile_id, mode=current_mode).pack(),
+        ),
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            text="⚙️ Налаштування",
+            callback_data=ClientCardCallback(action="settings", profile_id=profile_id, mode=current_mode).pack(),
+        )
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

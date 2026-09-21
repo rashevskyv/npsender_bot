@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional, List
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, BufferedInputFile, InputMediaPhoto
 
 from src.config import Settings
 from src.storage import (
@@ -22,7 +22,7 @@ from src.storage import (
 from src.ai.schemas import ParsedRecipientInfo
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
-from src.utils.barcode_gen import generate_code128_barcode
+from src.utils.barcode_gen import generate_code128_barcode, generate_client_card_image
 from src.utils.text_cleaner import normalize_apostrophes, is_city_matched
 from src.nova_poshta.models import CODItemInfo, CODMonthlyStats, TrackingDocumentDetails
 from src.bot.keyboards import (
@@ -53,6 +53,9 @@ from src.bot.keyboards import (
     UserProfileCallback,
     get_users_management_keyboard,
     get_profile_delete_keyboard,
+    ClientCardCallback,
+    get_client_card_keyboard,
+    get_settings_keyboard,
 )
 
 
@@ -1176,7 +1179,11 @@ def register_handlers(
                 cod_warning_enabled=True,
             )
             storage_manager.add_sender_profile(user_id, new_profile, set_active=False)
-            await status_msg.edit_text(
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await message.answer(
                 f"✅ *Користувача «{prof_name}» успішно додано!*\n\n"
                 f"👤 *ПІБ:* `{profile_data.get('sender_name')}`\n"
                 f"📞 *Телефон:* `{profile_data.get('sender_phone') or 'Не вказано'}`\n"
@@ -1295,14 +1302,13 @@ def register_handlers(
             await callback.answer()
             return
 
-    @router.message(Command("settings"))
-    @router.message(Command("profile"))
-    @router.message(F.text == "⚙️ Налаштування")
-    async def cmd_settings(message: Message):
-        """Show current user configuration status."""
-        clear_user_active_session(message.from_user.id)
-        u_settings = storage_manager.get_user_settings(message.from_user.id)
-        is_cfg = storage_manager.is_user_configured(message.from_user.id)
+    async def _send_settings_card(target, user_id: int, user_full_name: str):
+        """Render and send or edit user profile settings card."""
+        is_callback = isinstance(target, CallbackQuery)
+        msg = target.message if is_callback else target
+
+        u_settings = storage_manager.get_user_settings(user_id)
+        is_cfg = storage_manager.is_user_configured(user_id)
 
         status_icon = "✅ Підключено" if is_cfg else "⚠️ Потрібне налаштування"
         masked_np_key = (
@@ -1318,8 +1324,8 @@ def register_handlers(
         ai_url_display = u_settings.ai_base_url or "https://api.openai.com/v1"
         ai_model_display = u_settings.ai_model or settings.ai_model
 
-        active_prof = storage_manager.get_active_profile(message.from_user.id)
-        profiles = storage_manager.get_sender_profiles(message.from_user.id)
+        active_prof = storage_manager.get_active_profile(user_id)
+        profiles = storage_manager.get_sender_profiles(user_id)
         active_prof_name = active_prof.name if active_prof else "Основний"
         prof_cnt_str = f"{len(profiles)} налаштовано" if profiles else "0"
 
@@ -1327,10 +1333,11 @@ def register_handlers(
         cnt_lim_str = f"`{u_settings.cod_monthly_limit_count} шт`" if u_settings.cod_monthly_limit_count else "_Без ліміту_"
 
         card = (
-            f"⚙️ *Персональний профіль користувача:* [{message.from_user.full_name}]\n\n"
+            f"⚙️ *Персональний профіль користувача:* [{user_full_name}]\n\n"
             f"📊 *Загальний статус:* {status_icon}\n\n"
             "📮 *Дані Нової Пошти:*\n"
             f"• 👥 *Активний відправник:* «{active_prof_name}» (всього: {prof_cnt_str}) | `/users`\n"
+            f"• 💳 *Картка клієнта:* `/client_card`\n"
             f"• 🔑 *API-ключ НП:* {masked_np_key}\n"
             f"• 👤 *ПІБ відправника:* `{u_settings.sender_name or 'Не підтягнуто'}`\n"
             f"• 📞 *Телефон:* `{u_settings.sender_phone or 'Не підтягнуто'}`\n"
@@ -1342,6 +1349,7 @@ def register_handlers(
             f"• 🌐 *URL API:* `{ai_url_display}`\n"
             f"• 🤖 *Модель AI:* `{ai_model_display}`\n\n"
             "💡 *Команди для керування:*\n"
+            "• `/client_card` — 💳 відкрити картку клієнта та штрих-код\n"
             "• `/users` — керування користувачами та лімітами післяплати\n"
             "• `/add_user КЛЮЧ [Назва]` — додати нового користувача\n"
             "• `/set_np_key ВАШ_КЛЮЧ` — прив'язати API-ключ НП\n"
@@ -1355,7 +1363,156 @@ def register_handlers(
             "• `/set_cod_count КІЛЬКІСТЬ` — ліміт кількості посилок на місяць\n"
             "• `/cod` — звіт та статистика накладеного платежу"
         )
-        await message.answer(card, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+        if is_callback:
+            try:
+                await msg.edit_text(card, parse_mode="Markdown", reply_markup=get_settings_keyboard())
+                await target.answer()
+                return
+            except Exception:
+                pass
+
+        await msg.answer(card, parse_mode="Markdown", reply_markup=get_settings_keyboard())
+        if is_callback:
+            await target.answer()
+
+    @router.message(Command("settings"))
+    @router.message(Command("profile"))
+    @router.message(F.text == "⚙️ Налаштування")
+    async def cmd_settings(message: Message):
+        """Show current user configuration status."""
+        clear_user_active_session(message.from_user.id)
+        await _send_settings_card(message, message.from_user.id, message.from_user.full_name)
+
+    async def _render_client_card(
+        target_msg_or_callback,
+        user_id: int,
+        mode: str = "card",
+        profile_id: str = "active",
+    ):
+        """Render and send or edit Nova Poshta client loyalty card image with scannable barcode."""
+        is_callback = isinstance(target_msg_or_callback, CallbackQuery)
+        message = target_msg_or_callback.message if is_callback else target_msg_or_callback
+
+        prof = None
+        if profile_id and profile_id != "active":
+            for p in storage_manager.get_sender_profiles(user_id):
+                if p.id == profile_id:
+                    prof = p
+                    break
+        if not prof:
+            prof = storage_manager.get_active_profile(user_id)
+
+        u_settings = storage_manager.get_user_settings(user_id)
+        api_key = (
+            (prof.nova_poshta_api_key if prof else None)
+            or u_settings.nova_poshta_api_key
+            or settings.nova_poshta_api_key
+        )
+
+        full_name = (prof.sender_name if prof else None) or u_settings.sender_name or ""
+        phone = (prof.sender_phone if prof else None) or u_settings.sender_phone or settings.sender_phone or ""
+        loyalty_card = ""
+        user_login = ""
+
+        if api_key:
+            try:
+                loyalty_data = await np_client.get_loyalty_info(api_key_override=api_key)
+                if loyalty_data:
+                    full_name = loyalty_data.get("full_name") or full_name
+                    phone = loyalty_data.get("phone") or phone
+                    loyalty_card = loyalty_data.get("loyalty_card") or ""
+                    user_login = loyalty_data.get("user_login") or ""
+            except Exception as e:
+                logger.warning(f"Error getting loyalty data for client card: {e}")
+
+        clean_phone = "".join(ch for ch in phone if ch.isdigit())
+        card_id_str = loyalty_card or user_login
+
+        if mode == "phone" or not card_id_str:
+            barcode_val = clean_phone or "0000000000"
+            barcode_lbl = f"+{clean_phone}" if clean_phone else barcode_val
+            current_mode = "phone"
+        else:
+            barcode_val = card_id_str
+            barcode_lbl = card_id_str
+            current_mode = "card"
+
+        card_bytes = generate_client_card_image(
+            full_name=full_name or "Клієнт Нової Пошти",
+            phone=phone,
+            card_number=card_id_str,
+            barcode_data=barcode_val,
+            barcode_label=barcode_lbl,
+        )
+
+        prof_eff_id = prof.id if prof else "active"
+        kb = get_client_card_keyboard(profile_id=prof_eff_id, current_mode=current_mode)
+        barcode_type_desc = "номер телефону" if current_mode == "phone" else "картка лояльності / CID"
+        caption = (
+            f"💳 *Картка клієнта Нової Пошти*\n\n"
+            f"👤 *Власник:* `{full_name or 'Не підтягнуто'}`\n"
+            f"📞 *Телефон:* `{phone or 'Не вказано'}`\n"
+        )
+        if card_id_str:
+            caption += f"🪪 *Номер картки / CID:* `{card_id_str}`\n"
+        caption += (
+            f"📊 *Штрих-код:* `{barcode_val}` ({barcode_type_desc})\n\n"
+            "💡 _Покажіть цей штрих-код оператору у відділенні для швидкого зчитування сканером або скористайтеся терміналом самообслуговування._"
+        )
+
+        photo_file = BufferedInputFile(card_bytes, filename=f"client_card_{user_id}.png")
+
+        if is_callback:
+            try:
+                await message.edit_media(
+                    media=InputMediaPhoto(media=photo_file, caption=caption, parse_mode="Markdown"),
+                    reply_markup=kb,
+                )
+                await target_msg_or_callback.answer()
+                return
+            except Exception as ex:
+                logger.debug(f"edit_media failed (falling back to answer_photo): {ex}")
+
+        await message.answer_photo(
+            photo=photo_file,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=kb,
+        )
+        if is_callback:
+            await target_msg_or_callback.answer()
+
+    @router.message(Command("client_card"))
+    @router.message(Command("card"))
+    @router.message(F.text == "💳 Картка клієнта")
+    async def cmd_client_card(message: Message):
+        """Show scannable Nova Poshta digital client card."""
+        clear_user_active_session(message.from_user.id)
+        status_msg = await message.answer("⏳ *Генерація картки клієнта...*", parse_mode="Markdown")
+        await _render_client_card(message, message.from_user.id, mode="card", profile_id="active")
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+    @router.callback_query(ClientCardCallback.filter())
+    async def process_client_card_callback(callback: CallbackQuery, callback_data: ClientCardCallback):
+        """Handle inline actions under the client card image."""
+        user_id = callback.from_user.id
+        action = callback_data.action
+        profile_id = callback_data.profile_id
+        mode = callback_data.mode
+
+        if action == "settings":
+            await callback.answer()
+            await _send_settings_card(callback, user_id, callback.from_user.full_name)
+            return
+
+        if action in ("switch_phone", "switch_card", "refresh", "show"):
+            await callback.answer("🔄 Оновлення штрих-коду...")
+            target_mode = "phone" if action == "switch_phone" else ("card" if action == "switch_card" else mode)
+            await _render_client_card(callback, user_id, mode=target_mode, profile_id=profile_id)
+            return
 
 
     @router.message(Command("set_name"))
