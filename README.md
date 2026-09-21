@@ -6,6 +6,13 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **🏢 Automatic Website Cabinet Departure Address Sync & In-App Priority Hierarchy (v0.24.9)**:
+  - **Auto-Sync from Nova Poshta Web Cabinet**: Seamlessly discovers and pulls your default departure city and branch from your account on the Nova Poshta website (`novaposhta.ua`) via API. The bot checks counterparty addresses (`Counterparty/getCounterpartyAddresses`) and inspects recent outgoing shipments (`InternetDocument/getDocumentList`), extracting `CitySender` and `SenderAddress` automatically without manual entry.
+  - **In-App Configuration with Strict Priority**: You can customize or override your departure city and warehouse directly in the bot using `/set_city [City]` and `/set_warehouse [Number]`. The address configured directly in the app **always takes strict priority** over the one fetched from the website cabinet/API.
+  - **One-Tap Website Sync (`/sync_address`)**: Quickly refresh or re-fetch your cabinet departure location at any time using the `/sync_address` (or `/sync_sender_address`) command or the dedicated `[ 🔄 Підтягнути адресу з сайту (API) ]` button in the `👥 Користувачі` dashboard.
+  - **Pre-Flight Validation Guard**: Intercepts waybill creation before contacting Nova Poshta API if neither an in-app nor website departure point is present, permanently preventing `CitySender not selected, SenderAddress not selected` API crashes.
+  - **Zero-Disruption Session Continuation**: Specifying your departure location never wipes your active draft. Upon running `/set_warehouse`, the bot immediately re-renders your refreshed waybill preview card with the `[ ✅ Створити ТТН ]` button for instant one-click completion.
+
 - **💳 Digital Nova Poshta Client Card & High-Resolution Scannable Barcodes ("💳 Картка клієнта" / `/client_card`)**:
   - **Direct In-Bot Customer Card**: Open your customer loyalty card directly in Telegram without needing to open the official Nova Poshta mobile app at the branch counter or self-service terminal.
   - **Official API Loyalty Data**: Automatically queries Nova Poshta API 2.0 (`LoyaltyUser/getLoyaltyInfoByApiKey`) to fetch verified sender details, including Full Name, Phone number, Loyalty Card ID (`CID1428940191989`), and User Login.

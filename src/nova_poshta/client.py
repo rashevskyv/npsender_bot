@@ -252,21 +252,11 @@ class NovaPoshtaClient:
                     if contact_full_name:
                         sender_name = contact_full_name
 
-            # Get default sender addresses if available
-            sender_city_ref = ""
-            sender_address_ref = ""
-            try:
-                res_addr = await self._post(
-                    model_name="Counterparty",
-                    called_method="getCounterpartyAddresses",
-                    method_properties={"Ref": cp_ref, "CounterpartyProperty": "Sender"},
-                )
-                addrs = res_addr.get("data", [])
-                if addrs:
-                    sender_city_ref = addrs[0].get("CityRef", "")
-                    sender_address_ref = addrs[0].get("Ref", "")
-            except Exception:
-                pass
+            addr_data = await self.fetch_sender_address_from_api(counterparty_ref=cp_ref)
+            sender_city_ref = addr_data.get("sender_city_ref", "")
+            sender_address_ref = addr_data.get("sender_address_ref", "")
+            sender_city_name = addr_data.get("sender_city_name", "")
+            sender_warehouse_name = addr_data.get("sender_warehouse_name", "")
 
             return {
                 "sender_counterparty_ref": cp_ref,
@@ -275,9 +265,85 @@ class NovaPoshtaClient:
                 "sender_phone": phone,
                 "sender_city_ref": sender_city_ref,
                 "sender_address_ref": sender_address_ref,
+                "sender_city_name": sender_city_name,
+                "sender_warehouse_name": sender_warehouse_name,
+                "api_sender_city_ref": sender_city_ref,
+                "api_sender_address_ref": sender_address_ref,
+                "api_sender_city_name": sender_city_name,
+                "api_sender_warehouse_name": sender_warehouse_name,
             }
         finally:
             self.api_key = orig_key
+
+    async def fetch_sender_address_from_api(
+        self, counterparty_ref: Optional[str] = None
+    ) -> Dict[str, str]:
+        """Fetch sender departure address / warehouse configured in the Nova Poshta cabinet (website)."""
+        cp_ref = counterparty_ref or self.settings.sender_counterparty_ref
+        if not cp_ref:
+            try:
+                cps = await self.get_sender_counterparties()
+                if cps:
+                    cp_ref = cps[0].get("Ref", "")
+            except Exception as e:
+                logger.debug(f"Could not get sender counterparties: {e}")
+
+        city_ref = ""
+        address_ref = ""
+        city_name = ""
+        warehouse_name = ""
+
+        # 1. Try Counterparty/getCounterpartyAddresses with different properties
+        if cp_ref:
+            for prop in ["Sender", "", "Recipient"]:
+                try:
+                    params: Dict[str, Any] = {"Ref": cp_ref}
+                    if prop:
+                        params["CounterpartyProperty"] = prop
+                    res = await self._post(
+                        model_name="Counterparty",
+                        called_method="getCounterpartyAddresses",
+                        method_properties=params,
+                    )
+                    addrs = res.get("data", [])
+                    if addrs:
+                        first = addrs[0]
+                        city_ref = first.get("CityRef", "")
+                        address_ref = first.get("Ref", "")
+                        city_name = first.get("CityDescription", "")
+                        warehouse_name = first.get("Description", "")
+                        if city_ref and address_ref:
+                            break
+                except Exception as e:
+                    logger.debug(f"Error querying getCounterpartyAddresses ({prop}): {e}")
+
+        # 2. If still empty, check recent outgoing documents created on the site
+        if not city_ref or not address_ref:
+            try:
+                res_docs = await self._post(
+                    model_name="InternetDocument",
+                    called_method="getDocumentList",
+                    method_properties={"GetFullList": "0", "DateTime": "", "Page": "1"},
+                )
+                docs = res_docs.get("data", [])
+                for doc in docs:
+                    c_ref = doc.get("CitySender")
+                    a_ref = doc.get("SenderAddress")
+                    if c_ref and a_ref:
+                        city_ref = c_ref
+                        address_ref = a_ref
+                        city_name = doc.get("CitySenderDescription", "")
+                        warehouse_name = doc.get("SenderAddressDescription", "")
+                        break
+            except Exception as e:
+                logger.debug(f"Error querying getDocumentList for departure address: {e}")
+
+        return {
+            "sender_city_ref": city_ref,
+            "sender_address_ref": address_ref,
+            "sender_city_name": city_name,
+            "sender_warehouse_name": warehouse_name,
+        }
 
     async def get_loyalty_info(self, api_key_override: Optional[str] = None) -> Dict[str, Any]:
         """Fetch client loyalty card details via LoyaltyUser/getLoyaltyInfoByApiKey."""

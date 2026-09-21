@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, ConfigDict
 
 class CityInfo(BaseModel):
     """Nova Poshta City entity."""
+    model_config = ConfigDict(populate_by_name=True)
 
     ref: str = Field(..., alias="Ref")
     description: str = Field(..., alias="Description")
@@ -17,6 +18,7 @@ class CityInfo(BaseModel):
 
 class WarehouseInfo(BaseModel):
     """Nova Poshta Warehouse / Postomat entity."""
+    model_config = ConfigDict(populate_by_name=True)
 
     ref: str = Field(..., alias="Ref")
     description: str = Field(..., alias="Description")

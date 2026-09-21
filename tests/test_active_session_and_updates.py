@@ -408,7 +408,13 @@ async def test_waybill_force_confirm_creates_waybill_and_shows_cod_limit(setup_h
     manager = setup_handlers
     user_id = 1002
     session_id = "test-session-force"
-    manager.update_user_settings(user_id, cod_monthly_limit_sum=30000.0)
+    manager.update_user_settings(
+        user_id,
+        nova_poshta_api_key="test_np_key",
+        sender_city_ref="city-ref-test",
+        sender_address_ref="wh-ref-test",
+        cod_monthly_limit_sum=30000.0,
+    )
 
     city = CityInfo(Ref="city-ref-1", Description="Київ")
     wh = WarehouseInfo(Ref="wh-ref-1", Description="Відділення №1", Number="1", TypeOfWarehouse="Warehouse", CityRef="city-ref-1")

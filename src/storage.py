@@ -27,6 +27,11 @@ class SenderProfile(BaseModel):
     sender_city_name: Optional[str] = None
     sender_address_ref: Optional[str] = None
     sender_warehouse_name: Optional[str] = None
+    # API-pulled address fields from Nova Poshta cabinet (website)
+    api_sender_city_ref: Optional[str] = None
+    api_sender_city_name: Optional[str] = None
+    api_sender_address_ref: Optional[str] = None
+    api_sender_warehouse_name: Optional[str] = None
     sender_phone: Optional[str] = None
     sender_name: Optional[str] = None
     sender_card_mask: Optional[str] = None
@@ -56,6 +61,10 @@ class UserCustomSettings(BaseModel):
     sender_city_name: Optional[str] = None
     sender_address_ref: Optional[str] = None
     sender_warehouse_name: Optional[str] = None
+    api_sender_city_ref: Optional[str] = None
+    api_sender_city_name: Optional[str] = None
+    api_sender_address_ref: Optional[str] = None
+    api_sender_warehouse_name: Optional[str] = None
     sender_phone: Optional[str] = None
     sender_name: Optional[str] = None
     sender_card_mask: Optional[str] = None
@@ -216,6 +225,33 @@ class UserSettingsManager:
             user_settings.active_profile_id = prof.id
             changed = True
 
+        # Check if profile has API address from website cabinet when in-app address is not set
+        for p in user_settings.profiles:
+            if not p.sender_city_ref and not p.sender_address_ref:
+                if p.api_sender_city_ref and p.api_sender_address_ref:
+                    p.sender_city_ref = p.api_sender_city_ref
+                    p.sender_city_name = p.api_sender_city_name
+                    p.sender_address_ref = p.api_sender_address_ref
+                    p.sender_warehouse_name = p.api_sender_warehouse_name
+                    changed = True
+
+        # Ensure profiles without departure city & warehouse inherit from another configured profile
+        donor_profile = next(
+            (p for p in user_settings.profiles if p.sender_city_ref and p.sender_address_ref),
+            None,
+        )
+        if not donor_profile and user_settings.sender_city_ref and user_settings.sender_address_ref:
+            donor_profile = user_settings  # type: ignore
+
+        if donor_profile:
+            for p in user_settings.profiles:
+                if not p.sender_city_ref and not p.sender_address_ref:
+                    p.sender_city_ref = donor_profile.sender_city_ref
+                    p.sender_city_name = donor_profile.sender_city_name
+                    p.sender_address_ref = donor_profile.sender_address_ref
+                    p.sender_warehouse_name = donor_profile.sender_warehouse_name
+                    changed = True
+
         # Ensure active_profile_id is valid
         if user_settings.profiles:
             if not user_settings.active_profile_id or not any(p.id == user_settings.active_profile_id for p in user_settings.profiles):
@@ -230,6 +266,10 @@ class UserSettingsManager:
             user_settings.sender_city_name = active_p.sender_city_name
             user_settings.sender_address_ref = active_p.sender_address_ref
             user_settings.sender_warehouse_name = active_p.sender_warehouse_name
+            user_settings.api_sender_city_ref = active_p.api_sender_city_ref
+            user_settings.api_sender_city_name = active_p.api_sender_city_name
+            user_settings.api_sender_address_ref = active_p.api_sender_address_ref
+            user_settings.api_sender_warehouse_name = active_p.api_sender_warehouse_name
             user_settings.sender_phone = active_p.sender_phone
             user_settings.sender_name = active_p.sender_name
             user_settings.sender_card_mask = active_p.sender_card_mask
@@ -436,12 +476,48 @@ class UserSettingsManager:
             effective_dict["sender_contact_ref"] = (
                 (target_profile.sender_contact_ref if target_profile else user_custom.sender_contact_ref) or ""
             )
-            effective_dict["sender_city_ref"] = (
-                (target_profile.sender_city_ref if target_profile else user_custom.sender_city_ref) or ""
-            )
-            effective_dict["sender_address_ref"] = (
-                (target_profile.sender_address_ref if target_profile else user_custom.sender_address_ref) or ""
-            )
+            # Priority:
+            # 1. In-app configured address on target_profile (HIGHEST priority)
+            eff_city_ref = (target_profile.sender_city_ref if target_profile else None) or ""
+            eff_addr_ref = (target_profile.sender_address_ref if target_profile else None) or ""
+
+            # 2. API-pulled address on target_profile
+            if not eff_city_ref or not eff_addr_ref:
+                if target_profile and target_profile.api_sender_city_ref and target_profile.api_sender_address_ref:
+                    eff_city_ref = eff_city_ref or target_profile.api_sender_city_ref
+                    eff_addr_ref = eff_addr_ref or target_profile.api_sender_address_ref
+
+            # 3. Active profile in-app configured, then API address
+            if not eff_city_ref or not eff_addr_ref:
+                active_p = self.get_active_profile(user_id)
+                if active_p:
+                    eff_city_ref = eff_city_ref or active_p.sender_city_ref or active_p.api_sender_city_ref or ""
+                    eff_addr_ref = eff_addr_ref or active_p.sender_address_ref or active_p.api_sender_address_ref or ""
+
+            # 4. Other profiles of this user (in-app first, then API)
+            if not eff_city_ref or not eff_addr_ref:
+                for p in user_custom.profiles:
+                    if p.sender_city_ref and p.sender_address_ref:
+                        eff_city_ref = eff_city_ref or p.sender_city_ref
+                        eff_addr_ref = eff_addr_ref or p.sender_address_ref
+                        break
+                    elif p.api_sender_city_ref and p.api_sender_address_ref:
+                        eff_city_ref = eff_city_ref or p.api_sender_city_ref
+                        eff_addr_ref = eff_addr_ref or p.api_sender_address_ref
+                        break
+
+            # 5. Top-level user_custom
+            if not eff_city_ref or not eff_addr_ref:
+                eff_city_ref = eff_city_ref or user_custom.sender_city_ref or user_custom.api_sender_city_ref or ""
+                eff_addr_ref = eff_addr_ref or user_custom.sender_address_ref or user_custom.api_sender_address_ref or ""
+
+            # 6. Global settings
+            if not eff_city_ref or not eff_addr_ref:
+                eff_city_ref = eff_city_ref or global_settings.sender_city_ref or ""
+                eff_addr_ref = eff_addr_ref or global_settings.sender_address_ref or ""
+
+            effective_dict["sender_city_ref"] = eff_city_ref
+            effective_dict["sender_address_ref"] = eff_addr_ref
             effective_dict["sender_phone"] = (
                 (target_profile.sender_phone if target_profile else user_custom.sender_phone) or ""
             )

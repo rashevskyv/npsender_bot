@@ -250,4 +250,18 @@
   - [x] Створити юніт-тести `tests/test_card_session_resume.py` та успішно виконати всі 136 тестів паралельно (`python -m pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
 
+- [x] **Крок 28: Автоматичне підтягування адреси відправлення з сайту/API, налаштування в додатку з вищим пріоритетом та захист від збоїв генерації ТТН (v0.24.9)**
+  - [x] Реалізувати метод `fetch_sender_address_from_api(counterparty_ref)` у `NovaPoshtaClient` з перевіркою `Counterparty/getCounterpartyAddresses` (Sender, Recipient) та резервним аналізом останніх відправлень `InternetDocument/getDocumentList`
+  - [x] Інтегрувати витяг адреси відправки в `fetch_sender_profile` під час додавання або синхронізації користувача
+  - [x] Додати поля `api_sender_city_ref`, `api_sender_city_name`, `api_sender_address_ref`, `api_sender_warehouse_name` у `SenderProfile` та `UserCustomSettings`
+  - [x] Реалізувати строгу багаторівневу ієрархію пріоритетів у `get_effective_settings` (ручне налаштування в додатку через `/set_city` та `/set_warehouse` має абсолютний найвищий пріоритет над адресою з сайту/API)
+  - [x] Забезпечити автоматичне успадкування адреси відправлення (`_ensure_profile_migration`) від налаштованих профілів-донорів або API-адреси
+  - [x] Реалізувати pre-flight валідацію в обробнику підтвердження ТТН `confirm` / `force_confirm` перед зверненням до API Нової Пошти з блокуванням помилки `CitySender not selected, SenderAddress not selected`, збереженням сесії та виведенням інструкцій налаштування
+  - [x] Усунути деструктивне очищення сесії при виклику команд `/set_city` та `/set_warehouse` з автоматичним відновленням чернетки після вказання відділення
+  - [x] Додати команду `/sync_address` (`/sync_sender_address`) та інлайн-кнопку `[ 🔄 Підтягнути адресу з сайту (API) ]` у картці керування профілем `👥 Користувачі`
+  - [x] Відображати походження адреси відправника в дашборді профілю (`(в додатку)` vs `(з сайту/API)`)
+  - [x] Створити набір тестів `tests/test_sender_address_api_and_priority.py` та верифікувати проходження всіх 143 тестів паралельно (`python -m pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+
 

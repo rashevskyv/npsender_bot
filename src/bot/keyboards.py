@@ -100,6 +100,13 @@ def get_users_management_keyboard(
     ]
     rows.append(mgmt_row)
 
+    rows.append([
+        InlineKeyboardButton(
+            text="🔄 Підтягнути адресу з сайту (API)",
+            callback_data=UserProfileCallback(action="sync_address", profile_id="none").pack(),
+        )
+    ])
+
     if len(profiles) > 1:
         rows.append([
             InlineKeyboardButton(
@@ -756,5 +763,24 @@ def get_barcode_keyboard(doc_number: str) -> InlineKeyboardMarkup:
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_missing_sender_address_keyboard(session_id: str) -> InlineKeyboardMarkup:
+    """Build inline keyboard when sender departure city or warehouse is not configured."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Спробувати знову",
+                    callback_data=WaybillActionCallback(action="confirm", session_id=session_id).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="❌ Скасувати",
+                    callback_data=WaybillActionCallback(action="cancel", session_id=session_id).pack(),
+                ),
+            ]
+        ]
+    )
+
 
 

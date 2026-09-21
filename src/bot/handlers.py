@@ -56,6 +56,7 @@ from src.bot.keyboards import (
     ClientCardCallback,
     get_client_card_keyboard,
     get_settings_keyboard,
+    get_missing_sender_address_keyboard,
 )
 
 
@@ -1042,6 +1043,11 @@ def register_handlers(
         has_multiple_profiles = len(profiles) > 1
         active_name = active_p.name if active_p else None
         sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple_profiles) else ""
+        departure_warn = (
+            "⚠️ *Пункт відправки:* Не вказано місто або відділення! (/set_city та /set_warehouse)\n"
+            if (not eff_settings.sender_city_ref or not eff_settings.sender_address_ref)
+            else ""
+        )
 
         rec_name = parsed_info.full_name if parsed_info else "Не вказано"
         rec_phone = parsed_info.phone if parsed_info else "Не вказано"
@@ -1050,6 +1056,7 @@ def register_handlers(
         card_text = (
             "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
             f"{sender_prefix}"
+            f"{departure_warn}"
             f"👤 *Отримувач:* {rec_name}\n"
             f"📞 *Телефон:* `{rec_phone}`\n"
             f"🏙 *Місто:* {city_name}\n"
@@ -1244,10 +1251,14 @@ def register_handlers(
             rem_s = int(act_bal.get("rem_sum", 29999))
             used_c = act_bal.get("used_cnt", 0)
 
+            act_source = " _(в додатку)_" if active_profile.sender_warehouse_name else (" _(з сайту/API)_" if active_profile.api_sender_warehouse_name else "")
+            act_city = active_profile.sender_city_name or active_profile.api_sender_city_name or "Місто не вказано"
+            act_wh = active_profile.sender_warehouse_name or active_profile.api_sender_warehouse_name or "Відділення не вказано"
+
             card_lines.append("📌 *Поточний активний відправник:*")
             card_lines.append(f"✅ *{active_profile.name}* (`{active_profile.sender_phone or 'тел. не вказано'}`)")
             card_lines.append(f"   📊 *Післяплата:* `{used_s} грн` із {safe_l} грн (вільно: `{rem_s} грн`) | {used_c} ТТН")
-            card_lines.append(f"   🏙 *Відправка:* {active_profile.sender_city_name or 'Місто не вказано'}, {active_profile.sender_warehouse_name or 'Відділення не вказано'}\n")
+            card_lines.append(f"   🏙 *Відправка:* {act_city}, {act_wh}{act_source}\n")
 
         other_profs = [p for p in profiles if p.id != active_id]
         if other_profs:
@@ -1259,9 +1270,17 @@ def register_handlers(
                 p_rem = int(p_bal.get("rem_sum", 29999))
                 p_cnt = p_bal.get("used_cnt", 0)
 
+                o_source = " _(в додатку)_" if p.sender_warehouse_name else (" _(з сайту/API)_" if p.api_sender_warehouse_name else "")
+                o_city = p.sender_city_name or p.api_sender_city_name or "Не вказано"
+                o_wh = p.sender_warehouse_name or p.api_sender_warehouse_name or "Не вказано"
+
                 card_lines.append(f"▫️ *{p.name}* (`{p.sender_phone or 'тел. не вказано'}`)")
                 card_lines.append(f"   📊 *Післяплата:* `{p_used} грн` із {p_safe} грн (вільно: `{p_rem} грн`) | {p_cnt} ТТН")
-                card_lines.append(f"   🏙 *Відправка:* {p.sender_city_name or 'Не вказано'}, {p.sender_warehouse_name or 'Не вказано'}\n")
+                card_lines.append(f"   🏙 *Відправка:* {o_city}, {o_wh}{o_source}\n")
+
+        card_lines.append("💡 *Адреса відправлення та пріоритет:*")
+        card_lines.append("Адреса, налаштована в додатку (`/set_city`, `/set_warehouse`), має найвищий пріоритет над адресою з сайту Нової Пошти (API).")
+        card_lines.append("Підтягнути збережену на сайті адресу можна кнопкою нижче або командою `/sync_address`.\n")
 
         card_lines.append("💡 *Оптимізація післяплати:*")
         card_lines.append("Безпечна межа накладеного платежу становить **29 999 грн** на людину в місяць. Бот автоматично пропонує перемкнути користувача, коли у поточного закінчується ліміт!")
@@ -1296,24 +1315,36 @@ def register_handlers(
                 sender_counterparty_ref=profile_data.get("sender_counterparty_ref"),
                 sender_contact_ref=profile_data.get("sender_contact_ref"),
                 sender_city_ref=profile_data.get("sender_city_ref"),
+                sender_city_name=profile_data.get("sender_city_name"),
                 sender_address_ref=profile_data.get("sender_address_ref"),
+                sender_warehouse_name=profile_data.get("sender_warehouse_name"),
+                api_sender_city_ref=profile_data.get("api_sender_city_ref"),
+                api_sender_city_name=profile_data.get("api_sender_city_name"),
+                api_sender_address_ref=profile_data.get("api_sender_address_ref"),
+                api_sender_warehouse_name=profile_data.get("api_sender_warehouse_name"),
                 sender_phone=profile_data.get("sender_phone"),
                 sender_name=profile_data.get("sender_name"),
                 cod_monthly_limit_sum=30000.0,
                 cod_monthly_limit_count=10,
                 cod_warning_enabled=True,
             )
-            storage_manager.add_sender_profile(user_id, new_profile, set_active=False)
+            added_p = storage_manager.add_sender_profile(user_id, new_profile, set_active=False)
             try:
                 await status_msg.delete()
             except Exception:
                 pass
+
+            if added_p.sender_warehouse_name and added_p.sender_city_name:
+                wh_line = f"🏙 *Відправка:* `{added_p.sender_city_name}, {added_p.sender_warehouse_name}` (автоматично підтягнуто)\n\n"
+            else:
+                wh_line = "🏙 Не забудьте перевірити або встановити місто (`/set_city Назва`) та відділення (`/set_warehouse Номер`) після перемикання на цей профіль.\n\n"
+
             await message.answer(
                 f"✅ *Користувача «{prof_name}» успішно додано!*\n\n"
                 f"👤 *ПІБ:* `{profile_data.get('sender_name')}`\n"
                 f"📞 *Телефон:* `{profile_data.get('sender_phone') or 'Не вказано'}`\n"
                 f"🔑 *API-ключ:* `{api_key[:6]}...{api_key[-4:]}`\n\n"
-                "🏙 Не забудьте перевірити або встановити місто (`/set_city Назва`) та відділення (`/set_warehouse Номер`) після перемикання на цей профіль.\n\n"
+                f"{wh_line}"
                 "Натисніть кнопку `👥 Користувачі`, щоб переглянути баланси або обрати активного користувача.",
                 parse_mode="Markdown",
                 reply_markup=get_main_reply_keyboard(),
@@ -1390,6 +1421,51 @@ def register_handlers(
 
         if action == "refresh":
             await callback.answer("🔄 Оновлення балансів...")
+            await _render_users_dashboard(callback, user_id)
+            return
+
+        if action == "sync_address":
+            await callback.answer("⏳ Запит адреси з сайту Нової Пошти...")
+            try:
+                eff_settings = storage_manager.get_effective_settings(user_id, settings)
+                user_np_client = NovaPoshtaClient(eff_settings)
+                addr_info = await user_np_client.fetch_sender_address_from_api(
+                    counterparty_ref=eff_settings.sender_counterparty_ref
+                )
+                city_ref = addr_info.get("sender_city_ref")
+                addr_ref = addr_info.get("sender_address_ref")
+                city_name = addr_info.get("sender_city_name")
+                wh_name = addr_info.get("sender_warehouse_name")
+
+                if city_ref and addr_ref:
+                    storage_manager.update_user_settings(
+                        user_id,
+                        api_sender_city_ref=city_ref,
+                        api_sender_city_name=city_name,
+                        api_sender_address_ref=addr_ref,
+                        api_sender_warehouse_name=wh_name,
+                        sender_city_ref=city_ref,
+                        sender_city_name=city_name,
+                        sender_address_ref=addr_ref,
+                        sender_warehouse_name=wh_name,
+                    )
+                    await callback.message.answer(
+                        "✅ *Адресу відправлення успішно підтягнуто з кабінету сайту!*\n\n"
+                        f"🏙 *Місто:* `{city_name or city_ref}`\n"
+                        f"🏢 *Відділення/Адреса:* `{wh_name or addr_ref}`\n\n"
+                        "💡 *Пріоритет:* Адреса, налаштована в додатку через `/set_city` та `/set_warehouse`, завжди має пріоритет над адресою з сайту.",
+                        parse_mode="Markdown",
+                    )
+                else:
+                    await callback.message.answer(
+                        "⚠️ *У вашому кабінеті Нової Пошти не знайдено налаштованої адреси відправника.*\n\n"
+                        "Вкажіть її безпосередньо в додатку: `/set_city Назва` та `/set_warehouse Номер`.",
+                        parse_mode="Markdown",
+                    )
+            except Exception as e:
+                logger.error(f"Error syncing sender address: {e}")
+                await callback.message.answer(f"❌ *Помилка підтягування адреси з API:* {str(e)}", parse_mode="Markdown")
+
             await _render_users_dashboard(callback, user_id)
             return
 
@@ -1662,7 +1738,6 @@ def register_handlers(
     @router.message(Command("set_city"))
     async def cmd_set_city(message: Message):
         """Set user's sender city."""
-        clear_user_active_session(message.from_user.id)
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             await message.answer("⚠️ *Використання:* `/set_city НазваМіста` (наприклад, `/set_city Київ`)", parse_mode="Markdown")
@@ -1683,19 +1758,30 @@ def register_handlers(
                 message.from_user.id,
                 sender_city_ref=city.ref,
                 sender_city_name=city.description,
+                sender_address_ref="",
+                sender_warehouse_name="",
             )
-            await status_msg.edit_text(
-                f"✅ *Місто відправника успішно збережено:* `{city.description}`\n\n"
-                "Тепер вкажіть номер вашого відділення відправки: `/set_warehouse Номер`",
-                parse_mode="Markdown",
-            )
+
+            active_session_id = get_user_active_session_id(message.from_user.id)
+            if active_session_id and active_session_id in PENDING_SESSIONS:
+                await status_msg.edit_text(
+                    f"✅ *Місто відправника успішно збережено:* `{city.description}`\n\n"
+                    "Тепер вкажіть номер вашого відділення відправки: `/set_warehouse Номер`\n\n"
+                    "💡 *Ваша поточна чернетка збережена!* Після вказання відділення створення ТТН буде продовжено автоматично.",
+                    parse_mode="Markdown",
+                )
+            else:
+                await status_msg.edit_text(
+                    f"✅ *Місто відправника успішно збережено:* `{city.description}`\n\n"
+                    "Тепер вкажіть номер вашого відділення відправки: `/set_warehouse Номер`",
+                    parse_mode="Markdown",
+                )
         except Exception as e:
             await status_msg.edit_text(f"❌ *Помилка встановлення міста:* {str(e)}", parse_mode="Markdown")
 
     @router.message(Command("set_warehouse"))
     async def cmd_set_warehouse(message: Message):
         """Set user's sender warehouse / postomat."""
-        clear_user_active_session(message.from_user.id)
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip().isdigit():
             await message.answer("⚠️ *Використання:* `/set_warehouse НомерВідділення` (наприклад, `/set_warehouse 5`)", parse_mode="Markdown")
@@ -1721,11 +1807,43 @@ def register_handlers(
                 sender_address_ref=wh.ref,
                 sender_warehouse_name=wh.description,
             )
-            await status_msg.edit_text(
-                f"✅ *Відділення відправника збережено:* `{wh.description}`\n\n"
-                "🎉 Вітаємо! Ваш профіль повністю налаштовано. Надішліть дані отримувача у повідомленні для створення ТТН!",
-                parse_mode="Markdown",
-            )
+
+            active_session_id = get_user_active_session_id(message.from_user.id)
+            if active_session_id and active_session_id in PENDING_SESSIONS:
+                session = PENDING_SESSIONS[active_session_id]
+                session["updated_at"] = datetime.datetime.now().timestamp()
+                card_text, markup = await _build_waybill_preview_message(active_session_id, message.from_user.id)
+
+                prev_chat_id = session.get("chat_id")
+                prev_msg_id = session.get("message_id")
+                if prev_chat_id and prev_msg_id:
+                    try:
+                        await message.bot.edit_message_reply_markup(
+                            chat_id=prev_chat_id,
+                            message_id=prev_msg_id,
+                            reply_markup=markup,
+                        )
+                    except Exception:
+                        pass
+
+                sent_msg = await message.answer(
+                    f"✅ *Відділення відправника збережено:* `{wh.description}`\n\n"
+                    f"{card_text}",
+                    parse_mode="Markdown",
+                    reply_markup=markup,
+                )
+                session["chat_id"] = sent_msg.chat.id
+                session["message_id"] = sent_msg.message_id
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+            else:
+                await status_msg.edit_text(
+                    f"✅ *Відділення відправника збережено:* `{wh.description}`\n\n"
+                    "🎉 Вітаємо! Ваш профіль повністю налаштовано. Надішліть дані отримувача у повідомленні для створення ТТН!",
+                    parse_mode="Markdown",
+                )
         except Exception as e:
             await status_msg.edit_text(f"❌ *Помилка встановлення відділення:* {str(e)}", parse_mode="Markdown")
 
@@ -1754,24 +1872,117 @@ def register_handlers(
                 sender_counterparty_ref=profile["sender_counterparty_ref"],
                 sender_contact_ref=profile["sender_contact_ref"],
                 sender_city_ref=profile["sender_city_ref"] or None,
+                sender_city_name=profile.get("sender_city_name") or None,
                 sender_address_ref=profile["sender_address_ref"] or None,
+                sender_warehouse_name=profile.get("sender_warehouse_name") or None,
+                api_sender_city_ref=profile.get("api_sender_city_ref") or None,
+                api_sender_city_name=profile.get("api_sender_city_name") or None,
+                api_sender_address_ref=profile.get("api_sender_address_ref") or None,
+                api_sender_warehouse_name=profile.get("api_sender_warehouse_name") or None,
                 sender_phone=profile["sender_phone"],
                 sender_name=profile["sender_name"],
             )
+
+            wh_text = ""
+            if profile.get("sender_warehouse_name") and profile.get("sender_city_name"):
+                wh_text = (
+                    f"🏙 *Відділення відправки:* `{profile['sender_city_name']}, {profile['sender_warehouse_name']}` (підтягнуто з кабінету сайту)\n\n"
+                    "💡 Ви можете будь-коли змінити його за допомогою `/set_city` та `/set_warehouse` (налаштовані в додатку дані мають пріоритет).\n\n"
+                )
+            else:
+                wh_text = (
+                    "🏙 Тепер вкажіть місто відправки командою `/set_city НазваМіста`\n"
+                    "📦 Та номер відділення/поштомату: `/set_warehouse Номер`\n\n"
+                )
 
             await status_msg.edit_text(
                 "✅ *API-ключ Нової Пошти та профіль відправника успішно підв'язано!*\n\n"
                 f"👤 *Відправник:* `{profile['sender_name']}`\n"
                 f"📞 *Телефон:* `{profile['sender_phone'] or 'Не вказано'}`\n"
                 f"🔑 *Ключ:* `{api_key[:6]}...{api_key[-4:]}`\n\n"
-                "🏙 Тепер вкажіть місто відправки командою `/set_city НазваМіста`\n"
-                "📦 Та номер відділення/поштомату: `/set_warehouse Номер`",
+                f"{wh_text}"
+                "🎉 Надішліть дані отримувача у повідомленні для створення ТТН!",
                 parse_mode="Markdown",
             )
         except Exception as e:
             logger.error(f"Failed to set Nova Poshta API key: {e}")
             await status_msg.edit_text(
                 f"❌ *Помилка перевірки ключа Нової Пошти:* {str(e)}", parse_mode="Markdown"
+            )
+
+    @router.message(Command("sync_address"))
+    @router.message(Command("sync_sender_address"))
+    async def cmd_sync_address(message: Message):
+        """Sync departure address from Nova Poshta website/API cabinet."""
+        user_id = message.from_user.id
+        status_msg = await message.answer(
+            "⏳ *Запит адреси відправника з кабінету Нової Пошти...*", parse_mode="Markdown"
+        )
+        try:
+            eff_settings = storage_manager.get_effective_settings(user_id, settings)
+            user_np_client = NovaPoshtaClient(eff_settings)
+            addr_info = await user_np_client.fetch_sender_address_from_api(
+                counterparty_ref=eff_settings.sender_counterparty_ref
+            )
+
+            city_ref = addr_info.get("sender_city_ref")
+            addr_ref = addr_info.get("sender_address_ref")
+            city_name = addr_info.get("sender_city_name")
+            wh_name = addr_info.get("sender_warehouse_name")
+
+            if not city_ref or not addr_ref:
+                await status_msg.edit_text(
+                    "⚠️ *У вашому кабінеті Нової Пошти не знайдено налаштованої адреси відправлення.*\n\n"
+                    "Ви можете налаштувати її безпосередньо у боті:\n"
+                    "1️⃣ `/set_city НазваМіста` (наприклад, `/set_city Київ`)\n"
+                    "2️⃣ `/set_warehouse Номер` (наприклад, `/set_warehouse 1`)\n\n"
+                    "💡 *Налаштована в додатку адреса має пріоритет над API.*",
+                    parse_mode="Markdown",
+                )
+                return
+
+            storage_manager.update_user_settings(
+                user_id,
+                api_sender_city_ref=city_ref,
+                api_sender_city_name=city_name,
+                api_sender_address_ref=addr_ref,
+                api_sender_warehouse_name=wh_name,
+                sender_city_ref=city_ref,
+                sender_city_name=city_name,
+                sender_address_ref=addr_ref,
+                sender_warehouse_name=wh_name,
+            )
+
+            active_session_id = get_user_active_session_id(user_id)
+            if active_session_id and active_session_id in PENDING_SESSIONS:
+                card_text, markup = await _build_waybill_preview_message(active_session_id, user_id)
+                sent_msg = await message.answer(
+                    "✅ *Адресу відправлення успішно підтягнуто з сайту Нової Пошти!*\n\n"
+                    f"🏙 *Місто:* `{city_name or city_ref}`\n"
+                    f"🏢 *Відділення/Адреса:* `{wh_name or addr_ref}`\n\n"
+                    f"{card_text}",
+                    parse_mode="Markdown",
+                    reply_markup=markup,
+                )
+                session = PENDING_SESSIONS[active_session_id]
+                session["chat_id"] = sent_msg.chat.id
+                session["message_id"] = sent_msg.message_id
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+            else:
+                await status_msg.edit_text(
+                    "✅ *Адресу відправлення успішно синхронізовано з кабінетом Нової Пошти!*\n\n"
+                    f"🏙 *Місто:* `{city_name or city_ref}`\n"
+                    f"🏢 *Відділення/Адреса:* `{wh_name or addr_ref}`\n\n"
+                    "💡 *Пріоритет:* Якщо ви вкажете іншу адресу командами `/set_city` та `/set_warehouse`, вона матиме вищий пріоритет над адресою з сайту.",
+                    parse_mode="Markdown",
+                )
+        except Exception as e:
+            logger.error(f"Failed to sync sender address from API: {e}")
+            await status_msg.edit_text(
+                f"❌ *Помилка синхронізації адреси з сайту:* {str(e)}", parse_mode="Markdown"
             )
 
     @router.message(Command("set_ai_key"))
@@ -4413,6 +4624,27 @@ def register_handlers(
                     )
                     await callback.answer("🚨 Увага: ліміт післяплати буде перевищено!", show_alert=True)
                     return
+
+            # Pre-flight check: ensure departure city and warehouse are configured before calling NP API
+            if not eff_settings.sender_city_ref or not eff_settings.sender_address_ref:
+                await callback.answer("⚠️ Не вказано місто або відділення відправки!", show_alert=True)
+                missing_info_msg = (
+                    "⚠️ *Неможливо створити ТТН: не вказано пункт відправки!*\n\n"
+                    "Для реєстрації накладної у Новій Пошті необхідно зазначити, звідки відправляється посилка.\n\n"
+                    "Будь ласка, вкажіть ваше місто та відділення відправки:\n"
+                    "1️⃣ `/set_city НазваМіста` (наприклад, `/set_city Київ`)\n"
+                    "2️⃣ `/set_warehouse Номер` (наприклад, `/set_warehouse 1`)\n\n"
+                    "💡 *Ваша поточна чернетка збережена!* Після вказання відділення створення накладної буде продовжено автоматично."
+                )
+                try:
+                    await callback.message.edit_text(
+                        missing_info_msg,
+                        parse_mode="Markdown",
+                        reply_markup=get_missing_sender_address_keyboard(session_id),
+                    )
+                except Exception:
+                    pass
+                return
 
             action_title = "Оновлення" if editing_ref else "Генерація"
             await callback.answer(f"{action_title} express-накладної...")
