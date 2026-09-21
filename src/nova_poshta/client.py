@@ -666,6 +666,8 @@ class NovaPoshtaClient:
         declared_value: float = 300.0,
         cod_amount: Optional[float] = None,
         cod_payer_type: str = "Recipient",
+        cod_payment_type: str = "cash",
+        payment_card: Optional[str] = None,
         service_type: Optional[str] = None,
     ) -> WaybillCreateResult:
         """Create Nova Poshta Express Waybill (ТТН)."""
@@ -714,19 +716,37 @@ class NovaPoshtaClient:
         if cod_amount and cod_amount > 0:
             declared_value = max(declared_value, cod_amount)
             method_props["Cost"] = str(declared_value)
-            method_props["BackwardDeliveryData"] = [
-                {
-                    "PayerType": cod_payer_type,
-                    "CargoType": "Money",
-                    "RedeliveryString": str(int(cod_amount)),
-                }
-            ]
+            bw_entry: Dict[str, Any] = {
+                "PayerType": cod_payer_type,
+                "CargoType": "Money",
+                "RedeliveryString": str(int(cod_amount)),
+            }
+            if cod_payment_type == "card" and payment_card:
+                bw_entry["RedeliveryPaymentCard"] = payment_card
+                method_props["RedeliveryPaymentCard"] = payment_card
+            method_props["BackwardDeliveryData"] = [bw_entry]
 
-        res = await self._post(
-            model_name="InternetDocument",
-            called_method="save",
-            method_properties=method_props,
-        )
+        try:
+            res = await self._post(
+                model_name="InternetDocument",
+                called_method="save",
+                method_properties=method_props,
+            )
+        except RuntimeError as re:
+            # If Nova Poshta rejected the custom RedeliveryPaymentCard parameter, retry with standard Money backward delivery
+            if cod_payment_type == "card" and payment_card and ("card" in str(re).lower() or "карт" in str(re).lower()):
+                logger.warning(f"Retrying waybill creation without RedeliveryPaymentCard due to: {re}")
+                if "RedeliveryPaymentCard" in method_props:
+                    del method_props["RedeliveryPaymentCard"]
+                if "BackwardDeliveryData" in method_props and method_props["BackwardDeliveryData"]:
+                    method_props["BackwardDeliveryData"][0].pop("RedeliveryPaymentCard", None)
+                res = await self._post(
+                    model_name="InternetDocument",
+                    called_method="save",
+                    method_properties=method_props,
+                )
+            else:
+                raise
         data = res.get("data", [])
         if not data:
             raise RuntimeError("InternetDocument/save returned empty data array")

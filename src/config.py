@@ -1,6 +1,6 @@
 """Application configuration using Pydantic BaseSettings."""
 
-from typing import Literal
+from typing import Literal, Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     sender_address_ref: str = Field("", alias="SENDER_ADDRESS_REF")
     sender_phone: str = Field("", alias="SENDER_PHONE")
     sender_name: str = Field("", alias="SENDER_NAME")
+    sender_card_mask: Optional[str] = Field(None, alias="SENDER_CARD_MASK")
+    sender_card_ref: Optional[str] = Field(None, alias="SENDER_CARD_REF")
 
     # Defaults for Express Waybill
     default_payer_type: Literal["Recipient", "Sender", "ThirdPerson"] = Field(

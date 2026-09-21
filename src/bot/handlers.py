@@ -5,11 +5,11 @@ import datetime
 import logging
 import re
 import uuid
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, BufferedInputFile, InputMediaPhoto
+from aiogram.types import Message, CallbackQuery, BufferedInputFile, InputMediaPhoto, InlineKeyboardMarkup
 
 from src.config import Settings
 from src.storage import (
@@ -79,6 +79,7 @@ USER_PROCESSING_LOCKS: Dict[int, asyncio.Lock] = {}
 USER_TRACKING_WAITING: set = set()
 USER_ADD_PROFILE_WAITING: set = set()
 USER_BARCODE_WAITING: set = set()
+USER_CARD_WAITING: set = set()
 
 
 def get_user_processing_lock(user_id: int) -> asyncio.Lock:
@@ -127,6 +128,7 @@ def clear_user_active_session(user_id: int):
     USER_TRACKING_WAITING.discard(user_id)
     USER_ADD_PROFILE_WAITING.discard(user_id)
     USER_BARCODE_WAITING.discard(user_id)
+    USER_CARD_WAITING.discard(user_id)
 
 
 def _parse_draft_date(date_str: str) -> Optional[datetime.datetime]:
@@ -1002,6 +1004,129 @@ def register_handlers(
 ):
     """Factory to inject dependencies into router handlers."""
 
+    async def _build_waybill_preview_message(
+        session_id: str,
+        user_id: int,
+    ) -> Tuple[str, InlineKeyboardMarkup]:
+        """Centralized renderer for the waybill draft verification card and action keyboard."""
+        session = PENDING_SESSIONS.get(session_id, {})
+        eff_settings = storage_manager.get_effective_settings(user_id, settings)
+        user_np_client = NovaPoshtaClient(eff_settings)
+
+        parsed_info = session.get("parsed_info")
+        city = session.get("city")
+        dest_desc = session.get("destination_description") or "Не вказано"
+        cargo_desc = session.get("cargo_description") or "Посилка"
+        declared_val = session.get("declared_value", 500.0)
+        cod_val = session.get("cod_amount", 0.0)
+        cod_type = session.get("cod_payment_type", "cash")
+        payer_type = session.get("payer_type", "Recipient")
+        cargo_type = session.get("cargo_type", "Parcel")
+        editing_ref = session.get("editing_draft_ref")
+
+        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+
+        eval_res = await evaluate_cod_limits(
+            user_id=user_id,
+            cod_val=cod_val,
+            user_np_client=user_np_client,
+            storage_manager=storage_manager,
+            eff_settings=eff_settings,
+            editing_ref=editing_ref,
+        )
+        warn_line = eval_res.get("warn_line", "")
+        suggested_prof = eval_res.get("suggested_profile")
+
+        profiles = storage_manager.get_sender_profiles(user_id)
+        active_p = storage_manager.get_active_profile(user_id)
+        has_multiple_profiles = len(profiles) > 1
+        active_name = active_p.name if active_p else None
+        sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple_profiles) else ""
+
+        rec_name = parsed_info.full_name if parsed_info else "Не вказано"
+        rec_phone = parsed_info.phone if parsed_info else "Не вказано"
+        city_name = city.description if hasattr(city, "description") else (getattr(city, "name", str(city)) if city else "Не вказано")
+
+        card_text = (
+            "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
+            f"{sender_prefix}"
+            f"👤 *Отримувач:* {rec_name}\n"
+            f"📞 *Телефон:* `{rec_phone}`\n"
+            f"🏙 *Місто:* {city_name}\n"
+            f"📦 *Пункт призначення:* {dest_desc}\n"
+            f"📝 *Опис вантажу:* {cargo_desc}\n"
+            f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
+            f"💵 *Накладений платіж:* {cod_str}\n"
+            f"{warn_line}\n"
+            "Перевірте дані та оберіть дію нижче:"
+        )
+
+        u_custom = storage_manager.get_user_settings(user_id)
+        card_mask = u_custom.sender_card_mask
+
+        reply_markup = get_confirmation_keyboard(
+            payer_type=payer_type,
+            cargo_type=cargo_type,
+            declared_value=declared_val,
+            cod_amount=cod_val,
+            cod_payment_type=cod_type,
+            sender_card_mask=card_mask,
+            session_id=session_id,
+            suggested_profile=suggested_prof,
+            active_profile_name=active_name,
+            has_multiple_profiles=has_multiple_profiles,
+        )
+        return card_text, reply_markup
+
+    async def _save_user_card_and_resume_session(
+        message: Message,
+        user_id: int,
+        raw_card_str: str,
+    ):
+        """Save user's payout card and resume in-progress waybill drafting session without disruption."""
+        USER_CARD_WAITING.discard(user_id)
+        clean_digits = "".join(filter(str.isdigit, raw_card_str))
+        if len(clean_digits) == 16:
+            masked_card = f"{clean_digits[:6]}******{clean_digits[-4:]}"
+        else:
+            masked_card = raw_card_str.strip()
+
+        storage_manager.update_user_settings(user_id, sender_card_mask=masked_card)
+
+        active_session_id = get_user_active_session_id(user_id)
+        if active_session_id and active_session_id in PENDING_SESSIONS:
+            session = PENDING_SESSIONS[active_session_id]
+            session["cod_payment_type"] = "card"
+            session["updated_at"] = datetime.datetime.now().timestamp()
+
+            card_text, markup = await _build_waybill_preview_message(active_session_id, user_id)
+
+            prev_chat_id = session.get("chat_id")
+            prev_msg_id = session.get("message_id")
+            if prev_chat_id and prev_msg_id:
+                try:
+                    await message.bot.edit_message_reply_markup(
+                        chat_id=prev_chat_id,
+                        message_id=prev_msg_id,
+                        reply_markup=markup,
+                    )
+                except Exception:
+                    pass
+
+            sent_msg = await message.answer(
+                f"✅ *Банківську картку для виплати наложки успішно збережено:* `{masked_card}`\n\n"
+                f"{card_text}",
+                parse_mode="Markdown",
+                reply_markup=markup,
+            )
+            session["chat_id"] = sent_msg.chat.id
+            session["message_id"] = sent_msg.message_id
+        else:
+            await message.answer(
+                f"✅ *Банківську картку для виплати наложки успішно збережено:* `{masked_card}`",
+                parse_mode="Markdown",
+            )
+
     @router.message(Command("start"))
     async def cmd_start(message: Message):
         """Welcome message and basic instructions."""
@@ -1487,7 +1612,6 @@ def register_handlers(
     @router.message(F.text == "💳 Картка клієнта")
     async def cmd_client_card(message: Message):
         """Show scannable Nova Poshta digital client card."""
-        clear_user_active_session(message.from_user.id)
         status_msg = await message.answer("⏳ *Генерація картки клієнта...*", parse_mode="Markdown")
         await _render_client_card(message, message.from_user.id, mode="card", profile_id="active")
         try:
@@ -1693,7 +1817,6 @@ def register_handlers(
     @router.message(Command("set_ai_model"))
     async def cmd_set_ai_model(message: Message):
         """Set user's custom AI model name."""
-        clear_user_active_session(message.from_user.id)
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             await message.answer(
@@ -1713,7 +1836,6 @@ def register_handlers(
     @router.message(Command("set_card"))
     async def cmd_set_card(message: Message):
         """Set user's default bank card mask for cash on delivery payout."""
-        clear_user_active_session(message.from_user.id)
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             await message.answer(
@@ -1723,11 +1845,7 @@ def register_handlers(
             return
 
         card_str = parts[1].strip()
-        storage_manager.update_user_settings(message.from_user.id, sender_card_mask=card_str)
-        await message.answer(
-            f"✅ *Банківську картку для виплати наложки успішно збережено:* `{card_str}`",
-            parse_mode="Markdown",
-        )
+        await _save_user_card_and_resume_session(message, message.from_user.id, card_str)
 
     @router.message(Command("reset_settings"))
     async def cmd_reset_settings(message: Message):
@@ -1775,7 +1893,6 @@ def register_handlers(
     @router.message(Command("set_cod_limit"))
     async def cmd_set_cod_limit(message: Message):
         """Set user's custom monthly COD sum limit."""
-        clear_user_active_session(message.from_user.id)
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             await message.answer(
@@ -3582,6 +3699,9 @@ def register_handlers(
                 has_multiple_profiles=has_multiple_profiles,
             ),
         )
+        if session_id in PENDING_SESSIONS:
+            PENDING_SESSIONS[session_id]["chat_id"] = status_msg.chat.id
+            PENDING_SESSIONS[session_id]["message_id"] = status_msg.message_id
 
     async def _debounce_and_dispatch(user_id: int):
         """Wait for rapid forwarded messages to accumulate before dispatching for processing."""
@@ -3634,15 +3754,12 @@ def register_handlers(
 
         user_id = message.from_user.id
 
-        # Check if user sent a standalone 16-digit bank card number
+        # Check if user sent a standalone 16-digit bank card number or is waiting for card input
         clean_card_digits = "".join(filter(str.isdigit, text))
-        if len(clean_card_digits) == 16 and not clean_card_digits.startswith("380"):
-            masked_card = f"{clean_card_digits[:6]}******{clean_card_digits[-4:]}"
-            storage_manager.update_user_settings(user_id, sender_card_mask=masked_card)
-            await message.answer(
-                f"💳 *Банківську картку для виплати наложки успішно збережено:* `{masked_card}`",
-                parse_mode="Markdown",
-            )
+        if (len(clean_card_digits) == 16 and not clean_card_digits.startswith("380")) or (
+            user_id in USER_CARD_WAITING and len(clean_card_digits) in (16, 19)
+        ):
+            await _save_user_card_and_resume_session(message, user_id, clean_card_digits)
             return
 
         # Check if user is waiting to add a sender profile with an NP API key
@@ -4004,68 +4121,37 @@ def register_handlers(
             card_mask = u_custom.sender_card_mask
 
             if new_type == "card" and not card_mask:
+                try:
+                    cards = await user_np_client.get_payment_cards(eff_settings.sender_counterparty_ref)
+                    if cards:
+                        first_card = cards[0]
+                        c_num = first_card.get("Number") or first_card.get("Description") or ""
+                        c_ref = first_card.get("Ref") or ""
+                        if c_num:
+                            card_mask = c_num
+                            storage_manager.update_user_settings(user_id, sender_card_mask=c_num, sender_card_ref=c_ref)
+                            await callback.answer(f"💳 Автоматично підключено картку з кабінету: {c_num}")
+                except Exception as e:
+                    logger.debug(f"Could not auto-fetch cards from NP: {e}")
+
+            if new_type == "card" and not card_mask:
+                USER_CARD_WAITING.add(user_id)
                 await callback.answer(
-                    "⚠️ Для виплати на картку збережіть її номер командою: /set_card НомерКартки",
+                    "⚠️ Введіть 16 цифр картки або команду /set_card НомерКартки",
                     show_alert=True,
                 )
+            else:
+                type_ua = "На картку" if new_type == "card" else "Готівкою у відділенні"
+                await callback.answer(f"Виплату змінено на: {type_ua}")
 
-            parsed_info = session["parsed_info"]
-            city = session["city"]
-            dest_desc = session.get("destination_description")
-            cargo_desc = session["cargo_description"]
-            declared_val = session["declared_value"]
-            cod_val = session.get("cod_amount", 0.0)
-            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if new_type == 'card' else 'Готівка'})"
-
-            eval_res = await _evaluate_cod_limits(
-                user_id=user_id,
-                cod_val=cod_val,
-                user_np_client=user_np_client,
-                storage_manager=storage_manager,
-                eff_settings=eff_settings,
-                editing_ref=session.get("editing_draft_ref"),
-            )
-            warn_line = eval_res.get("warn_line", "")
-            s_prof = eval_res.get("suggested_profile")
-
-            profiles = storage_manager.get_sender_profiles(user_id)
-            active_p = storage_manager.get_active_profile(user_id)
-            has_multiple = len(profiles) > 1
-            active_name = active_p.name if active_p else None
-            sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple) else ""
-
-            card_text = (
-                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
-                f"{sender_prefix}"
-                f"👤 *Отримувач:* {parsed_info.full_name}\n"
-                f"📞 *Телефон:* `{parsed_info.phone}`\n"
-                f"🏙 *Місто:* {city.description}\n"
-                f"📦 *Пункт призначення:* {dest_desc}\n"
-                f"📝 *Опис вантажу:* {cargo_desc}\n"
-                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
-                f"💵 *Накладений платіж:* {cod_str}\n"
-                f"{warn_line}\n"
-                "Перевірте дані та оберіть дію нижче:"
-            )
-
+            session["chat_id"] = callback.message.chat.id
+            session["message_id"] = callback.message.message_id
+            card_text, reply_markup = await _build_waybill_preview_message(session_id, user_id)
             await callback.message.edit_text(
                 card_text,
                 parse_mode="Markdown",
-                reply_markup=get_confirmation_keyboard(
-                    payer_type=session["payer_type"],
-                    cargo_type=session["cargo_type"],
-                    declared_value=declared_val,
-                    cod_amount=cod_val,
-                    cod_payment_type=new_type,
-                    sender_card_mask=card_mask,
-                    session_id=session_id,
-                    suggested_profile=s_prof,
-                    active_profile_name=active_name,
-                    has_multiple_profiles=has_multiple,
-                ),
+                reply_markup=reply_markup,
             )
-            type_ua = "На картку" if new_type == "card" else "Готівкою у відділенні"
-            await callback.answer(f"Виплату змінено на: {type_ua}")
             return
 
         if action == "switch_profile":
@@ -4403,6 +4489,7 @@ def register_handlers(
                     )
                     storage_manager.delete_user_draft(user_id, editing_ref)
                 else:
+                    card_to_use = eff_settings.sender_card_ref or eff_settings.sender_card_mask
                     wb_res = await user_np_client.create_waybill(
                         recipient_cp_ref=recipient_res.counterparty_ref,
                         recipient_contact_ref=recipient_res.contact_person_ref,
@@ -4415,6 +4502,8 @@ def register_handlers(
                         weight=eff_settings.default_weight,
                         declared_value=declared_value,
                         cod_amount=cod_amount,
+                        cod_payment_type=cod_payment_type,
+                        payment_card=card_to_use if cod_payment_type == "card" else None,
                         service_type=service_type,
                     )
 
