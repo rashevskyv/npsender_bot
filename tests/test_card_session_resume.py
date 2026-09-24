@@ -17,7 +17,9 @@ from src.bot.handlers import (
     PENDING_SESSIONS,
     USER_ACTIVE_SESSIONS,
     USER_CARD_WAITING,
+    USER_MESSAGE_BUFFERS,
     clear_user_active_session,
+    extract_standalone_bank_card,
 )
 
 
@@ -249,3 +251,70 @@ async def test_create_waybill_populates_redelivery_payment_card(mock_settings):
         assert len(bw) == 1
         assert bw[0].get("RedeliveryPaymentCard") == "444111******5537"
         assert bw[0].get("CargoType") == "Money"
+
+
+def test_extract_standalone_bank_card():
+    """Verify robust bank card extraction and rejection of multi-field waybill numbers."""
+    # 1. Valid formats
+    assert extract_standalone_bank_card("5375 4141 1234 5678") == "5375414112345678"
+    assert extract_standalone_bank_card("5375-4141-1234-5678") == "5375414112345678"
+    assert extract_standalone_bank_card("5375414112345678") == "5375414112345678"
+    assert extract_standalone_bank_card("картка 4441 1114 0076 5537") == "4441111400765537"
+    assert extract_standalone_bank_card("414932******1234") == "414932******1234"
+
+    # 2. Reject multi-field digits (e.g. 10-digit phone + 1-digit warehouse + 5-digit COD = 16 digits total)
+    user_waybill_text = (
+        "Циганко Денис Олегович\n"
+        "0968071564\n"
+        "Місто Кривий Ріг\n"
+        "Відділення 3\n\n"
+        "наложка 10300 грн, всередині планшет"
+    )
+    assert extract_standalone_bank_card(user_waybill_text) is None
+    assert extract_standalone_bank_card(user_waybill_text, is_waiting=True) is None
+
+    # 3. Reject waybill with phone and card inside (should be processed as waybill)
+    waybill_with_card = "Іванов 0501234567 Київ відд 1 на картку 5375 4141 1234 5678"
+    assert extract_standalone_bank_card(waybill_with_card) is None
+
+    # 4. Reject other numbers
+    assert extract_standalone_bank_card("0968071564") is None  # Phone
+    assert extract_standalone_bank_card("20450123456789") is None  # 14-digit TTN
+    assert extract_standalone_bank_card("105-80149920") is None  # Register
+
+
+@pytest.mark.asyncio
+async def test_waybill_with_scattered_16_digits_does_not_hijack_as_card(sample_session_setup):
+    """A waybill text whose total scattered digits sum to 16 must NOT be treated as a card."""
+    user_id = sample_session_setup["user_id"]
+    st_mgr = sample_session_setup["storage_manager"]
+
+    # Even if user was in card waiting mode
+    USER_CARD_WAITING.add(user_id)
+
+    handler = _get_message_handler("process_text_message")
+
+    user_text = (
+        "Циганко Денис Олегович\n"
+        "0968071564\n"
+        "Місто Кривий Ріг\n"
+        "Відділення 3\n\n"
+        "наложка 10300 грн, всередині планшет"
+    )
+
+    mock_msg = AsyncMock(spec=Message)
+    mock_msg.from_user = User(id=user_id, is_bot=False, first_name="User")
+    mock_msg.text = user_text
+    mock_msg.answer = AsyncMock()
+
+    await handler(mock_msg)
+    # 1. Must clear USER_CARD_WAITING
+    assert user_id not in USER_CARD_WAITING
+    # 2. Must not save false card
+    assert st_mgr.get_user_settings(user_id).sender_card_mask != "096807******0300"
+    # 3. Must not answer that card was saved
+    if mock_msg.answer.called:
+        for call in mock_msg.answer.call_args_list:
+            assert "Банківську картку для виплати наложки успішно збережено" not in call[0][0]
+    # 4. Message must be added to user's debouncer message buffer for waybill processing
+    assert user_text in USER_MESSAGE_BUFFERS.get(user_id, [])

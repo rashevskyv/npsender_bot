@@ -561,6 +561,59 @@ def is_barcode_intent(text: str) -> bool:
     return any(k in t for k in keywords)
 
 
+CARD_BLOCK_REGEX = re.compile(
+    r"(?:\b|^)(?:(?:\d{4}[ -]?){3}\d{4}(?:\d{2,3})?|\d{16,19})(?:\b|$)"
+)
+PHONE_IN_TEXT_REGEX = re.compile(
+    r"(?:(?:\+?38)?\s*\(?0\d{2}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}|0\d{9})"
+)
+RECIPIENT_KEYWORDS_REGEX = re.compile(
+    r"\b(?:відділення|відділ|відд|склад|поштомат|почтомат|отделение|місто|м\.|село|смт|вул|вулиця|просп|проспект|буд|будинок|обл|область|наложк|накладен|оцінк|посилк)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_standalone_bank_card(text: str, is_waiting: bool = False) -> Optional[str]:
+    """Extract a valid standalone bank card number (16-19 digits) from user message.
+
+    Returns clean digit string if the message represents a bank card, or None if:
+    - No contiguous 16-19 digit card pattern is found.
+    - Digits are scattered across multiple fields (e.g. phone + warehouse + cod amount).
+    - Message contains recipient waybill indicators (recipient phone number, delivery branch/city keywords, multi-line format).
+    """
+    if not text:
+        return None
+
+    # Handle masked card format e.g. 414932******1234
+    masked_match = re.search(r"(?:\b|^)\d{6}\*{4,6}\d{4}(?:\b|$)", text.strip())
+    if masked_match:
+        return masked_match.group(0)
+
+    m = CARD_BLOCK_REGEX.search(text)
+    if not m:
+        return None
+
+    card_str = m.group(0)
+    clean_digits = "".join(filter(str.isdigit, card_str))
+    if len(clean_digits) not in (16, 18, 19):
+        return None
+    if clean_digits.startswith("380"):
+        return None
+
+    # Inspect remaining text around the matched card
+    remainder = (text[:m.start()] + " " + text[m.end():]).strip()
+
+    # If the rest of the message has a recipient phone or delivery keywords, it is a waybill, NOT a standalone card
+    if PHONE_IN_TEXT_REGEX.search(remainder):
+        return None
+    if RECIPIENT_KEYWORDS_REGEX.search(remainder):
+        return None
+    if len(remainder.splitlines()) > 2 or len(remainder) > 60:
+        return None
+
+    return clean_digits
+
+
 def format_tracking_card(doc: TrackingDocumentDetails) -> str:
     """Format full tracking details from Nova Poshta API into an informative Telegram markdown card."""
     lines = []
@@ -3620,6 +3673,14 @@ def register_handlers(
                     else:
                         cod_type = "cash"
 
+                    card_in_text = CARD_BLOCK_REGEX.search(raw_text) if isinstance(raw_text, str) else None
+                    if card_in_text:
+                        c_digits = "".join(filter(str.isdigit, card_in_text.group(0)))
+                        if len(c_digits) in (16, 18, 19) and not c_digits.startswith("380"):
+                            masked_c = f"{c_digits[:6]}******{c_digits[-4:]}"
+                            storage_manager.update_user_settings(user_id, sender_card_mask=masked_c)
+                            cod_type = "card"
+
                     if parsed_info.declared_value is not None:
                         raw_decl = parsed_info.declared_value
                     elif "declared_value" in existing_session:
@@ -3796,6 +3857,14 @@ def register_handlers(
         else:
             cod_type = "cash"
 
+        card_in_text = CARD_BLOCK_REGEX.search(raw_text) if isinstance(raw_text, str) else None
+        if card_in_text:
+            c_digits = "".join(filter(str.isdigit, card_in_text.group(0)))
+            if len(c_digits) in (16, 18, 19) and not c_digits.startswith("380"):
+                masked_c = f"{c_digits[:6]}******{c_digits[-4:]}"
+                storage_manager.update_user_settings(user_id, sender_card_mask=masked_c)
+                cod_type = "card"
+
         # Declared Value:
         if parsed_info.declared_value is not None:
             raw_decl = parsed_info.declared_value
@@ -3966,12 +4035,15 @@ def register_handlers(
         user_id = message.from_user.id
 
         # Check if user sent a standalone 16-digit bank card number or is waiting for card input
-        clean_card_digits = "".join(filter(str.isdigit, text))
-        if (len(clean_card_digits) == 16 and not clean_card_digits.startswith("380")) or (
-            user_id in USER_CARD_WAITING and len(clean_card_digits) in (16, 19)
-        ):
-            await _save_user_card_and_resume_session(message, user_id, clean_card_digits)
+        is_waiting_card = user_id in USER_CARD_WAITING
+        detected_card = extract_standalone_bank_card(text, is_waiting=is_waiting_card)
+        if detected_card:
+            await _save_user_card_and_resume_session(message, user_id, detected_card)
             return
+
+        # If user was in card waiting mode, but sent other text (e.g. a waybill), clear waiting state
+        if is_waiting_card:
+            USER_CARD_WAITING.discard(user_id)
 
         # Check if user is waiting to add a sender profile with an NP API key
         if user_id in USER_ADD_PROFILE_WAITING:

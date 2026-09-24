@@ -6,6 +6,12 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **🛡️ Bulletproof Standalone Bank Card Detection & Hijack Guard (v0.24.11)**:
+  - **Eliminated Multi-Field False Positives**: Replaced loose whole-message digit filtering (`filter(str.isdigit, text)`) with strict contiguous block validation (`extract_standalone_bank_card`). Previously, if a recipient waybill message's scattered digits (e.g. 10-digit phone `0968071564` + 1-digit warehouse `3` + 5-digit COD `10300`) happened to sum to 16 digits (`0968071564310300`), the bot mistakenly intercepted the waybill as a bank card.
+  - **Monolithic Block Validation**: Strictly verifies that a payment card is an unbroken 16–19 digit block (`XXXX XXXX XXXX XXXX`, `XXXX-XXXX-XXXX-XXXX`, or continuous), while inspecting surrounding context for recipient phone numbers (`0\d{9}`) and delivery destination keywords (`відділення`, `поштомат`, `місто`, `вулиця`).
+  - **Graceful Card Waiting State Reset**: If a user previously clicked "Виплата: На картку" (setting `USER_CARD_WAITING`) but subsequently sends a recipient waybill draft, the waiting state is automatically cleared and waybill drafting continues uninterrupted.
+  - **Embedded Card in Waybill Text**: If a user explicitly specifies a bank card inside the waybill text itself (e.g. `наложка 10300 грн на картку 4441 1114 0076 5537`), the card is automatically extracted and saved in settings, COD payout is set to `card`, and the waybill draft is fully generated with all recipient information preserved.
+
 - **📦 Branch-Created Waybills (`5900...`) & Real-Time Phone Document Sync (v0.24.10)**:
   - **Full Parity with Nova Poshta Mobile App & Web Cabinet**: Standard Nova Poshta API method `InternetDocument/getDocumentList` only returns Internet Documents created online or via API (`2045...`), completely omitting shipments registered directly at physical branch counters (`5900...`). The bot now seamlessly integrates with Nova Poshta's native phone synchronization endpoints: `InternetDocument/getOutgoingDocumentsByPhone` and `InternetDocument/getIncomingDocumentsByPhone`.
   - **Comprehensive Outgoing & Incoming Merging**: Automatically merges online waybills with branch-created documents, deduping by waybill number (`IntDocNumber` / `Number`). Physical branch shipments are now immediately visible in `/outgoing` ("📤 Вихідні (що їдуть)") and `/incoming` ("📥 Вхідні (що їдуть)").
