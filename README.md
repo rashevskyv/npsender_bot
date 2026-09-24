@@ -6,6 +6,14 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **🏷️ Sender Profile Pseudonyms & Mobile-Optimized 2-Row Limit Buttons (v0.24.12)**:
+  - **Custom Profile Pseudonyms / Aliases (`/set_alias`, `/set_name`, `/rename_user`, `/reset_alias`)**: Users can assign intuitive, recognizable pseudonyms to their sender profiles (e.g. `Основний`, `ФОП`, `Склад`, `Водафон`) directly via the interactive `[ ✏️ Змінити псевдонім ]` button in the `👥 Користувачі` dashboard or by using `/set_alias [Name]`. To revert back to the verified official full name from Nova Poshta, simply send `/reset_alias`.
+  - **Zero Mobile Truncation (Dedicated 2-Row Button Layout)**: Because Telegram inline buttons are strictly single-line, placing remaining balance text in parentheses next to long full names resulted in ugly truncation on mobile screens (`Рашевський Владіслав Сергійов...`). The profile management keyboard (`get_users_management_keyboard`) now uses an ergonomic **2-row layout per profile**:
+    - **Row 1**: Profile identity & selection button: `✅ [Псевдонім або Скорочене ПІБ]` (or `🔄` for inactive profiles).
+    - **Row 2**: Full-width dedicated remaining balance button: `💰 Залишок: 15199 грн` (or `🚨 Ліміт 30 000 грн вичерпано (0 грн)`). Tapping either row activates the profile.
+  - **Automatic Disambiguation for Identical Full Names**: When multiple accounts share the identical legal name (e.g. two separate Nova Poshta API accounts registered under `Рашевський Владіслав Сергійович`), the bot automatically shortens long legal names to standard Ukrainian format `Прізвище І. П.` and appends the last 4 digits of the profile's phone number: `Рашевський В. С. (..9301)` vs `Рашевський В. С. (..6324)`, completely eliminating confusion even before a custom alias is set.
+  - **Transparent Dashboard View**: The `👥 Користувачі` dashboard displays both the custom alias and the official counterparty name and phone number (`*Мій Основний* — Рашевський Владіслав Сергійович (тел: 0502559301)`).
+
 - **🛡️ Bulletproof Standalone Bank Card Detection & Hijack Guard (v0.24.11)**:
   - **Eliminated Multi-Field False Positives**: Replaced loose whole-message digit filtering (`filter(str.isdigit, text)`) with strict contiguous block validation (`extract_standalone_bank_card`). Previously, if a recipient waybill message's scattered digits (e.g. 10-digit phone `0968071564` + 1-digit warehouse `3` + 5-digit COD `10300`) happened to sum to 16 digits (`0968071564310300`), the bot mistakenly intercepted the waybill as a bank card.
   - **Monolithic Block Validation**: Strictly verifies that a payment card is an unbroken 16–19 digit block (`XXXX XXXX XXXX XXXX`, `XXXX-XXXX-XXXX-XXXX`, or continuous), while inspecting surrounding context for recipient phone numbers (`0\d{9}`) and delivery destination keywords (`відділення`, `поштомат`, `місто`, `вулиця`).

@@ -1,5 +1,6 @@
 """Unit tests for Client Card generation, Users keyboard redesign, and bot menu commands."""
 
+import os
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from aiogram import Bot
@@ -47,9 +48,9 @@ def mock_settings():
 
 
 def test_users_management_keyboard_formatting():
-    """Verify that buttons have no redundant prefixes and use multi-line labels for balance."""
-    p1 = SenderProfile(id="p1", name="Рашевський Владислав Сергійович", nova_poshta_api_key="k1")
-    p2 = SenderProfile(id="p2", name="Рашевський Владислав Сергійович (2)", nova_poshta_api_key="k2")
+    """Verify that buttons use a dedicated 2-row layout per profile to avoid mobile truncation."""
+    p1 = SenderProfile(id="p1", name="Рашевський Владіслав Сергійович", nova_poshta_api_key="k1", sender_phone="380502559301")
+    p2 = SenderProfile(id="p2", name="Рашевський Владіслав Сергійович", nova_poshta_api_key="k2", sender_phone="380501234567")
 
     balances = {
         "p1": {"rem_sum": 29999.0},
@@ -59,19 +60,75 @@ def test_users_management_keyboard_formatting():
     kb = get_users_management_keyboard([p1, p2], active_profile_id="p1", balances_map=balances)
     buttons = [btn for row in kb.inline_keyboard for btn in row]
 
-    active_btn = buttons[0]
-    inactive_btn = buttons[1]
+    active_name_btn = buttons[0]
+    active_bal_btn = buttons[1]
+    inactive_name_btn = buttons[2]
+    inactive_bal_btn = buttons[3]
 
-    # Active profile checks
-    assert active_btn.text.startswith("✅ Рашевський Владислав Сергійович")
-    assert "(Активний)" not in active_btn.text
-    assert "| Ліміт:" not in active_btn.text
-    assert "\n(залишок: 29999 грн)" in active_btn.text
+    # Active profile checks (duplicate names get disambiguated with shortened name and phone suffix)
+    assert active_name_btn.text == "✅ Рашевський В. С. (..9301)"
+    assert active_bal_btn.text == "💰 Залишок: 29999 грн"
 
     # Inactive profile checks
-    assert inactive_btn.text.startswith("🔄 Рашевський Владислав Сергійович (2)")
-    assert "Обрати:" not in inactive_btn.text
-    assert "\n(залишок: 1099 грн)" in inactive_btn.text
+    assert inactive_name_btn.text == "🔄 Рашевський В. С. (..4567)"
+    assert inactive_bal_btn.text == "💰 Залишок: 1099 грн"
+
+    # Profile with alias
+    p1.alias = "Мій Основний"
+    kb_alias = get_users_management_keyboard([p1, p2], active_profile_id="p1", balances_map=balances)
+    buttons_alias = [btn for row in kb_alias.inline_keyboard for btn in row]
+    assert buttons_alias[0].text == "✅ Мій Основний"
+    assert buttons_alias[1].text == "💰 Залишок: 29999 грн"
+
+
+def test_pseudonym_rename_and_disambiguation(tmp_path):
+    """Test setting aliases and renaming profiles in storage and keyboards."""
+    from src.storage import UserSettingsManager, SenderProfile
+    from src.bot.keyboards import format_profile_display_name, get_rename_profile_selection_keyboard
+
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    manager = UserSettingsManager(filepath=storage_file)
+
+    p1 = SenderProfile(
+        id="p1",
+        name="Рашевський Владіслав Сергійович",
+        sender_name="Рашевський Владіслав Сергійович",
+        sender_phone="380502559301",
+        nova_poshta_api_key="k1",
+    )
+    p2 = SenderProfile(
+        id="p2",
+        name="Рашевський Владіслав Сергійович",
+        sender_name="Рашевський Владіслав Сергійович",
+        sender_phone="380509998877",
+        nova_poshta_api_key="k2",
+    )
+    manager.add_sender_profile(12345, p1, set_active=True)
+    manager.add_sender_profile(12345, p2, set_active=False)
+
+    # Initial disambiguation when both profiles share the same name
+    profiles = manager.get_sender_profiles(12345)
+    assert format_profile_display_name(profiles[0], profiles) == "Рашевський В. С. (..9301)"
+    assert format_profile_display_name(profiles[1], profiles) == "Рашевський В. С. (..8877)"
+
+    # Set alias for p1
+    updated = manager.rename_sender_profile(12345, "p1", "Основний ФОП")
+    assert updated.alias == "Основний ФОП"
+    assert updated.name == "Основний ФОП"
+
+    profiles = manager.get_sender_profiles(12345)
+    assert format_profile_display_name(profiles[0], profiles) == "Основний ФОП"
+    assert format_profile_display_name(profiles[1], profiles) == "Рашевський В. С."
+
+    # Rename selection keyboard contains the profiles
+    rename_kb = get_rename_profile_selection_keyboard(profiles)
+    btns = [btn for row in rename_kb.inline_keyboard for btn in row]
+    assert any("Основний ФОП" in btn.text for btn in btns)
+
+    # Reset alias for p1
+    reset_p = manager.rename_sender_profile(12345, "p1", "")
+    assert reset_p.alias is None
+    assert reset_p.name == "Рашевський Владіслав Сергійович"
 
 
 def test_client_card_keyboard_structure():

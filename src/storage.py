@@ -20,6 +20,7 @@ class SenderProfile(BaseModel):
 
     id: str
     name: str = "Користувач 1"
+    alias: Optional[str] = None
     nova_poshta_api_key: Optional[str] = None
     sender_counterparty_ref: Optional[str] = None
     sender_contact_ref: Optional[str] = None
@@ -390,6 +391,31 @@ class UserSettingsManager:
         self.data[uid_str] = u_settings
         self.save_settings()
         return updated_p
+
+    def get_sender_profile(
+        self, user_id: int, profile_id: str
+    ) -> Optional[SenderProfile]:
+        """Get a single sender profile by ID."""
+        u_settings = self.get_user_settings(user_id)
+        for p in u_settings.profiles:
+            if p.id == profile_id:
+                return p
+        return None
+
+    def rename_sender_profile(
+        self, user_id: int, profile_id: str, new_name: Optional[str]
+    ) -> Optional[SenderProfile]:
+        """Set or reset a pseudonym / custom label for a sender profile."""
+        clean_name = (new_name or "").strip()
+        if not clean_name:
+            p = self.get_sender_profile(user_id, profile_id)
+            orig_name = (p.sender_name if p and p.sender_name else "Користувач")
+            return self.update_sender_profile(
+                user_id, profile_id, name=orig_name, alias=None
+            )
+        return self.update_sender_profile(
+            user_id, profile_id, name=clean_name, alias=clean_name
+        )
 
     def update_user_settings(
         self,

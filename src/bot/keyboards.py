@@ -53,12 +53,63 @@ class ClientCardCallback(CallbackData, prefix="npcard"):
     mode: str  # "card" or "phone"
 
 
+def format_profile_display_name(p: Any, all_profiles: Optional[List[Any]] = None) -> str:
+    """Format profile name cleanly, preferring alias or shortened name with phone disambiguation."""
+    alias = getattr(p, "alias", None)
+    if alias and str(alias).strip():
+        return str(alias).strip()
+
+    name = str(getattr(p, "name", "Користувач") or "Користувач").strip()
+    phone = str(getattr(p, "sender_phone", "") or "").strip()
+    phone_suffix = f" (..{phone[-4:]})" if len(phone) >= 4 else ""
+
+    # Check if multiple profiles share the same name
+    has_duplicates = False
+    if all_profiles and len(all_profiles) > 1:
+        same_name_count = sum(1 for other in all_profiles if (getattr(other, "name", "") or "") == name)
+        if same_name_count > 1:
+            has_duplicates = True
+
+    # Shorten full legal name like "Рашевський Владіслав Сергійович" -> "Рашевський В. С." only if parts are alphabetic
+    parts = name.split()
+    if len(parts) >= 3 and all(part.isalpha() for part in parts):
+        short_name = f"{parts[0]} {parts[1][0]}. {parts[2][0]}."
+    elif len(parts) == 2 and all(part.isalpha() for part in parts):
+        short_name = f"{parts[0]} {parts[1][0]}."
+    else:
+        short_name = name
+
+    if has_duplicates:
+        return f"{short_name}{phone_suffix}"
+    return short_name
+
+
+def get_rename_profile_selection_keyboard(profiles: List[Any]) -> InlineKeyboardMarkup:
+    """Build keyboard to select a profile for renaming/setting pseudonym."""
+    rows = []
+    for p in profiles:
+        disp_name = format_profile_display_name(p, profiles)
+        rows.append([
+            InlineKeyboardButton(
+                text=f"✏️ {disp_name}",
+                callback_data=UserProfileCallback(action="rename_target", profile_id=p.id).pack(),
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(
+            text="🔙 Назад до списку користувачів",
+            callback_data=UserProfileCallback(action="refresh", profile_id="none").pack(),
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def get_users_management_keyboard(
     profiles: List[Any],
     active_profile_id: Optional[str] = None,
     balances_map: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> InlineKeyboardMarkup:
-    """Build interactive inline keyboard for multi-user profile management."""
+    """Build interactive inline keyboard for multi-user profile management with 2-row layout."""
     rows = []
     balances_map = balances_map or {}
 
@@ -67,30 +118,34 @@ def get_users_management_keyboard(
         bal = balances_map.get(p.id, {})
         rem_sum = bal.get("rem_sum")
 
-        if is_active:
-            label = f"✅ {p.name}"
-            if rem_sum is not None:
-                label += f"\n(залишок: {int(rem_sum)} грн)"
+        display_name = format_profile_display_name(p, profiles)
+        icon = "✅" if is_active else "🔄"
+
+        # Row 1: Profile Name / Selection
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{icon} {display_name}",
+                callback_data=UserProfileCallback(action="select", profile_id=p.id).pack(),
+            )
+        ])
+
+        # Row 2: Balance on its own separate line (row) to prevent mobile truncation
+        if rem_sum is not None:
+            rem_val = int(rem_sum)
+            if rem_val > 0:
+                bal_text = f"💰 Залишок: {rem_val} грн"
+            else:
+                bal_text = "🚨 Ліміт 30 000 грн вичерпано (0 грн)"
             rows.append([
                 InlineKeyboardButton(
-                    text=label,
-                    callback_data=UserProfileCallback(action="select", profile_id=p.id).pack(),
-                )
-            ])
-        else:
-            label = f"🔄 {p.name}"
-            if rem_sum is not None:
-                label += f"\n(залишок: {int(rem_sum)} грн)"
-            rows.append([
-                InlineKeyboardButton(
-                    text=label,
+                    text=bal_text,
                     callback_data=UserProfileCallback(action="select", profile_id=p.id).pack(),
                 )
             ])
 
     mgmt_row = [
         InlineKeyboardButton(
-            text="➕ Додати користувача",
+            text="➕ Додати",
             callback_data=UserProfileCallback(action="add", profile_id="none").pack(),
         ),
         InlineKeyboardButton(
@@ -102,9 +157,13 @@ def get_users_management_keyboard(
 
     rows.append([
         InlineKeyboardButton(
-            text="🔄 Підтягнути адресу з сайту (API)",
+            text="✏️ Змінити псевдонім",
+            callback_data=UserProfileCallback(action="rename_prompt", profile_id="none").pack(),
+        ),
+        InlineKeyboardButton(
+            text="🔄 Адреса з сайту",
             callback_data=UserProfileCallback(action="sync_address", profile_id="none").pack(),
-        )
+        ),
     ])
 
     if len(profiles) > 1:
@@ -177,9 +236,10 @@ def get_profile_delete_keyboard(
     rows = []
     for p in profiles:
         if p.id != active_profile_id:
+            disp_name = format_profile_display_name(p, profiles)
             rows.append([
                 InlineKeyboardButton(
-                    text=f"🗑 Видалити «{p.name}»",
+                    text=f"🗑 Видалити «{disp_name}»",
                     callback_data=UserProfileCallback(action="delete", profile_id=p.id).pack(),
                 )
             ])

@@ -53,6 +53,8 @@ from src.bot.keyboards import (
     UserProfileCallback,
     get_users_management_keyboard,
     get_profile_delete_keyboard,
+    get_rename_profile_selection_keyboard,
+    format_profile_display_name,
     ClientCardCallback,
     get_client_card_keyboard,
     get_settings_keyboard,
@@ -81,6 +83,7 @@ USER_TRACKING_WAITING: set = set()
 USER_ADD_PROFILE_WAITING: set = set()
 USER_BARCODE_WAITING: set = set()
 USER_CARD_WAITING: set = set()
+USER_RENAME_PROFILE_WAITING: Dict[int, str] = {}
 
 
 def get_user_processing_lock(user_id: int) -> asyncio.Lock:
@@ -130,6 +133,7 @@ def clear_user_active_session(user_id: int):
     USER_ADD_PROFILE_WAITING.discard(user_id)
     USER_BARCODE_WAITING.discard(user_id)
     USER_CARD_WAITING.discard(user_id)
+    USER_RENAME_PROFILE_WAITING.pop(user_id, None)
 
 
 def _parse_draft_date(date_str: str) -> Optional[datetime.datetime]:
@@ -1308,8 +1312,15 @@ def register_handlers(
             act_city = active_profile.sender_city_name or active_profile.api_sender_city_name or "Місто не вказано"
             act_wh = active_profile.sender_warehouse_name or active_profile.api_sender_warehouse_name or "Відділення не вказано"
 
+            if active_profile.alias and active_profile.sender_name and active_profile.alias != active_profile.sender_name:
+                act_name_str = f"*{active_profile.alias}* — {active_profile.sender_name}"
+            elif active_profile.alias:
+                act_name_str = f"*{active_profile.alias}*"
+            else:
+                act_name_str = f"*{active_profile.name}*"
+
             card_lines.append("📌 *Поточний активний відправник:*")
-            card_lines.append(f"✅ *{active_profile.name}* (`{active_profile.sender_phone or 'тел. не вказано'}`)")
+            card_lines.append(f"✅ {act_name_str} (`{active_profile.sender_phone or 'тел. не вказано'}`)")
             card_lines.append(f"   📊 *Післяплата:* `{used_s} грн` із {safe_l} грн (вільно: `{rem_s} грн`) | {used_c} ТТН")
             card_lines.append(f"   🏙 *Відправка:* {act_city}, {act_wh}{act_source}\n")
 
@@ -1327,7 +1338,14 @@ def register_handlers(
                 o_city = p.sender_city_name or p.api_sender_city_name or "Не вказано"
                 o_wh = p.sender_warehouse_name or p.api_sender_warehouse_name or "Не вказано"
 
-                card_lines.append(f"▫️ *{p.name}* (`{p.sender_phone or 'тел. не вказано'}`)")
+                if p.alias and p.sender_name and p.alias != p.sender_name:
+                    p_name_str = f"*{p.alias}* — {p.sender_name}"
+                elif p.alias:
+                    p_name_str = f"*{p.alias}*"
+                else:
+                    p_name_str = f"*{p.name}*"
+
+                card_lines.append(f"▫️ {p_name_str} (`{p.sender_phone or 'тел. не вказано'}`)")
                 card_lines.append(f"   📊 *Післяплата:* `{p_used} грн` із {p_safe} грн (вільно: `{p_rem} грн`) | {p_cnt} ТТН")
                 card_lines.append(f"   🏙 *Відправка:* {o_city}, {o_wh}{o_source}\n")
 
@@ -1343,6 +1361,8 @@ def register_handlers(
 
         if isinstance(target_msg_or_callback, CallbackQuery):
             await target_msg_or_callback.message.edit_text(card_text, parse_mode="Markdown", reply_markup=kb)
+        elif getattr(getattr(target_msg_or_callback, "from_user", None), "is_bot", None) is False:
+            await target_msg_or_callback.answer(card_text, parse_mode="Markdown", reply_markup=kb)
         else:
             await target_msg_or_callback.edit_text(card_text, parse_mode="Markdown", reply_markup=kb)
 
@@ -1456,6 +1476,59 @@ def register_handlers(
         custom_name = parts[2].strip() if len(parts) > 2 else ""
         await _handle_add_profile_with_key(message, user_id, api_key, custom_name)
 
+    @router.message(Command("set_alias"))
+    @router.message(Command("set_name"))
+    @router.message(Command("rename_user"))
+    async def cmd_set_alias(message: Message):
+        """Set a pseudonym / nickname for a sender profile."""
+        clear_user_active_session(message.from_user.id)
+        user_id = message.from_user.id
+        parts = message.text.split(maxsplit=1)
+        active_p = storage_manager.get_active_profile(user_id)
+        if not active_p:
+            await message.answer("⚠️ Немає налаштованих користувачів.")
+            return
+
+        if len(parts) < 2:
+            USER_RENAME_PROFILE_WAITING[user_id] = active_p.id
+            await message.answer(
+                f"✏️ *Встановлення псевдоніма для активного користувача ({active_p.name}):*\n\n"
+                f"📄 *Офіційне ПІБ НП:* `{active_p.sender_name or active_p.name}`\n"
+                f"📞 *Телефон:* `{active_p.sender_phone or 'не вказано'}`\n\n"
+                "Надішліть новий псевдонім у чат (наприклад: `/set_alias Водафон` або просто надішліть назву у відповідь).\n\n"
+                "💡 _Щоб повернути оригінальне ПІБ, надішліть_ `/reset_alias`",
+                parse_mode="Markdown",
+            )
+            return
+
+        new_alias = parts[1].strip()
+        if len(new_alias) > 40:
+            new_alias = new_alias[:40]
+        storage_manager.rename_sender_profile(user_id, active_p.id, new_alias)
+        await message.answer(
+            f"✅ *Псевдонім для активного користувача успішно встановлено:* «{new_alias}»",
+            parse_mode="Markdown",
+        )
+        await _render_users_dashboard(message, user_id)
+
+    @router.message(Command("reset_alias"))
+    async def cmd_reset_alias(message: Message):
+        """Reset pseudonym for the active sender profile back to official full name."""
+        clear_user_active_session(message.from_user.id)
+        user_id = message.from_user.id
+        active_p = storage_manager.get_active_profile(user_id)
+        if not active_p:
+            await message.answer("⚠️ Немає налаштованих користувачів.")
+            return
+
+        orig_name = active_p.sender_name or "Користувач"
+        storage_manager.update_sender_profile(user_id, active_p.id, name=orig_name, alias=None)
+        await message.answer(
+            f"🔄 *Псевдонім для активного користувача скинуто до:* «{orig_name}»",
+            parse_mode="Markdown",
+        )
+        await _render_users_dashboard(message, user_id)
+
     @router.callback_query(UserProfileCallback.filter())
     async def process_user_profile_callback(callback: CallbackQuery, callback_data: UserProfileCallback):
         """Handle inline actions for sender user profiles."""
@@ -1520,6 +1593,50 @@ def register_handlers(
                 await callback.message.answer(f"❌ *Помилка підтягування адреси з API:* {str(e)}", parse_mode="Markdown")
 
             await _render_users_dashboard(callback, user_id)
+            return
+
+        if action == "rename_prompt":
+            profiles = storage_manager.get_sender_profiles(user_id)
+            if not profiles:
+                await callback.answer("❌ Профілів не знайдено", show_alert=True)
+                return
+            if len(profiles) == 1:
+                target_p = profiles[0]
+                USER_RENAME_PROFILE_WAITING[user_id] = target_p.id
+                await callback.message.answer(
+                    f"✏️ *Зміна псевдоніма для «{target_p.name}»:*\n\n"
+                    f"Введіть бажаний короткий псевдонім (наприклад: _Основний_, _ФОП_, _Водафон_).\n\n"
+                    f"💡 Щоб повернути оригінальне ПІБ, надішліть `/reset_alias`, а щоб скасувати — `/cancel`.",
+                    parse_mode="Markdown",
+                )
+                await callback.answer()
+                return
+
+            rename_kb = get_rename_profile_selection_keyboard(profiles)
+            await callback.message.edit_text(
+                "✏️ *Оберіть користувача, якому бажаєте надати або змінити псевдонім:*\n\n"
+                "💡 Псевдоніми дозволяють легко розрізняти акаунти з однаковими прізвищами на кнопках та в повідомленнях.",
+                parse_mode="Markdown",
+                reply_markup=rename_kb,
+            )
+            await callback.answer()
+            return
+
+        if action == "rename_target":
+            target_p = storage_manager.get_sender_profile(user_id, profile_id)
+            if not target_p:
+                await callback.answer("❌ Профіль не знайдено", show_alert=True)
+                return
+            USER_RENAME_PROFILE_WAITING[user_id] = target_p.id
+            curr_alias = target_p.alias or target_p.name
+            await callback.message.answer(
+                f"✏️ *Введіть новий псевдонім для:* «{curr_alias}»\n"
+                f"_(Офіційне ПІБ: {target_p.sender_name or target_p.name}, тел: {target_p.sender_phone or '—'})_\n\n"
+                f"Наприклад: _Основний_, _ФОП_, _Водафон_, _Склад_.\n"
+                f"💡 Щоб скинути псевдонім до офіційного ПІБ, надішліть `/reset_alias`, а щоб скасувати — `/cancel`.",
+                parse_mode="Markdown",
+            )
+            await callback.answer()
             return
 
         if action == "delete_prompt":
@@ -4044,6 +4161,45 @@ def register_handlers(
         # If user was in card waiting mode, but sent other text (e.g. a waybill), clear waiting state
         if is_waiting_card:
             USER_CARD_WAITING.discard(user_id)
+
+        # Check if user is waiting to rename a sender profile with a custom alias
+        if user_id in USER_RENAME_PROFILE_WAITING:
+            target_profile_id = USER_RENAME_PROFILE_WAITING.pop(user_id)
+            new_alias = text.strip()
+            if new_alias.lower() in ("/cancel", "скасувати", "відміна"):
+                await message.answer("❌ Зміну псевдоніма скасовано.")
+                return
+            if new_alias.startswith("/reset"):
+                target_p = storage_manager.get_sender_profile(user_id, target_profile_id)
+                orig_name = target_p.sender_name if target_p and target_p.sender_name else "Користувач"
+                storage_manager.rename_sender_profile(user_id, target_profile_id, "")
+                await message.answer(
+                    f"🔄 *Псевдонім скинуто до офіційного імені:* «{orig_name}»",
+                    parse_mode="Markdown",
+                )
+                await _render_users_dashboard(message, user_id)
+                return
+
+            if len(new_alias) > 40 or "\n" in new_alias:
+                await message.answer("⚠️ Псевдонім має бути коротким (до 40 символів, в один рядок). Спробуйте ще раз або введіть /cancel.")
+                USER_RENAME_PROFILE_WAITING[user_id] = target_profile_id
+                return
+
+            updated = storage_manager.rename_sender_profile(user_id, target_profile_id, new_alias)
+            if updated:
+                await message.answer(
+                    f"✅ *Псевдонім успішно встановлено!*\n\n"
+                    f"👤 *Псевдонім:* «{updated.name}»\n"
+                    f"📋 *Офіційне ПІБ:* `{updated.sender_name or updated.name}`\n"
+                    f"📱 *Телефон:* `{updated.sender_phone or '—'}`\n\n"
+                    "Тепер цей псевдонім відображатиметься на кнопках та в кабінеті користувачів.",
+                    parse_mode="Markdown",
+                )
+                await _render_users_dashboard(message, user_id)
+                return
+            else:
+                await message.answer("❌ Профіль не знайдено або сталася помилка.")
+                return
 
         # Check if user is waiting to add a sender profile with an NP API key
         if user_id in USER_ADD_PROFILE_WAITING:

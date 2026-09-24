@@ -382,3 +382,80 @@ async def test_process_waybill_callback_switch_profile(multi_user_manager, mock_
         assert multi_user_manager.get_active_profile(1).id == p2.id
         callback.answer.assert_called_with(f"✅ Відправника перемкнуто на «{p2.name}»! Баланс оновлено.")
         callback.message.edit_text.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_user_profile_rename_callback_and_input(multi_user_manager, mock_settings):
+    """Test interactive rename flow via callback and subsequent text message."""
+    from src.bot.handlers import USER_RENAME_PROFILE_WAITING
+
+    callback = AsyncMock(spec=CallbackQuery)
+    callback.from_user = User(id=1, is_bot=False, first_name="Test")
+    callback.message = AsyncMock()
+    callback.answer = AsyncMock()
+
+    uprof_handler = _get_callback_handler("process_user_profile_callback")
+
+    # 1. Trigger rename_prompt with 2 profiles -> opens selection keyboard
+    cb_prompt = UserProfileCallback(action="rename_prompt", profile_id="none")
+    await uprof_handler(callback, cb_prompt)
+    callback.message.edit_text.assert_called_once()
+    assert "Оберіть користувача" in callback.message.edit_text.call_args[0][0]
+
+    # 2. Select profile p1 for renaming
+    profiles = multi_user_manager.get_sender_profiles(1)
+    p1 = profiles[0]
+    cb_target = UserProfileCallback(action="rename_target", profile_id=p1.id)
+    await uprof_handler(callback, cb_target)
+    assert USER_RENAME_PROFILE_WAITING[1] == p1.id
+    callback.message.answer.assert_called_once()
+    assert "Введіть новий псевдонім" in callback.message.answer.call_args[0][0]
+
+    # 3. User sends new pseudonym text
+    text_msg = AsyncMock(spec=Message)
+    text_msg.from_user = User(id=1, is_bot=False, first_name="Test")
+    text_msg.text = "Мій Улюблений Склад"
+    text_msg.answer = AsyncMock()
+
+    msg_handler = _get_message_handler("process_text_message")
+    await msg_handler(text_msg)
+
+    # State cleared and profile alias updated
+    assert 1 not in USER_RENAME_PROFILE_WAITING
+    updated_p1 = multi_user_manager.get_sender_profile(1, p1.id)
+    assert updated_p1.alias == "Мій Улюблений Склад"
+    assert updated_p1.name == "Мій Улюблений Склад"
+
+
+@pytest.mark.asyncio
+async def test_cmd_set_alias_and_reset(multi_user_manager, mock_settings):
+    """Test /set_alias and /reset_alias commands."""
+    cmd_set_alias_handler = _get_message_handler("cmd_set_alias")
+    cmd_reset_alias_handler = _get_message_handler("cmd_reset_alias")
+
+    msg = AsyncMock(spec=Message)
+    msg.from_user = User(id=1, is_bot=False, first_name="Test")
+    msg.text = "/set_alias Склад Дніпро"
+    msg.answer = AsyncMock()
+
+    stats = CODMonthlyStats(
+        year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
+        total_count=0, total_sum=0.0, items=[]
+    )
+
+    with patch.object(NovaPoshtaClient, "get_monthly_cod_stats", return_value=stats):
+        await cmd_set_alias_handler(msg)
+        active_p = multi_user_manager.get_active_profile(1)
+        assert active_p.alias == "Склад Дніпро"
+        assert active_p.name == "Склад Дніпро"
+
+        # Now reset alias
+        msg_reset = AsyncMock(spec=Message)
+        msg_reset.from_user = User(id=1, is_bot=False, first_name="Test")
+        msg_reset.text = "/reset_alias"
+        msg_reset.answer = AsyncMock()
+
+        await cmd_reset_alias_handler(msg_reset)
+        reset_p = multi_user_manager.get_active_profile(1)
+        assert reset_p.alias is None
+
