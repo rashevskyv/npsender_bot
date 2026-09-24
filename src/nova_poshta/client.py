@@ -124,10 +124,83 @@ def check_is_light_return(doc: Dict[str, Any]) -> bool:
     return False
 
 
+def _normalize_phone_doc(doc: Dict[str, Any], source: str = "phone") -> Dict[str, Any]:
+    """Normalize document item returned by getOutgoingDocumentsByPhone or getIncomingDocumentsByPhone to standard waybill dict format."""
+    num = str(doc.get("Number") or doc.get("IntDocNumber", "")).strip()
+    cost_val = doc.get("Cost") or doc.get("CostOnSite") or "0"
+    ap_cost = doc.get("AfterpaymentOnGoodsCost") or doc.get("RedeliverySum") or ""
+
+    # Status / state mapping
+    sc = str(doc.get("TrackingStatusCode", doc.get("StateId", doc.get("StatusCode", ""))))
+    sn = str(doc.get("TrackingStatusName", doc.get("StateName", doc.get("Status", "Unspecified"))))
+
+    rec_name = str(
+        doc.get("RecipientFullName")
+        or doc.get("RecipientName")
+        or doc.get("RecipientContactPerson")
+        or doc.get("RecipientDescription")
+        or "N/A"
+    )
+    rec_phone = str(doc.get("PhoneRecipient") or doc.get("RecipientsPhone") or "")
+    snd_name = str(
+        doc.get("SenderName")
+        or doc.get("SenderContactPerson")
+        or doc.get("SenderDescription")
+        or "N/A"
+    )
+    snd_phone = str(doc.get("PhoneSender") or doc.get("SendersPhone") or "")
+
+    est_date = (
+        doc.get("ScheduledDeliveryDate")
+        or doc.get("ArrivalDateTime")
+        or doc.get("EstimatedDeliveryDate")
+    )
+
+    is_lr = (
+        bool(doc.get("LightReturn"))
+        or bool(doc.get("LightReturnNumber"))
+        or "легке повернення" in str(doc.get("CargoDescription", "")).lower()
+    )
+
+    card_mask = str(doc.get("CardMaskedNumber") or "").strip()
+
+    return {
+        "IntDocNumber": num,
+        "Number": num,
+        "Ref": str(doc.get("RefEW") or doc.get("Ref") or num),
+        "DateTime": doc.get("DateTime") or doc.get("CreateTime", ""),
+        "Cost": cost_val,
+        "CostOnSite": cost_val,
+        "StateId": sc,
+        "StatusCode": sc,
+        "StateName": sn,
+        "Status": sn,
+        "RecipientContactPerson": rec_name,
+        "RecipientDescription": rec_name,
+        "RecipientsPhone": rec_phone,
+        "SenderContactPerson": snd_name,
+        "SenderDescription": snd_name,
+        "SendersPhone": snd_phone,
+        "CityRecipientDescription": str(doc.get("CityRecipientDescription", "N/A")),
+        "RecipientAddressDescription": str(doc.get("RecipientAddressDescription", "N/A")),
+        "Description": str(doc.get("CargoDescription", "Посилка")),
+        "EstimatedDeliveryDate": est_date,
+        "AfterpaymentOnGoodsCost": ap_cost,
+        "RedeliverySum": str(doc.get("RedeliverySum", "")),
+        "CardMaskedNumber": card_mask,
+        "RedeliveryPaymentCard": card_mask,
+        "LightReturn": is_lr,
+        "LightReturnNumber": doc.get("LightReturnNumber", ""),
+        "DeletionMark": bool(doc.get("DeletionMark", False)),
+        "_source": source,
+    }
+
+
 class NovaPoshtaClient:
     """Nova Poshta API 2.0 client."""
 
     _waybills_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+    _incoming_waybills_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
     _city_settlement_cache: Dict[str, str] = {}
 
 
@@ -139,12 +212,19 @@ class NovaPoshtaClient:
     def invalidate_waybills_cache(self):
         """Clear in-memory waybills cache for this client's API key."""
         cache_key = self.api_key or "default"
-        NovaPoshtaClient._waybills_cache.pop(cache_key, None)
+        NovaPoshtaClient._waybills_cache = {
+            k: v for k, v in NovaPoshtaClient._waybills_cache.items()
+            if not k.startswith(cache_key)
+        }
+        NovaPoshtaClient._incoming_waybills_cache = {
+            k: v for k, v in NovaPoshtaClient._incoming_waybills_cache.items()
+            if not k.startswith(cache_key)
+        }
 
     async def _fetch_raw_waybills_with_cache(
-        self, days_back: int = 30, ttl_seconds: int = 300
+        self, days_back: int = 30, ttl_seconds: int = 300, user_phone: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Fetch raw document list with 5-minute (300s) in-memory cache to prevent redundant API calls."""
+        """Fetch raw document list (combining getDocumentList and getOutgoingDocumentsByPhone) with cache."""
         cache_key = self.api_key or "default"
         now = time.time()
 
@@ -158,19 +238,107 @@ class NovaPoshtaClient:
         from_date = (today - datetime.timedelta(days=days_back)).strftime("%d.%m.%Y")
         to_date = today.strftime("%d.%m.%Y")
 
-        res = await self._post(
-            model_name="InternetDocument",
-            called_method="getDocumentList",
-            method_properties={
+        docs = []
+        try:
+            res = await self._post(
+                model_name="InternetDocument",
+                called_method="getDocumentList",
+                method_properties={
+                    "DateTimeFrom": from_date,
+                    "DateTimeTo": to_date,
+                    "Page": "1",
+                    "Limit": "100",
+                    "GetFullList": "1",
+                },
+            )
+            docs = res.get("data", [])
+        except Exception as e:
+            logger.warning(f"Error fetching getDocumentList: {e}")
+
+        merged_map: Dict[str, Dict[str, Any]] = {
+            str(d.get("IntDocNumber", "")): d for d in docs if d.get("IntDocNumber")
+        }
+
+        # Query getOutgoingDocumentsByPhone for real API keys to include branch-created (5900...) shipments
+        if not (self.api_key and self.api_key.startswith("test_")):
+            eff_phone = _clean_phone(user_phone) if user_phone else _clean_phone(getattr(self.settings, "sender_phone", None))
+            try:
+                p_props: Dict[str, Any] = {
+                    "DateTimeFrom": from_date,
+                    "DateTimeTo": to_date,
+                }
+                if eff_phone:
+                    p_props["Phone"] = eff_phone
+                res_phone = await self._post(
+                    model_name="InternetDocument",
+                    called_method="getOutgoingDocumentsByPhone",
+                    method_properties=p_props,
+                )
+                p_data = res_phone.get("data", [])
+                phone_docs = p_data[0].get("result", []) if p_data and isinstance(p_data[0], dict) else []
+                for pdoc in phone_docs:
+                    p_num = str(pdoc.get("Number", "")).strip()
+                    if not p_num:
+                        continue
+                    norm = _normalize_phone_doc(pdoc, source="outgoing_by_phone")
+                    if p_num not in merged_map:
+                        merged_map[p_num] = norm
+                    else:
+                        for k in [
+                            "StateId", "StatusCode", "StateName", "Status",
+                            "EstimatedDeliveryDate", "AfterpaymentOnGoodsCost",
+                            "RedeliverySum", "CardMaskedNumber", "RedeliveryPaymentCard",
+                        ]:
+                            if norm.get(k) and not merged_map[p_num].get(k):
+                                merged_map[p_num][k] = norm[k]
+            except Exception as e:
+                logger.warning(f"Error fetching getOutgoingDocumentsByPhone: {e}")
+
+        final_docs = list(merged_map.values())
+        NovaPoshtaClient._waybills_cache[cache_key] = (now, final_docs)
+        return final_docs
+
+    async def _fetch_raw_incoming_waybills_with_cache(
+        self, days_back: int = 30, ttl_seconds: int = 300, user_phone: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch raw incoming documents using getIncomingDocumentsByPhone with cache."""
+        eff_phone = _clean_phone(user_phone) if user_phone else _clean_phone(getattr(self.settings, "sender_phone", None))
+        cache_key = f"{self.api_key or 'default'}_{eff_phone or 'all'}"
+        now = time.time()
+
+        if cache_key in NovaPoshtaClient._incoming_waybills_cache:
+            ts, cached_docs = NovaPoshtaClient._incoming_waybills_cache[cache_key]
+            if now - ts < ttl_seconds:
+                return cached_docs
+
+        today = datetime.date.today()
+        from_date = (today - datetime.timedelta(days=days_back)).strftime("%d.%m.%Y")
+        to_date = today.strftime("%d.%m.%Y")
+
+        docs = []
+        try:
+            p_props: Dict[str, Any] = {
                 "DateTimeFrom": from_date,
                 "DateTimeTo": to_date,
-                "Page": "1",
-                "Limit": "50",
-                "GetFullList": "1",
-            },
-        )
-        docs = res.get("data", [])
-        NovaPoshtaClient._waybills_cache[cache_key] = (now, docs)
+            }
+            if eff_phone:
+                p_props["Phone"] = eff_phone
+            res_phone = await self._post(
+                model_name="InternetDocument",
+                called_method="getIncomingDocumentsByPhone",
+                method_properties=p_props,
+            )
+            p_data = res_phone.get("data", [])
+            phone_docs = p_data[0].get("result", []) if p_data and isinstance(p_data[0], dict) else []
+            for pdoc in phone_docs:
+                p_num = str(pdoc.get("Number", "")).strip()
+                if not p_num:
+                    continue
+                docs.append(_normalize_phone_doc(pdoc, source="incoming_by_phone"))
+        except Exception as e:
+            logger.warning(f"Error fetching getIncomingDocumentsByPhone: {e}")
+
+        NovaPoshtaClient._incoming_waybills_cache[cache_key] = (now, docs)
         return docs
 
     async def _post(
@@ -839,7 +1007,7 @@ class NovaPoshtaClient:
         eff_name = user_name or getattr(self.settings, "sender_name", None)
         eff_cp_ref = user_cp_ref or getattr(self.settings, "sender_counterparty_ref", None)
 
-        raw_docs = await self._fetch_raw_waybills_with_cache(days_back=days_back)
+        raw_docs = await self._fetch_raw_waybills_with_cache(days_back=days_back, user_phone=eff_phone)
         items = []
         for doc in raw_docs:
             state_id = str(doc.get("StateId", doc.get("StatusCode", "")))
@@ -859,6 +1027,8 @@ class NovaPoshtaClient:
             if eff_cp_ref and doc_sender_cp and eff_cp_ref == doc_sender_cp:
                 is_outgoing = True
             elif eff_phone and doc_sender_phone and _clean_phone(eff_phone) == _clean_phone(doc_sender_phone):
+                is_outgoing = True
+            elif doc.get("_source") == "outgoing_by_phone":
                 is_outgoing = True
             elif not eff_phone and not eff_cp_ref:
                 is_outgoing = True
@@ -899,21 +1069,61 @@ class NovaPoshtaClient:
         eff_phone = user_phone or getattr(self.settings, "sender_phone", None)
         eff_cp_ref = user_cp_ref or getattr(self.settings, "sender_counterparty_ref", None)
 
-        raw_docs = await self._fetch_raw_waybills_with_cache(days_back=days_back)
+        raw_incoming = (
+            await self._fetch_raw_incoming_waybills_with_cache(days_back=days_back, user_phone=eff_phone)
+            if not (self.api_key and self.api_key.startswith("test_"))
+            else []
+        )
+        raw_outgoing = await self._fetch_raw_waybills_with_cache(days_back=days_back, user_phone=eff_phone)
+
+        seen_numbers = set()
         items = []
-        for doc in raw_docs:
+
+        # Process incoming documents from getIncomingDocumentsByPhone first (captures branch-created 5900... too)
+        for doc in raw_incoming:
+            num = str(doc.get("IntDocNumber", doc.get("Number", ""))).strip()
+            if not num or num in seen_numbers:
+                continue
             state_id = str(doc.get("StateId", doc.get("StatusCode", "")))
             state_name = str(doc.get("StateName", doc.get("Status", "Unspecified")))
-
-            # Skip items already received/picked up
             if state_id in ("9", "10", "11", "106") or any(
                 kw in state_name.lower() for kw in ["отримано", "забрано", "видано"]
             ):
                 continue
+            seen_numbers.add(num)
+            cost_val = doc.get("CostOnSite") or doc.get("Cost") or "0"
+            items.append(
+                WaybillItemInfo(
+                    int_doc_number=num,
+                    state_name=state_name,
+                    state_id=state_id,
+                    recipient_name=str(doc.get("RecipientContactPerson", doc.get("RecipientDescription", "N/A"))),
+                    recipient_phone=doc.get("RecipientsPhone"),
+                    sender_name=str(doc.get("SenderContactPerson", doc.get("SenderDescription", "N/A"))),
+                    sender_phone=doc.get("SendersPhone"),
+                    city_recipient=str(doc.get("CityRecipientDescription", "N/A")),
+                    address_recipient=str(doc.get("RecipientAddressDescription", "N/A")),
+                    cost=float(cost_val),
+                    description=str(doc.get("Description", "Посилка")),
+                    estimated_delivery_date=doc.get("EstimatedDeliveryDate"),
+                    date_created=doc.get("DateTime"),
+                    is_light_return=check_is_light_return(doc),
+                )
+            )
 
+        # Also process any incoming from getDocumentList (Internet documents where user is recipient)
+        for doc in raw_outgoing:
+            num = str(doc.get("IntDocNumber", doc.get("Number", ""))).strip()
+            if not num or num in seen_numbers:
+                continue
+            state_id = str(doc.get("StateId", doc.get("StatusCode", "")))
+            state_name = str(doc.get("StateName", doc.get("Status", "Unspecified")))
+            if state_id in ("9", "10", "11", "106") or any(
+                kw in state_name.lower() for kw in ["отримано", "забрано", "видано"]
+            ):
+                continue
             doc_sender_cp = str(doc.get("Sender", ""))
             doc_sender_phone = doc.get("SendersPhone")
-
             doc_recip_cp = str(doc.get("Recipient", ""))
             doc_recip_phone = doc.get("RecipientsPhone")
 
@@ -934,10 +1144,11 @@ class NovaPoshtaClient:
             if is_sender or not is_recipient:
                 continue
 
+            seen_numbers.add(num)
             cost_val = doc.get("CostOnSite") or doc.get("Cost") or "0"
             items.append(
                 WaybillItemInfo(
-                    int_doc_number=str(doc.get("IntDocNumber", "")),
+                    int_doc_number=num,
                     state_name=state_name,
                     state_id=state_id,
                     recipient_name=str(doc.get("RecipientContactPerson", doc.get("RecipientDescription", "N/A"))),
@@ -1484,6 +1695,7 @@ class NovaPoshtaClient:
         eff_phone = user_phone or getattr(self.settings, "sender_phone", None)
         eff_cp_ref = user_cp_ref or getattr(self.settings, "sender_counterparty_ref", None)
 
+        data = []
         try:
             res = await self._post(
                 model_name="InternetDocument",
@@ -1491,20 +1703,52 @@ class NovaPoshtaClient:
                 method_properties={
                     "DateTimeFrom": from_date,
                     "DateTimeTo": to_date,
+                    "Page": "1",
+                    "Limit": "100",
                     "GetFullList": "1",
                 },
             )
+            data = res.get("data", [])
         except Exception as e:
             logger.error(f"Error fetching monthly document list from Nova Poshta: {e}")
-            return CODMonthlyStats(
-                year=target_year,
-                month=target_month,
-                month_name=month_label,
-                from_date=from_date,
-                to_date=to_date,
-            )
 
-        data = res.get("data", [])
+        # Merge with getOutgoingDocumentsByPhone to include branch-created (5900...) waybills with COD
+        merged_cod_map: Dict[str, Dict[str, Any]] = {
+            str(d.get("IntDocNumber", "")): d for d in data if d.get("IntDocNumber")
+        }
+        try:
+            p_props: Dict[str, Any] = {
+                "DateTimeFrom": from_date,
+                "DateTimeTo": to_date,
+            }
+            if eff_phone:
+                p_props["Phone"] = _clean_phone(eff_phone)
+            res_phone = await self._post(
+                model_name="InternetDocument",
+                called_method="getOutgoingDocumentsByPhone",
+                method_properties=p_props,
+            )
+            p_data = res_phone.get("data", [])
+            phone_docs = p_data[0].get("result", []) if p_data and isinstance(p_data[0], dict) else []
+            for pdoc in phone_docs:
+                p_num = str(pdoc.get("Number", "")).strip()
+                if not p_num:
+                    continue
+                norm = _normalize_phone_doc(pdoc, source="outgoing_by_phone")
+                if p_num not in merged_cod_map:
+                    merged_cod_map[p_num] = norm
+                else:
+                    for k in [
+                        "StateId", "StatusCode", "StateName", "Status",
+                        "AfterpaymentOnGoodsCost", "RedeliverySum",
+                        "CardMaskedNumber", "RedeliveryPaymentCard",
+                    ]:
+                        if norm.get(k) and not merged_cod_map[p_num].get(k):
+                            merged_cod_map[p_num][k] = norm[k]
+        except Exception as e:
+            logger.warning(f"Error fetching monthly getOutgoingDocumentsByPhone: {e}")
+
+        data = list(merged_cod_map.values())
         if not data:
             return CODMonthlyStats(
                 year=target_year,
@@ -1549,6 +1793,8 @@ class NovaPoshtaClient:
                 is_sender = True
             elif eff_phone and doc_sender_phone and _clean_phone(eff_phone) == _clean_phone(doc_sender_phone):
                 is_sender = True
+            elif doc.get("_source") == "outgoing_by_phone":
+                is_sender = True
             elif not eff_phone and not eff_cp_ref:
                 is_sender = True
 
@@ -1587,7 +1833,12 @@ class NovaPoshtaClient:
                             cod_val = amt
                             break
 
-            if doc.get("RedeliveryPaymentCard") or doc.get("PaymentCard") or doc.get("BackwardDeliveryPaymentType") == "Card":
+            if (
+                doc.get("RedeliveryPaymentCard")
+                or doc.get("PaymentCard")
+                or doc.get("CardMaskedNumber")
+                or doc.get("BackwardDeliveryPaymentType") == "Card"
+            ):
                 cod_type = "card"
 
             # Skip shipments without genuine COD

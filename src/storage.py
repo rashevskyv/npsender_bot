@@ -464,9 +464,8 @@ class UserSettingsManager:
         effective_dict = global_settings.model_dump()
 
         np_key = (
-            target_profile.nova_poshta_api_key
-            if target_profile
-            else user_custom.nova_poshta_api_key
+            (target_profile.nova_poshta_api_key if target_profile and target_profile.nova_poshta_api_key and target_profile.nova_poshta_api_key.strip() else None)
+            or (user_custom.nova_poshta_api_key if user_custom.nova_poshta_api_key and user_custom.nova_poshta_api_key.strip() else None)
         )
         if np_key and np_key.strip():
             effective_dict["nova_poshta_api_key"] = np_key

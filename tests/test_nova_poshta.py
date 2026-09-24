@@ -622,4 +622,143 @@ async def test_search_city_populates_settlement_ref():
     assert cities[0].settlement_ref == "lviv-settle-ref"
 
 
+@pytest.mark.asyncio
+async def test_normalize_phone_doc_branch_waybill():
+    from src.nova_poshta.client import _normalize_phone_doc
+
+    raw_branch_doc = {
+        "Number": "59001782883558",
+        "TrackingStatusName": "Прибув у відділення",
+        "TrackingStatusCode": "7",
+        "DateTime": "2026-09-21 20:01:50",
+        "Cost": "14800",
+        "DocumentCost": 194,
+        "SenderName": "Рашевський Владислав Сергійович",
+        "PhoneSender": "380731836324",
+        "RecipientFullName": "Бодніченко Владислав Віталійович",
+        "PhoneRecipient": "380663270000",
+        "CityRecipientDescription": "Івано-Франківськ",
+        "RecipientAddressDescription": "Відділення №8 (до 10 кг)",
+        "CargoDescription": "планшет",
+        "AfterpaymentOnGoodsCost": "14800.00",
+        "RedeliverySum": "14800",
+        "CardMaskedNumber": "444111xxxxxx5537",
+        "ScheduledDeliveryDate": "2026-09-23 18:00:00",
+    }
+
+    norm = _normalize_phone_doc(raw_branch_doc, source="outgoing_by_phone")
+    assert norm["IntDocNumber"] == "59001782883558"
+    assert norm["StateId"] == "7"
+    assert norm["StateName"] == "Прибув у відділення"
+    assert norm["Cost"] == "14800"
+    assert norm["RecipientContactPerson"] == "Бодніченко Владислав Віталійович"
+    assert norm["SendersPhone"] == "380731836324"
+    assert norm["AfterpaymentOnGoodsCost"] == "14800.00"
+    assert norm["RedeliverySum"] == "14800"
+    assert norm["CardMaskedNumber"] == "444111xxxxxx5537"
+    assert norm["_source"] == "outgoing_by_phone"
+
+
+@pytest.mark.asyncio
+async def test_branch_created_waybill_in_outgoing_waybills():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="2689b221692d46c05eeaa9276aaa4e73"))
+
+    async def mock_post(model_name, called_method, method_properties):
+        if called_method == "getDocumentList":
+            return {"success": True, "data": []}
+        if called_method == "getOutgoingDocumentsByPhone":
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "result": [
+                            {
+                                "Number": "59001782883558",
+                                "TrackingStatusName": "Прибув у відділення",
+                                "TrackingStatusCode": "7",
+                                "DateTime": "2026-09-21 20:01:50",
+                                "Cost": "14800",
+                                "DocumentCost": 194,
+                                "SenderName": "Рашевський Владислав Сергійович",
+                                "PhoneSender": "380731836324",
+                                "RecipientFullName": "Бодніченко Владислав Віталійович",
+                                "PhoneRecipient": "380663270000",
+                                "CityRecipientDescription": "Івано-Франківськ",
+                                "RecipientAddressDescription": "Відділення №8",
+                                "CargoDescription": "планшет",
+                                "ScheduledDeliveryDate": "2026-09-23 18:00:00",
+                            }
+                        ]
+                    }
+                ],
+            }
+        return {"success": True, "data": []}
+
+    client._post = mock_post
+
+    items = await client.get_outgoing_waybills(user_phone="380731836324")
+    assert len(items) == 1
+    assert items[0].int_doc_number == "59001782883558"
+    assert items[0].recipient_name == "Бодніченко Владислав Віталійович"
+    assert items[0].state_name == "Прибув у відділення"
+    assert items[0].cost == 14800.0
+
+
+@pytest.mark.asyncio
+async def test_branch_created_waybill_in_cod_monthly_stats():
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    client = NovaPoshtaClient(Settings(TELEGRAM_BOT_TOKEN="dummy", NOVA_POSHTA_API_KEY="2689b221692d46c05eeaa9276aaa4e73"))
+
+    async def mock_post(model_name, called_method, method_properties):
+        if called_method == "getDocumentList":
+            return {"success": True, "data": []}
+        if called_method == "getOutgoingDocumentsByPhone":
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "result": [
+                            {
+                                "Number": "59001782883558",
+                                "TrackingStatusName": "Прибув у відділення",
+                                "TrackingStatusCode": "7",
+                                "DateTime": "2026-09-21 20:01:50",
+                                "Cost": "14800",
+                                "DocumentCost": 194,
+                                "SenderName": "Рашевський Владислав Сергійович",
+                                "PhoneSender": "380731836324",
+                                "RecipientFullName": "Бодніченко Владислав Віталійович",
+                                "PhoneRecipient": "380663270000",
+                                "CityRecipientDescription": "Івано-Франківськ",
+                                "RecipientAddressDescription": "Відділення №8",
+                                "CargoDescription": "планшет",
+                                "AfterpaymentOnGoodsCost": "14800.00",
+                                "RedeliverySum": "14800",
+                                "CardMaskedNumber": "444111xxxxxx5537",
+                                "ScheduledDeliveryDate": "2026-09-23 18:00:00",
+                            }
+                        ]
+                    }
+                ],
+            }
+        return {"success": True, "data": []}
+
+    client._post = mock_post
+
+    stats = await client.get_monthly_cod_stats(year=2026, month=9, user_phone="380731836324")
+    assert stats.total_count == 1
+    assert stats.total_sum == 14800.0
+    assert stats.in_transit_count == 1
+    assert stats.in_transit_sum == 14800.0
+    assert stats.items[0].int_doc_number == "59001782883558"
+    assert stats.items[0].cod_payment_type == "card"
+    assert stats.items[0].is_in_transit is True
+
+
+
 

@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.8
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.10
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -262,6 +262,18 @@
   - [x] Відображати походження адреси відправника в дашборді профілю (`(в додатку)` vs `(з сайту/API)`)
   - [x] Створити набір тестів `tests/test_sender_address_api_and_priority.py` та верифікувати проходження всіх 143 тестів паралельно (`python -m pytest -n auto`)
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
+- [x] **Крок 29: Інтеграція створених у відділенні накладних (5900...) через `getOutgoingDocumentsByPhone` та `getIncomingDocumentsByPhone`, точний підрахунок післяплати та оптимізація кешування (v0.24.10)**
+  - [x] Дослідити поведінку API Нової Пошти та виявити методи `InternetDocument/getOutgoingDocumentsByPhone` та `InternetDocument/getIncomingDocumentsByPhone`, що повертають як інтернет-накладні (`2045...`), так і накладні, створені у відділенні оператором (`5900...`)
+  - [x] Реалізувати уніфікований нормалізатор `_normalize_phone_doc` у `src/nova_poshta/client.py` для адаптації відповідей телефонних методів до внутрішньої структури накладної
+  - [x] Оновити `_fetch_raw_waybills_with_cache` для об'єднання накладних з `getDocumentList` та `getOutgoingDocumentsByPhone` з глобальним кешуванням за API-ключем (300с)
+  - [x] Додати `_fetch_raw_incoming_waybills_with_cache` та інтегрувати `getIncomingDocumentsByPhone` у `get_incoming_waybills` для повноцінного відстеження посилок, що прямують до користувача
+  - [x] Інтегрувати `getOutgoingDocumentsByPhone` у `get_monthly_cod_stats` для виявлення посилок з післяплатою, створених у відділенні (зокрема 14 800 грн на картку), з урахуванням у статуси «У дорозі» та щомісячний ліміт 29 999 грн
+  - [x] Оновити `get_effective_settings` у `src/storage.py` для безпечного наслідування API-ключа від `user_custom.nova_poshta_api_key`, якщо окремий профіль не містить власного ключа
+  - [x] Додати юніт-тести в `tests/test_nova_poshta.py` для перевірки нормалізації, виявлення посилок з відділення у вихідних та підрахунку післяплати
+  - [x] Виконати всі 146 тестів проекту паралельно (`python -m pytest -n auto`)
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`
+
 
 
 
