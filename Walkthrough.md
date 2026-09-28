@@ -1,5 +1,27 @@
 # Walkthrough (Журнал змін)
 
+## [v0.24.15] - 2026-09-28
+- **Виправлення рантайм-помилки `NameError: name 'CityInfo' is not defined` на продакшен-сервері**:
+  - **1. Симптом та анатомія збою**:
+    - При старті бота через `systemd` на хості розгортання виникла критична помилка ініціалізації:
+      ```text
+      File "/opt/npsender_bot/src/utils/city_search.py", line 177, in CitySearchEngine
+        ) -> List[CityInfo]:
+      NameError: name 'CityInfo' is not defined
+      ```
+    - **Корінь проблеми**: У Python 3.10–3.13 без активації `from __future__ import annotations` анотації типів у сигнатурах методів класу обчислюються в рантаймі при читанні визначення класу. Оскільки `from src.nova_poshta.models import CityInfo` було поміщено під захисний блок `if TYPE_CHECKING:`, ім'я `CityInfo` було відсутнє в області видимості модулю в момент запуску, що призводило до збою сервісу.
+  - **2. Впроваджені виправлення**:
+    - **`src/utils/city_search.py`**:
+      - Додано `from __future__ import annotations` найпершим рядком для відкладеного обчислення анотацій типів у всіх версіях Python.
+      - Імпортовано `CityInfo` з `src.nova_poshta.models` безпосередньо на верхній рівень без `TYPE_CHECKING`.
+      - Оновлено поле `city_info: CityInfo` у датакласі `CityDatabaseEntry`.
+    - **`src/nova_poshta/client.py`**:
+      - Прибрано верхньорівневий імпорт `city_search_engine`, який міг спричиняти часткову ініціалізацію модулів.
+      - У методі `search_city` додано локальний (lazy) імпорт `from src.utils.city_search import city_search_engine` безпосередньо у блоці фолбеку.
+  - **3. Тестування та верифікація**:
+    - Перевірено прямий імпорт усіх ключових модулів (`main`, `AIExtractor`, `NovaPoshtaClient`, `city_search_engine`) через CLI.
+    - Всі 166 тестів успішно виконано в паралельному режимі (`python -m pytest -n auto` за 11.50с).
+
 ## [v0.24.14] - 2026-09-28
 - **Універсальна офлайн-база всіх населених пунктів України (11 212 міст та сіл) та нечіткий семантичний рушій пошуку (`CitySearchEngine`)**:
   - **1. Кардинальне розв'язання проблеми пошуку міст замість точкових аліасів**:

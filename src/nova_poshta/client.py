@@ -11,7 +11,6 @@ import httpx
 
 from src.config import Settings
 from src.utils.text_cleaner import normalize_apostrophes, get_city_search_variants, clean_city_name
-from src.utils.city_search import city_search_engine
 from src.nova_poshta.models import (
     CityInfo,
     WarehouseInfo,
@@ -642,6 +641,8 @@ class NovaPoshtaClient:
         # Fallback to universal offline fuzzy database search if API returned no data for all variants
         if not res.get("data"):
             try:
+                from src.utils.city_search import city_search_engine
+
                 fuzzy_cities = city_search_engine.search(city_name, limit=10)
                 if fuzzy_cities:
                     logger.info(

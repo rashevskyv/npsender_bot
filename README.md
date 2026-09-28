@@ -6,6 +6,10 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **🛠️ Server Runtime Type Annotation Fix (`from __future__ import annotations`) (v0.24.15)**:
+  - **Eliminated Production `NameError: name 'CityInfo' is not defined`**: Enabled PEP 563 postponed evaluation of annotations via `from __future__ import annotations` in `src/utils/city_search.py`, ensuring flawless compatibility across Python 3.10–3.13 on Linux production servers running under systemd.
+  - **Clean Module Topologies**: Directly imports `CityInfo` from `src.nova_poshta.models` at module scope in `src/utils/city_search.py`, while employing clean lazy import inside `NovaPoshtaClient.search_city`, permanently preventing partial initialization or circular module errors at startup.
+
 - **🌍 Universal Settlements Database (11,000+ towns & villages) & Offline Fuzzy Search Engine (v0.24.14)**:
   - **Fundamental Resolution of City Search Failures**: Permanently eliminates the need for ad-hoc manual city aliases. The bot incorporates the entire official Nova Poshta database of all 11,212 Ukrainian settlements (`data/cities_database.json`), enabling instant, offline, typo-tolerant search across all cities, towns, villages, and urban-type settlements nationwide.
   - **High-Performance `CitySearchEngine` (`src/utils/city_search.py`)**:

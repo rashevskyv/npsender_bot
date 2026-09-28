@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.14
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.15
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -324,5 +324,16 @@
   - [x] Створити новий тестовий набір `tests/test_fuzzy_city_search.py` (8 детальних тестів).
   - [x] Успішно виконати всі 166 тестів проекту паралельно (`python -m pytest -n auto`).
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`.
+
+- [x] **Крок 34: Виправлення рантайм-помилки `NameError: name 'CityInfo' is not defined` на продакшен-сервері (v0.24.15)**
+  - [x] Діагностувати та локалізувати помилку на Linux-сервері під керуванням systemd (`npsender_bot.service: Main process exited, code=exited, status=1/FAILURE`).
+  - [x] Усунути причину збою: у Python 3.10–3.13 анотації типу аргументів функцій обчислюються в момент визначення класу. Оскільки `CityInfo` було заховано в `if TYPE_CHECKING:`, виникав `NameError: name 'CityInfo' is not defined`.
+  - [x] Додати `from __future__ import annotations` як найперший рядок у `src/utils/city_search.py` для відкладеного обчислення анотацій типів у всіх версіях Python.
+  - [x] Перенести імпорт `CityInfo` з `src.nova_poshta.models` на верхній рівень `src/utils/city_search.py`.
+  - [x] Замінити верхньорівневий імпорт `city_search_engine` у `src/nova_poshta/client.py` на локальний (lazy) імпорт усередині методу `search_city`, що унеможливлює циклічні залежності при старті сервісу бота.
+  - [x] Перевірити імпорти модулів через CLI (`python -c "from src.bot.main import main..."`).
+  - [x] Успішно виконати всі 166 тестів проекту паралельно (`python -m pytest -n auto`).
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`.
+
 
 

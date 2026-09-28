@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Offline settlement database and high-performance fuzzy search engine for Ukrainian cities.
 
 Provides systematic, typo-tolerant search across all 11,000+ Nova Poshta settlements
@@ -13,11 +15,9 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any
 
-if TYPE_CHECKING:
-    from src.nova_poshta.models import CityInfo
-
+from src.nova_poshta.models import CityInfo
 from src.utils.text_cleaner import (
     CITY_TOPONYM_ALIASES,
     clean_city_name,
@@ -47,7 +47,7 @@ class CityDatabaseEntry:
     area_ru: Optional[str]
     settlement_type: str
     is_branch: bool
-    city_info: Any
+    city_info: CityInfo
 
 
 class CitySearchEngine:
@@ -90,8 +90,6 @@ class CitySearchEngine:
         try:
             with open(self._db_path, "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
-
-            from src.nova_poshta.models import CityInfo
 
             entries: List[CityDatabaseEntry] = []
             exact_map: Dict[str, List[CityDatabaseEntry]] = {}
