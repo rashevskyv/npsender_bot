@@ -59,6 +59,7 @@ from src.bot.keyboards import (
     get_client_card_keyboard,
     get_settings_keyboard,
     get_missing_sender_address_keyboard,
+    get_retry_waybill_keyboard,
 )
 
 
@@ -3567,7 +3568,9 @@ def register_handlers(
             )
         except Exception as e:
             logger.error(f"Error processing text message: {e}", exc_info=True)
-            await status_msg.edit_text(f"❌ *Сталася помилка:* {str(e)}", parse_mode="Markdown")
+            err_text = str(e).strip() or f"{type(e).__name__} (Помилка таймауту або зв'язку)"
+            clean_err = err_text.replace("*", "").replace("_", " ").replace("`", "")
+            await status_msg.edit_text(f"❌ *Сталася помилка:* `{clean_err}`", parse_mode="Markdown")
 
     _evaluate_cod_limits = evaluate_cod_limits
 
@@ -5036,8 +5039,19 @@ def register_handlers(
                 )
             except Exception as err:
                 logger.error(f"Failed to create/update waybill: {err}", exc_info=True)
+                err_text = str(err).strip() or f"{type(err).__name__} (Помилка таймауту або зв'язку)"
+                clean_err = err_text.replace("*", "").replace("_", " ").replace("`", "")
+                retry_kb = (
+                    get_retry_waybill_keyboard(session_id)
+                    if session_id and session_id in PENDING_SESSIONS
+                    else None
+                )
                 await callback.message.edit_text(
-                    f"❌ *Помилка формування ТТН:* {str(err)}", parse_mode="Markdown"
+                    f"❌ *Помилка формування ТТН:* `{clean_err}`\n\n"
+                    "💡 *Сервери Нової Пошти тимчасово не відповідають або з'єднання перервано.*\n"
+                    "Ви можете натиснути кнопку нижче, щоб спробувати ще раз, або повернутися до редагування картки:",
+                    parse_mode="Markdown",
+                    reply_markup=retry_kb,
                 )
 
     @router.callback_query(DraftActionCallback.filter())

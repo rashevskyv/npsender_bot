@@ -438,6 +438,39 @@ def get_limit_exceeded_confirmation_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+def get_retry_waybill_keyboard(session_id: str) -> InlineKeyboardMarkup:
+    """Build retry/back inline keyboard when waybill creation fails due to network/timeout."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Спробувати створити ще раз",
+                    callback_data=WaybillActionCallback(
+                        action="confirm",
+                        session_id=session_id,
+                    ).pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 До картки ТТН",
+                    callback_data=WaybillActionCallback(
+                        action="back_to_card",
+                        session_id=session_id,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="❌ Скасувати",
+                    callback_data=WaybillActionCallback(
+                        action="cancel",
+                        session_id=session_id,
+                    ).pack(),
+                ),
+            ],
+        ]
+    )
+
+
 class DraftActionCallback(CallbackData, prefix="draft"):
     """Callback data schema for draft management."""
 

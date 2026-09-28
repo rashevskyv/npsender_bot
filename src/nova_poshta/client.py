@@ -346,35 +346,57 @@ class NovaPoshtaClient:
         model_name: str,
         called_method: str,
         method_properties: Dict[str, Any],
-        max_retries: int = 2,
+        max_retries: int = 3,
     ) -> Dict[str, Any]:
-        """Make raw POST request to Nova Poshta API with automatic retry on rate limits."""
+        """Make raw POST request to Nova Poshta API with automatic retry on network timeouts, connection drops, and rate limits."""
         payload = {
             "apiKey": self.api_key,
             "modelName": model_name,
             "calledMethod": called_method,
             "methodProperties": method_properties,
         }
+        timeout_config = httpx.Timeout(timeout=30.0, connect=10.0, read=25.0, write=15.0)
+
         for attempt in range(max_retries + 1):
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(self.api_url, json=payload)
-                response.raise_for_status()
-                data = response.json()
-                if not data.get("success", False):
-                    errors = ", ".join(data.get("errors", []))
-                    warnings = ", ".join(data.get("warnings", []))
-                    err_msg = f"Nova Poshta API Error [{model_name}/{called_method}]: {errors or warnings}"
+            try:
+                async with httpx.AsyncClient(timeout=timeout_config) as client:
+                    response = await client.post(self.api_url, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                    if not data.get("success", False):
+                        errors = ", ".join(data.get("errors", []))
+                        warnings = ", ".join(data.get("warnings", []))
+                        err_msg = f"Nova Poshta API Error [{model_name}/{called_method}]: {errors or warnings}"
 
-                    if ("many requests" in err_msg.lower() or "too many" in err_msg.lower()) and attempt < max_retries:
-                        logger.warning(
-                            f"Rate limited by Nova Poshta API ({err_msg}). Retrying in 0.6s (attempt {attempt + 1}/{max_retries})..."
-                        )
-                        await asyncio.sleep(0.6 * (attempt + 1))
-                        continue
+                        if ("many requests" in err_msg.lower() or "too many" in err_msg.lower()) and attempt < max_retries:
+                            backoff = 0.6 * (attempt + 1)
+                            logger.warning(
+                                f"Rate limited by Nova Poshta API ({err_msg}). Retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})..."
+                            )
+                            await asyncio.sleep(backoff)
+                            continue
 
-                    logger.error(err_msg)
-                    raise RuntimeError(err_msg)
-                return data
+                        logger.error(err_msg)
+                        raise RuntimeError(err_msg)
+                    return data
+            except (httpx.TimeoutException, httpx.NetworkError) as net_err:
+                err_type = type(net_err).__name__
+                err_detail = str(net_err).strip() or err_type
+                if attempt < max_retries:
+                    backoff = 1.0 * (attempt + 1)
+                    logger.warning(
+                        f"Nova Poshta API connection/timeout error [{model_name}/{called_method}]: {err_type} ({err_detail}). "
+                        f"Retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})..."
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+
+                logger.error(
+                    f"Nova Poshta API connection/timeout error [{model_name}/{called_method}] exhausted all {max_retries + 1} attempts: {err_type} ({err_detail})"
+                )
+                raise RuntimeError(
+                    f"Помилка з'єднання з сервером Нової Пошти [{model_name}/{called_method}]: {err_type} ({err_detail}). Спробуйте ще раз."
+                ) from net_err
 
     async def fetch_sender_profile(self, api_key_override: Optional[str] = None) -> Dict[str, Any]:
         """Fetch Sender Counterparty info, Contact Person info, phone, and name from Nova Poshta API."""

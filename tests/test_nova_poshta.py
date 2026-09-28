@@ -760,5 +760,108 @@ async def test_branch_created_waybill_in_cod_monthly_stats():
     assert stats.items[0].is_in_transit is True
 
 
+@pytest.mark.asyncio
+async def test_post_retry_on_connect_timeout_success(monkeypatch):
+    import httpx
+    from unittest.mock import AsyncMock, MagicMock
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    settings = Settings(nova_poshta_api_key="test-key", openai_api_key="test-key", telegram_bot_token="123:test")
+    client = NovaPoshtaClient(settings)
+
+    call_count = 0
+
+    class MockResponse:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"success": True, "data": [{"Ref": "test-ok"}]}
+
+    async def mock_post_call(url, json=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.ConnectTimeout("Connect timeout to api.novaposhta.ua")
+        return MockResponse()
+
+    mock_client_instance = AsyncMock()
+    mock_client_instance.post = AsyncMock(side_effect=mock_post_call)
+
+    class MockAsyncClientContext:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return mock_client_instance
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockAsyncClientContext)
+
+    # Call _post with max_retries=2
+    res = await client._post("Counterparty", "getCounterparties", {}, max_retries=2)
+    assert res["success"] is True
+    assert res["data"][0]["Ref"] == "test-ok"
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_post_retry_on_timeout_exhausted(monkeypatch):
+    import httpx
+    from unittest.mock import AsyncMock
+    from src.config import Settings
+    from src.nova_poshta.client import NovaPoshtaClient
+
+    settings = Settings(nova_poshta_api_key="test-key", openai_api_key="test-key", telegram_bot_token="123:test")
+    client = NovaPoshtaClient(settings)
+
+    mock_client_instance = AsyncMock()
+    mock_client_instance.post = AsyncMock(side_effect=httpx.ConnectTimeout(""))
+
+    class MockAsyncClientContext:
+        def __init__(self, *args, **kwargs):
+            pass
+        async def __aenter__(self):
+            return mock_client_instance
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockAsyncClientContext)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client._post("Counterparty", "createRecipient", {}, max_retries=1)
+
+    err_str = str(exc_info.value)
+    assert "Помилка з'єднання з сервером Нової Пошти" in err_str
+    assert "ConnectTimeout" in err_str
+
+
+def test_get_retry_waybill_keyboard():
+    from src.bot.keyboards import get_retry_waybill_keyboard, WaybillActionCallback
+
+    kb = get_retry_waybill_keyboard("sess-abc-123")
+    assert len(kb.inline_keyboard) == 2
+    # Row 1: retry confirm
+    retry_btn = kb.inline_keyboard[0][0]
+    assert "Спробувати створити ще раз" in retry_btn.text
+    parsed_cb0 = WaybillActionCallback.unpack(retry_btn.callback_data)
+    assert parsed_cb0.action == "confirm"
+    assert parsed_cb0.session_id == "sess-abc-123"
+
+    # Row 2: back to card & cancel
+    back_btn = kb.inline_keyboard[1][0]
+    assert "До картки ТТН" in back_btn.text
+    parsed_cb1 = WaybillActionCallback.unpack(back_btn.callback_data)
+    assert parsed_cb1.action == "back_to_card"
+    assert parsed_cb1.session_id == "sess-abc-123"
+
+    cancel_btn = kb.inline_keyboard[1][1]
+    assert "Скасувати" in cancel_btn.text
+    parsed_cb2 = WaybillActionCallback.unpack(cancel_btn.callback_data)
+    assert parsed_cb2.action == "cancel"
+    assert parsed_cb2.session_id == "sess-abc-123"
+
+
+
 
 

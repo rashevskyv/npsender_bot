@@ -6,6 +6,12 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **⚡ Nova Poshta API Network Resilience & Intelligent Retry Architecture (v0.24.16)**:
+  - **Automatic Exponential Backoff Retry**: Wrapped all raw POST requests (`NovaPoshtaClient._post`) in an automatic retry loop specifically catching `httpx.TimeoutException`, `httpx.ConnectTimeout`, `httpx.ReadTimeout`, and `httpx.NetworkError` up to 3 retries (4 total attempts) with exponential backoff (`1.0s * (attempt + 1)`). Transient connection drops and VPS-to-API latency spikes are resolved transparently in the background without user intervention.
+  - **Granular Timeouts**: Configured robust granular timeout settings (`httpx.Timeout(timeout=30.0, connect=10.0, read=25.0, write=15.0)`), giving handshakes adequate time during peak Nova Poshta API traffic.
+  - **Zero Blank Errors & Safe Markdown Formatting**: Eliminates empty error notifications caused by empty string representations of `httpx.ConnectTimeout`. All exceptions produce informative, formatted diagnostics without breaking Telegram Markdown formatting.
+  - **Interactive Retry & Session Recovery (`get_retry_waybill_keyboard`)**: If waybill creation fails due to temporary carrier API downtime, the user's active draft is strictly preserved. The bot presents an interactive inline keyboard with `[ 🔄 Спробувати створити ще раз ]`, `[ 🔙 До картки ТТН ]`, and `[ ❌ Скасувати ]`, enabling one-tap creation retries or field adjustments without re-typing.
+
 - **🛠️ Server Runtime Type Annotation Fix (`from __future__ import annotations`) (v0.24.15)**:
   - **Eliminated Production `NameError: name 'CityInfo' is not defined`**: Enabled PEP 563 postponed evaluation of annotations via `from __future__ import annotations` in `src/utils/city_search.py`, ensuring flawless compatibility across Python 3.10–3.13 on Linux production servers running under systemd.
   - **Clean Module Topologies**: Directly imports `CityInfo` from `src.nova_poshta.models` at module scope in `src/utils/city_search.py`, while employing clean lazy import inside `NovaPoshtaClient.search_city`, permanently preventing partial initialization or circular module errors at startup.
