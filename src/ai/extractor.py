@@ -8,7 +8,13 @@ from typing import Optional, List, Dict, Any
 from openai import AsyncOpenAI
 
 from src.config import Settings
-from src.utils.text_cleaner import normalize_apostrophes, get_city_search_variants
+from src.utils.text_cleaner import (
+    normalize_apostrophes,
+    get_city_search_variants,
+    clean_city_name,
+    CITY_TOPONYM_ALIASES,
+    is_city_matched,
+)
 from src.ai.schemas import (
     ParsedRecipientInfo,
     AIRegisterFilterResult,
@@ -210,6 +216,7 @@ UKRAINIAN_CITIES_REFERENCE = [
     "Лозова", "Новоград-Волинський", "Енергодар", "Нововолинськ", "Горішні Плавні",
     "Ізюм", "Білгород-Дністровський", "Ірпінь", "Буча", "Вишневе", "Васильків",
     "Обухів", "Боярка", "Вишгород", "Фастів", "Трускавець", "Самбір", "Чортків",
+    "Синельникове", "Самар", "Шептицький", "Звягель", "Вараш", "Південноукраїнськ",
 ]
 
 
@@ -270,7 +277,7 @@ class AIExtractor:
             else:
                 # Check branch
                 branch_match = re.search(
-                    r'(?:відділення|відділенні|відд|склад|складі|отделение)\s*(?:нп|№|номер)?\s*(\d{1,5})',
+                    r'(?:відділення|відділенні|відділ\.?|відд\.?|склад|складі|отделение|отд\.?)\s*(?:нп|№|номер)?\s*(\d{1,5})',
                     text,
                     re.IGNORECASE,
                 )
@@ -300,10 +307,16 @@ class AIExtractor:
                     break
             if not parsed.city_name:
                 city_prefix_match = re.search(
-                    r'(?:м\.|місто|смт|с\.)\s*([А-ЯЄІЇҐ][а-яєіїґ\'-]+)', text, re.IGNORECASE
+                    r'(?:(?:м|г|с|смт|пос)\.[\s\-]*|(?:м|г|с|смт|пос)\s+|(?:місто|город|село|селище)\s+)([А-ЯЄІЇҐ][а-яєіїґ\'-]+)',
+                    text,
+                    re.IGNORECASE,
                 )
                 if city_prefix_match:
-                    parsed.city_name = city_prefix_match.group(1)
+                    extracted = clean_city_name(city_prefix_match.group(1))
+                    parsed.city_name = CITY_TOPONYM_ALIASES.get(extracted.lower(), extracted)
+        elif parsed.city_name:
+            extracted = clean_city_name(parsed.city_name)
+            parsed.city_name = CITY_TOPONYM_ALIASES.get(extracted.lower(), extracted)
 
         # 4. Name with initials or full name
         if not parsed.last_name:
@@ -342,9 +355,15 @@ class AIExtractor:
                     ):
                         candidate_last = name_match.group(1)
                         candidate_first = name_match.group(2)
+                        cand_last_lower = candidate_last.lower().rstrip(".:,;")
+                        cand_first_lower = candidate_first.lower().rstrip(".:,;")
+                        warehouse_terms = {"відд", "відділ", "відділення", "отд", "отделение", "склад", "поштомат", "почтомат", "нп"}
                         if (
-                            candidate_last not in UKRAINIAN_CITIES_REFERENCE
+                            cand_last_lower not in warehouse_terms
+                            and cand_first_lower not in warehouse_terms
+                            and candidate_last not in UKRAINIAN_CITIES_REFERENCE
                             and candidate_first not in UKRAINIAN_CITIES_REFERENCE
+                            and not (parsed.city_name and is_city_matched(candidate_last, parsed.city_name))
                         ):
                             parsed.last_name = candidate_last
                             parsed.first_name = candidate_first

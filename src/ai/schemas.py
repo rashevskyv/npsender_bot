@@ -3,7 +3,7 @@
 from typing import Optional, List
 from pydantic import BaseModel, Field, field_validator
 
-from src.utils.text_cleaner import normalize_apostrophes
+from src.utils.text_cleaner import normalize_apostrophes, clean_city_name, CITY_TOPONYM_ALIASES
 
 
 class AIRegisterFilterResult(BaseModel):
@@ -156,8 +156,17 @@ class ParsedRecipientInfo(BaseModel):
         description="Time period filter if requested by user: 'today', 'yesterday', 'yesterday_before_noon', 'all'",
     )
 
+    @field_validator("city_name", mode="before")
+    @classmethod
+    def clean_city_name_field(cls, v):
+        if isinstance(v, str):
+            cleaned = clean_city_name(v)
+            if not cleaned:
+                return None
+            return CITY_TOPONYM_ALIASES.get(cleaned.lower(), cleaned)
+        return v
+
     @field_validator(
-        "city_name",
         "region_name",
         "district_name",
         "street_name",

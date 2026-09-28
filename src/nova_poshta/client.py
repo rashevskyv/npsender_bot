@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any, Tuple
 import httpx
 
 from src.config import Settings
-from src.utils.text_cleaner import normalize_apostrophes, get_city_search_variants
+from src.utils.text_cleaner import normalize_apostrophes, get_city_search_variants, clean_city_name
 from src.nova_poshta.models import (
     CityInfo,
     WarehouseInfo,
@@ -568,7 +568,7 @@ class NovaPoshtaClient:
         if not city_name:
             return None
 
-        norm_city_name = normalize_apostrophes(city_name).strip()
+        norm_city_name = clean_city_name(city_name)
         try:
             res = await self._post(
                 model_name="Address",
@@ -589,7 +589,7 @@ class NovaPoshtaClient:
         return NovaPoshtaClient._city_settlement_cache.get(city_ref)
 
     async def search_city(self, city_name: str) -> List[CityInfo]:
-        """Search for a city by name with intelligent apostrophe normalization and variants."""
+        """Search for a city by name with intelligent apostrophe normalization, phonetic variants, and settlement fallback."""
         variants = get_city_search_variants(city_name)
         if not variants:
             return []
@@ -606,6 +606,37 @@ class NovaPoshtaClient:
                 res = resp
                 chosen_variant = v
                 break
+
+        # Fallback to searchSettlements if getCities returned no data for all variants
+        if not res.get("data"):
+            for v in variants:
+                try:
+                    resp_s = await self._post(
+                        model_name="Address",
+                        called_method="searchSettlements",
+                        method_properties={"CityName": v, "Limit": "10"},
+                    )
+                    s_data = resp_s.get("data", [])
+                    if s_data and s_data[0].get("Addresses"):
+                        cities = []
+                        for addr in s_data[0].get("Addresses", []):
+                            d_city = addr.get("DeliveryCity") or addr.get("Ref")
+                            s_ref = addr.get("Ref")
+                            if d_city and s_ref:
+                                NovaPoshtaClient._city_settlement_cache[d_city] = s_ref
+                            cities.append(
+                                CityInfo(
+                                    Ref=d_city or s_ref or "",
+                                    Description=addr.get("MainDescription") or addr.get("Present", ""),
+                                    AreaDescription=addr.get("Area"),
+                                    RegionsDescription=addr.get("Region"),
+                                    SettlementRef=s_ref,
+                                )
+                            )
+                        if cities:
+                            return cities
+                except Exception as e:
+                    logger.debug(f"Fallback searchSettlements error for '{v}': {e}")
 
         settlement_map: Dict[str, str] = {}
         try:
