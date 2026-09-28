@@ -11,6 +11,7 @@ import httpx
 
 from src.config import Settings
 from src.utils.text_cleaner import normalize_apostrophes, get_city_search_variants, clean_city_name
+from src.utils.city_search import city_search_engine
 from src.nova_poshta.models import (
     CityInfo,
     WarehouseInfo,
@@ -637,6 +638,31 @@ class NovaPoshtaClient:
                             return cities
                 except Exception as e:
                     logger.debug(f"Fallback searchSettlements error for '{v}': {e}")
+
+        # Fallback to universal offline fuzzy database search if API returned no data for all variants
+        if not res.get("data"):
+            try:
+                fuzzy_cities = city_search_engine.search(city_name, limit=10)
+                if fuzzy_cities:
+                    logger.info(
+                        f"Resolved '{city_name}' via offline fuzzy search to: "
+                        f"{[c.description for c in fuzzy_cities[:3]]}"
+                    )
+                    # Resolve SettlementRef for top candidate(s)
+                    for fc in fuzzy_cities[:3]:
+                        if not fc.settlement_ref:
+                            clean_c_desc = clean_city_name(fc.description)
+                            try:
+                                s_ref = await self.get_settlement_ref(fc.ref, clean_c_desc)
+                                if s_ref:
+                                    fc.settlement_ref = s_ref
+                            except Exception as e:
+                                logger.debug(
+                                    f"Failed resolving SettlementRef for fuzzy city {fc.description}: {e}"
+                                )
+                    return fuzzy_cities
+            except Exception as e:
+                logger.warning(f"Offline fuzzy city search failed for '{city_name}': {e}")
 
         settlement_map: Dict[str, str] = {}
         try:

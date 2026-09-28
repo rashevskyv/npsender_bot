@@ -15,6 +15,7 @@ from src.utils.text_cleaner import (
     CITY_TOPONYM_ALIASES,
     is_city_matched,
 )
+from src.utils.city_search import city_search_engine
 from src.ai.schemas import (
     ParsedRecipientInfo,
     AIRegisterFilterResult,
@@ -307,16 +308,51 @@ class AIExtractor:
                     break
             if not parsed.city_name:
                 city_prefix_match = re.search(
-                    r'(?:(?:м|г|с|смт|пос)\.[\s\-]*|(?:м|г|с|смт|пос)\s+|(?:місто|город|село|селище)\s+)([А-ЯЄІЇҐ][а-яєіїґ\'-]+)',
+                    r'\b(?:(?:(?:в|у|до)\s+)?(?:(?:м|г|с|смт|пос)\.[\s\-]*|(?:м|г|с|смт|пос)\s+|(?:місто|город|село|селище)\s+)|(?:в|у|до)\s+)([А-ЯЄІЇҐ][а-яєіїґ\'-]+(?:\s+[А-ЯЄІЇҐ][а-яєіїґ\'-]+)?)',
                     text,
                     re.IGNORECASE,
                 )
                 if city_prefix_match:
                     extracted = clean_city_name(city_prefix_match.group(1))
-                    parsed.city_name = CITY_TOPONYM_ALIASES.get(extracted.lower(), extracted)
+                    canonical = city_search_engine.resolve_canonical_city_name(extracted)
+                    if not canonical and " " in extracted:
+                        canonical = city_search_engine.resolve_canonical_city_name(extracted.split()[0])
+                    parsed.city_name = canonical or CITY_TOPONYM_ALIASES.get(extracted.lower(), extracted)
+
+            if not parsed.city_name:
+                # Scan tokens for settlements across Ukraine if still not identified
+                for line in text.splitlines():
+                    tokens = [
+                        w.strip(" ,;.:\"'()[]{}")
+                        for w in line.split()
+                        if len(w.strip(" ,;.:\"'()[]{}")) >= 3
+                    ]
+                    for tok in tokens:
+                        if tok.isdigit() or any(
+                            term in tok.lower()
+                            for term in [
+                                "нп",
+                                "нова",
+                                "пошта",
+                                "поштомат",
+                                "відділення",
+                                "отделение",
+                                "відд",
+                                "отд",
+                                "№",
+                            ]
+                        ):
+                            continue
+                        canonical = city_search_engine.resolve_canonical_city_name(tok, min_score=0.85)
+                        if canonical:
+                            parsed.city_name = canonical
+                            break
+                    if parsed.city_name:
+                        break
         elif parsed.city_name:
             extracted = clean_city_name(parsed.city_name)
-            parsed.city_name = CITY_TOPONYM_ALIASES.get(extracted.lower(), extracted)
+            canonical = city_search_engine.resolve_canonical_city_name(extracted)
+            parsed.city_name = canonical or CITY_TOPONYM_ALIASES.get(extracted.lower(), extracted)
 
         # 4. Name with initials or full name
         if not parsed.last_name:

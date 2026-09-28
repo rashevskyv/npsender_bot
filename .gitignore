@@ -26,5 +26,5 @@ Thumbs.db
 logs/
 
 # Runtime Data Storage
-data/*.json
-data/
+data/*
+!data/cities_database.json
