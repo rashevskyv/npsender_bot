@@ -1127,7 +1127,7 @@ def register_handlers(
         )
 
         u_custom = storage_manager.get_user_settings(user_id)
-        card_mask = u_custom.sender_card_mask
+        card_mask = eff_settings.sender_card_mask or u_custom.sender_card_mask
 
         reply_markup = get_confirmation_keyboard(
             payer_type=payer_type,
@@ -4081,7 +4081,7 @@ def register_handlers(
         )
 
         u_custom = storage_manager.get_user_settings(user_id)
-        card_mask = u_custom.sender_card_mask
+        card_mask = eff_settings.sender_card_mask or u_custom.sender_card_mask
 
         await status_msg.edit_text(
             card_text,
@@ -4560,7 +4560,7 @@ def register_handlers(
             session["cod_payment_type"] = new_type
 
             u_custom = storage_manager.get_user_settings(user_id)
-            card_mask = u_custom.sender_card_mask
+            card_mask = eff_settings.sender_card_mask or u_custom.sender_card_mask
 
             if new_type == "card" and not card_mask:
                 try:
@@ -4997,6 +4997,15 @@ def register_handlers(
                 payer_ua = "Отримувач" if payer_type == "Recipient" else "Відправник"
                 success_title = " успішно оновлено" if editing_ref else " успішно створено"
                 cod_str = "❌ Немає" if not cod_amount or cod_amount <= 0 else f"{int(cod_amount)} грн"
+                card_notice = ""
+                if cod_amount and cod_amount > 0:
+                    if cod_payment_type == "card":
+                        c_card = card_to_use or eff_settings.sender_card_mask
+                        c_info = f" (💳 на картку `{c_card}`)" if c_card else " (💳 на картку)"
+                        cod_str = f"{int(cod_amount)} грн{c_info}"
+                        card_notice = "💳 *Виплата на картку:* Кошти надійдуть на картку через NovaPay після сплати отримувачем (або за підтвердженням у додатку НП).\n"
+                    else:
+                        cod_str = f"{int(cod_amount)} грн (💵 готівка)"
 
                 cod_limit_line = ""
                 if cod_amount and cod_amount > 0:
@@ -5026,6 +5035,7 @@ def register_handlers(
                     f"💰 *Доставка:* ~{wb_res.cost} грн | *Оцінка:* {int(declared_value)} грн\n"
                     f"💵 *Накладений платіж:* {cod_str}\n"
                     f"{cod_limit_line}"
+                    f"{card_notice}"
                     f"📅 *Очікувана дата доставки:* {wb_res.estimated_delivery_date or 'Не вказано'}\n\n"
                     f"🔗 [Відстежити ТТН на сайті Нової Пошти]({tracking_url})"
                 )

@@ -232,3 +232,30 @@ def test_multi_user_sender_profiles(tmp_path):
     assert len(manager.get_sender_profiles(1001)) == 1
 
 
+def test_effective_settings_preserves_payment_card(tmp_path):
+    """Verify that get_effective_settings correctly retains sender_card_mask and sender_card_ref."""
+    storage_file = os.path.join(tmp_path, "user_settings.json")
+    drafts_file = os.path.join(tmp_path, "user_drafts.json")
+    manager = UserSettingsManager(filepath=storage_file, drafts_filepath=drafts_file)
+
+    global_s = Settings(
+        TELEGRAM_BOT_TOKEN="dummy",
+        NOVA_POSHTA_API_KEY="global_admin_np_key",
+        AI_API_KEY="global_admin_ai_key",
+    )
+
+    user_id = 777
+    manager.update_user_settings(
+        user_id,
+        nova_poshta_api_key="user_np_key",
+        ai_api_key="user_ai_key",
+        sender_card_mask="537541******1234",
+        sender_card_ref="card_uuid_123",
+    )
+
+    eff = manager.get_effective_settings(user_id, global_s)
+    assert eff.sender_card_mask == "537541******1234"
+    assert eff.sender_card_ref == "card_uuid_123"
+
+
+

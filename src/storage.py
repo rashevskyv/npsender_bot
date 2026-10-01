@@ -549,6 +549,16 @@ class UserSettingsManager:
             effective_dict["sender_name"] = (
                 (target_profile.sender_name if target_profile else user_custom.sender_name) or ""
             )
+            effective_dict["sender_card_mask"] = (
+                (target_profile.sender_card_mask if target_profile else user_custom.sender_card_mask)
+                or user_custom.sender_card_mask
+                or global_settings.sender_card_mask
+            )
+            effective_dict["sender_card_ref"] = (
+                (target_profile.sender_card_ref if target_profile else user_custom.sender_card_ref)
+                or user_custom.sender_card_ref
+                or global_settings.sender_card_ref
+            )
         else:
             effective_dict["nova_poshta_api_key"] = ""
             effective_dict["sender_counterparty_ref"] = ""
@@ -557,6 +567,12 @@ class UserSettingsManager:
             effective_dict["sender_address_ref"] = ""
             effective_dict["sender_phone"] = ""
             effective_dict["sender_name"] = ""
+            effective_dict["sender_card_mask"] = (
+                user_custom.sender_card_mask or global_settings.sender_card_mask
+            )
+            effective_dict["sender_card_ref"] = (
+                user_custom.sender_card_ref or global_settings.sender_card_ref
+            )
 
         if user_custom.ai_api_key and user_custom.ai_api_key.strip():
             effective_dict["ai_api_key"] = user_custom.ai_api_key
