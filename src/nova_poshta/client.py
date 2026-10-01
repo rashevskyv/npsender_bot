@@ -124,6 +124,42 @@ def check_is_light_return(doc: Dict[str, Any]) -> bool:
     return False
 
 
+def _extract_doc_year_month(doc: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    """Extract (year, month) tuple from document date fields."""
+    for field in ["DateTime", "CreateTime", "DateCreated", "Date"]:
+        raw = doc.get(field)
+        if raw is None:
+            continue
+        if isinstance(raw, (datetime.datetime, datetime.date)):
+            return (raw.year, raw.month)
+        if not isinstance(raw, (str, int, float)):
+            continue
+        raw_str = str(raw).strip()
+        if not raw_str:
+            continue
+        # ISO format: YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD
+        m_iso = re.search(r"\b(\d{4})[-/.](\d{2})[-/.]\d{2}", raw_str)
+        if m_iso:
+            try:
+                y = int(m_iso.group(1))
+                m = int(m_iso.group(2))
+                if 1900 <= y <= 2100 and 1 <= m <= 12:
+                    return (y, m)
+            except Exception:
+                pass
+        # UA format: DD.MM.YYYY, DD-MM-YYYY, DD/MM/YYYY
+        m_ua = re.search(r"\b\d{2}[-./](\d{2})[-./](\d{4})\b", raw_str)
+        if m_ua:
+            try:
+                m = int(m_ua.group(1))
+                y = int(m_ua.group(2))
+                if 1900 <= y <= 2100 and 1 <= m <= 12:
+                    return (y, m)
+            except Exception:
+                pass
+    return None
+
+
 def _normalize_phone_doc(doc: Dict[str, Any], source: str = "phone") -> Dict[str, Any]:
     """Normalize document item returned by getOutgoingDocumentsByPhone or getIncomingDocumentsByPhone to standard waybill dict format."""
     num = str(doc.get("Number") or doc.get("IntDocNumber", "")).strip()
@@ -1814,6 +1850,10 @@ class NovaPoshtaClient:
                 p_num = str(pdoc.get("Number", "")).strip()
                 if not p_num:
                     continue
+                # Skip phone documents belonging to other months
+                doc_ym = _extract_doc_year_month(pdoc)
+                if doc_ym is not None and doc_ym != (target_year, target_month):
+                    continue
                 norm = _normalize_phone_doc(pdoc, source="outgoing_by_phone")
                 if p_num not in merged_cod_map:
                     merged_cod_map[p_num] = norm
@@ -1862,6 +1902,14 @@ class NovaPoshtaClient:
             state_name = str(doc.get("StateName", doc.get("StateDescription", doc.get("Status", "Створено"))))
             state_name_lower = state_name.lower()
             if any(w in state_name_lower for w in ["видалено", "скасовано", "не знайдено", "не існує"]):
+                continue
+
+            # Strict calendar month and year validation
+            ym = _extract_doc_year_month(doc)
+            if ym is not None:
+                if ym != (target_year, target_month):
+                    continue
+            elif doc.get("_source") == "outgoing_by_phone":
                 continue
 
             # Filter by sender if info is available
@@ -1928,7 +1976,13 @@ class NovaPoshtaClient:
 
 
             doc_num = str(doc.get("IntDocNumber", doc.get("Number", "")))
-            date_created = str(doc.get("DateTime", doc.get("CreateTime", "")))
+            date_created = str(
+                doc.get("DateTime")
+                or doc.get("CreateTime")
+                or doc.get("DateCreated")
+                or doc.get("Date")
+                or ""
+            )
             rec_name = str(
                 doc.get("RecipientContactPerson")
                 or doc.get("RecipientDescription")

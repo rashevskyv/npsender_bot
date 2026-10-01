@@ -511,3 +511,103 @@ async def test_evaluate_cod_limits_editing_ref_no_double_count(mock_settings, tm
         assert res["new_total_cnt"] == 4
         assert res["is_exceeded"] is False
 
+
+@pytest.mark.asyncio
+async def test_monthly_cod_stats_month_boundary_reset(mock_settings):
+    """Verify that on the 1st of a new month, previous month's shipments from getOutgoingDocumentsByPhone are strictly excluded."""
+    client = NovaPoshtaClient(mock_settings)
+
+    phone_result_docs = [
+        # September shipment 1 (14,800 грн)
+        {
+            "Number": "59000000000001",
+            "TrackingStatusName": "Прибув у відділення",
+            "TrackingStatusCode": "7",
+            "DateTime": "2026-09-20 18:30:00",
+            "Cost": "14800",
+            "AfterpaymentOnGoodsCost": "14800.00",
+            "RedeliverySum": "14800",
+            "SenderName": "Тестовий Відправник",
+            "PhoneSender": "380991112233",
+            "RecipientFullName": "Отримувач 1",
+            "PhoneRecipient": "380670000001",
+            "CityRecipientDescription": "Київ",
+            "CargoDescription": "Ноутбук",
+        },
+        # September shipment 2 (10,000 грн)
+        {
+            "Number": "59000000000002",
+            "TrackingStatusName": "Отримано",
+            "TrackingStatusCode": "9",
+            "DateTime": "28.09.2026 14:15:00",
+            "Cost": "10000",
+            "AfterpaymentOnGoodsCost": "10000.00",
+            "RedeliverySum": "10000",
+            "SenderName": "Тестовий Відправник",
+            "PhoneSender": "380991112233",
+            "RecipientFullName": "Отримувач 2",
+            "PhoneRecipient": "380670000002",
+            "CityRecipientDescription": "Львів",
+            "CargoDescription": "Телефон",
+        },
+        # October shipment 3 (1,200 грн) created on Oct 1st
+        {
+            "Number": "59000000000003",
+            "TrackingStatusName": "Прямує до міста",
+            "TrackingStatusCode": "4",
+            "DateTime": "2026-10-01 09:45:00",
+            "Cost": "1200",
+            "AfterpaymentOnGoodsCost": "1200.00",
+            "RedeliverySum": "1200",
+            "SenderName": "Тестовий Відправник",
+            "PhoneSender": "380991112233",
+            "RecipientFullName": "Отримувач 3",
+            "PhoneRecipient": "380670000003",
+            "CityRecipientDescription": "Одеса",
+            "CargoDescription": "Одяг",
+        },
+    ]
+
+    async def mock_post(model_name, called_method, method_properties):
+        if called_method == "getDocumentList":
+            return {"success": True, "data": []}
+        if called_method == "getOutgoingDocumentsByPhone":
+            return {"success": True, "data": [{"result": phone_result_docs}]}
+        return {"success": True, "data": []}
+
+    client._post = mock_post
+
+    # 1. On October 1st: only October documents must be counted (1,200 грн), September documents must NOT leak!
+    oct_stats = await client.get_monthly_cod_stats(year=2026, month=10, user_phone="380991112233")
+    assert oct_stats.year == 2026
+    assert oct_stats.month == 10
+    assert oct_stats.total_count == 1
+    assert oct_stats.total_sum == 1200.0
+    assert len(oct_stats.items) == 1
+    assert oct_stats.items[0].int_doc_number == "59000000000003"
+    assert oct_stats.items[0].cod_amount == 1200.0
+
+    # 2. Querying September: only September documents must be counted (14,800 + 10,000 = 24,800 грн)
+    sep_stats = await client.get_monthly_cod_stats(year=2026, month=9, user_phone="380991112233")
+    assert sep_stats.year == 2026
+    assert sep_stats.month == 9
+    assert sep_stats.total_count == 2
+    assert sep_stats.total_sum == 24800.0
+    assert len(sep_stats.items) == 2
+
+    # 3. If there are NO October documents yet on October 1st: totals must be exactly 0
+    phone_result_docs_only_sep = phone_result_docs[:2]
+    async def mock_post_only_sep(model_name, called_method, method_properties):
+        if called_method == "getDocumentList":
+            return {"success": True, "data": []}
+        if called_method == "getOutgoingDocumentsByPhone":
+            return {"success": True, "data": [{"result": phone_result_docs_only_sep}]}
+        return {"success": True, "data": []}
+
+    client._post = mock_post_only_sep
+    empty_oct_stats = await client.get_monthly_cod_stats(year=2026, month=10, user_phone="380991112233")
+    assert empty_oct_stats.total_count == 0
+    assert empty_oct_stats.total_sum == 0.0
+    assert len(empty_oct_stats.items) == 0
+
+

@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.16
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.18
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -345,6 +345,26 @@
   - [x] Написати юніт-тести в `tests/test_nova_poshta.py` для перевірки успішного retry при `ConnectTimeout`, поведінки при вичерпанні ліміту спроб та коректності кнопок клавіатури.
   - [x] Успішно виконати всі 169 тестів проекту паралельно (`python -m pytest -n auto`).
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`.
+
+- [x] **Крок 36: Збереження банківської картки у `get_effective_settings`, деталізація виплати післяплати NovaPay та пояснення безпекових обмежень API НП (v0.24.17)**
+  - [x] Дослідити причину неможливості отримання карток з особистого кабінету: підтвердити відсутність методу `Counterparty/getPaymentCards` у публічному API v2.0 НП та ізоляцію карткових даних у платіжному шлюзі NovaPay за стандартом PCI DSS.
+  - [x] Виправити критичний дефект у `src/storage.py`: додати прокидання `sender_card_mask` та `sender_card_ref` у формуванні `effective_dict` функції `get_effective_settings`, усунувши скидання збереженої картки в `None`.
+  - [x] Оновити читання маски картки у `toggle_cod_type`, `_build_waybill_preview_message` та `_process_user_accumulated_messages` у `src/bot/handlers.py` з урахуванням активного профілю відправника (`eff_settings.sender_card_mask or u_custom.sender_card_mask`).
+  - [x] Покращити картку створеної ТТН (`success_card`): відображати обраний тип виплати `(💳 на картку ...)` / `(💵 готівка)` та детальне роз'яснення щодо регламенту зарахування післяплати через NovaPay за номером телефону відправника.
+  - [x] Створити новий юніт-тест `test_effective_settings_preserves_payment_card` у `tests/test_storage.py`.
+  - [x] Успішно виконати всі 170 тестів проекту паралельно (`python -m pytest -n auto`).
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`.
+
+- [x] **Крок 37: Суворе розмежування місячних меж у `get_monthly_cod_stats` та гарантоване обнулення лімітів післяплати (COD) на 1-ше число місяця для всіх акаунтів (v0.24.18)**
+  - [x] Дослідити причину витоку вересневих посилок у жовтень: виявити, що ендпоінт `InternetDocument/getOutgoingDocumentsByPhone` ігнорує `DateTimeFrom` / `DateTimeTo`, повертаючи історію за останні 30 днів.
+  - [x] Виявити відсутність валідації дати створення ТТН (`DateTime` / `CreateTime`) у циклі `for doc in data` методу `get_monthly_cod_stats`.
+  - [x] Створити універсальну функцію `_extract_doc_year_month(doc)` для парсингу дат у форматах ISO, українському `DD.MM.YYYY`, з часом або без нього.
+  - [x] Додати відсікання посилок інших місяців у циклі `phone_docs` та сувору валідацію `_extract_doc_year_month(doc) == (target_year, target_month)` у головному циклі `for doc in data`.
+  - [x] Виправити вилучення дати `date_created` для `CODItemInfo` з надійним ланцюжком фолбеків.
+  - [x] Написати юніт-тест `test_monthly_cod_stats_month_boundary_reset` у `tests/test_cod_tracking.py` (ізоляція місяців, повне обнулення на 1 число, перевірка минулих періодів).
+  - [x] Успішно виконати всі 171 тест проекту в паралельному режимі (`python -m pytest -n auto`).
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`.
+
 
 
 
