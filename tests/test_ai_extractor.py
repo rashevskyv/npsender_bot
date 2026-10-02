@@ -504,3 +504,21 @@ def test_heal_does_not_turn_surname_into_lookalike_village():
     )
     assert healed.city_name == "Синельникове"
     assert healed.last_name == "Іваненко"
+
+
+def test_heal_extracts_name_written_after_city_on_same_line():
+    """'Берегомет Данелюк Олександр': the leading city word must not swallow the recipient name."""
+    from src.ai.extractor import AIExtractor
+
+    healed = AIExtractor.heal_parsed_recipient_info(
+        "Берегомет Данелюк Олександр\nвідділення 1",
+        ParsedRecipientInfo(is_recipient_info=False),
+    )
+    assert healed.city_name == "Берегомет"
+    assert (healed.last_name, healed.first_name, healed.middle_name) == ("Данелюк", "Олександр", None)
+
+    healed = AIExtractor.heal_parsed_recipient_info(
+        "Данелюк Олександр Іванович\nБерегомет, відд 1",
+        ParsedRecipientInfo(is_recipient_info=False),
+    )
+    assert (healed.last_name, healed.first_name, healed.middle_name) == ("Данелюк", "Олександр", "Іванович")

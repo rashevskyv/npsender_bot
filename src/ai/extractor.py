@@ -451,8 +451,17 @@ class AIExtractor:
                         r'\b([А-ЯЄІЇҐ][а-яєіїґ\']+)[^\S\r\n]+([А-ЯЄІЇҐ][а-яєіїґ\']+)(?:[^\S\r\n]+([А-ЯЄІЇҐ][а-яєіїґ\']+))?\b',
                         line,
                     ):
-                        candidate_last = name_match.group(1)
-                        candidate_first = name_match.group(2)
+                        words = [w for w in name_match.groups() if w]
+
+                        def _is_city_word(w: str) -> bool:
+                            return w in UKRAINIAN_CITIES_REFERENCE or bool(
+                                parsed.city_name and is_city_matched(w, parsed.city_name)
+                            )
+
+                        # "Берегомет Данелюк Олександр": city written before the name on one line
+                        if len(words) == 3 and _is_city_word(words[0]):
+                            words = words[1:]
+                        candidate_last, candidate_first = words[0], words[1]
                         cand_last_lower = candidate_last.lower().rstrip(".:,;")
                         cand_first_lower = candidate_first.lower().rstrip(".:,;")
                         warehouse_terms = {"відд", "відділ", "відділення", "отд", "отделение", "склад", "поштомат", "почтомат", "нп"}
@@ -465,8 +474,8 @@ class AIExtractor:
                         ):
                             parsed.last_name = candidate_last
                             parsed.first_name = candidate_first
-                            if name_match.group(3):
-                                parsed.middle_name = name_match.group(3)
+                            if len(words) == 3:
+                                parsed.middle_name = words[2]
                             break
                     if parsed.last_name:
                         break

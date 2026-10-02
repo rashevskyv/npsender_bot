@@ -6,6 +6,7 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **🧑 City-Then-Name on One Line in Offline Healing (v0.24.21)**: A line like `Берегомет Данелюк Олександр` now yields both the city and the recipient name (`Данелюк Олександр`) instead of dropping the name.
 - **🧑 Surname vs. Settlement Guard in Offline Healing (v0.24.20)**: When AI is unavailable and no city is given, words in a full-name-like run (e.g. `Залужна Юлія`) only count as a settlement on an exact name match, so a surname is no longer mistaken for a look-alike village (`Залужне`) and the recipient name is kept.
 - **🚀 Performance & AI Token Optimization (v0.24.19)**:
   - **Keep-Alive Connections**: Nova Poshta API and AI provider clients are shared and reuse TCP/TLS connections instead of opening a new one per request.
