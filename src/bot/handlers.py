@@ -322,6 +322,7 @@ async def fetch_user_active_drafts(
     return list(combined_drafts_map.values())
 
 
+WAREHOUSE_LOOKUP_CONCURRENCY = 3
 WAREHOUSE_NUMBER_PATTERN = re.compile(r"№\s*(\d+)")
 UNKNOWN_VALUES = {"", "не вказано", "n/a"}
 
@@ -3893,20 +3894,25 @@ def register_handlers(
                     )
                     return
             else:
-                # Find matching (city, warehouse) pairs across candidate cities
-                matching_candidates = []
-                for c in cities:
-                    try:
-                        wh = await user_np_client.get_warehouse(
-                            city_ref=c.ref,
-                            warehouse_number=parsed_info.warehouse_number,
-                            is_postomat=parsed_info.is_postomat,
-                        )
-                        if wh:
-                            matching_candidates.append((c, wh))
-                    except Exception as e:
-                        logger.warning(f"Error checking warehouse for city {c.description}: {e}")
-                    await asyncio.sleep(0.25)
+                # Find matching (city, warehouse) pairs across candidate cities, a few requests at a time.
+                # ponytail: fixed limit of 3 parallel requests per lookup; _post already backs off on
+                # "too many requests". Make it configurable if NP rate limits tighten.
+                wh_limit = asyncio.Semaphore(WAREHOUSE_LOOKUP_CONCURRENCY)
+
+                async def _find_warehouse(c):
+                    async with wh_limit:
+                        try:
+                            return c, await user_np_client.get_warehouse(
+                                city_ref=c.ref,
+                                warehouse_number=parsed_info.warehouse_number,
+                                is_postomat=parsed_info.is_postomat,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Error checking warehouse for city {c.description}: {e}")
+                            return c, None
+
+                lookups = await asyncio.gather(*(_find_warehouse(c) for c in cities))
+                matching_candidates = [(c, wh) for c, wh in lookups if wh]
 
                 w_type = "Поштомат" if parsed_info.is_postomat else "Відділення"
 

@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.21
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.22
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -388,4 +388,11 @@
   - [x] Відкидати перше слово-місто у групі з 3 слів і брати ПІБ з решти.
   - [x] Додати регресійний тест `test_heal_extracts_name_written_after_city_on_same_line`.
   - [x] Успішно виконати всі 178 тестів проекту паралельно (`python -m pytest -n auto`).
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md`, `README.md`, `audit.md`.
+
+- [x] **Крок 41: Паралельна перевірка відділення в однойменних населених пунктах (v0.24.22)**
+  - [x] Замінити послідовний цикл `get_warehouse` з паузою 0.25 с на `asyncio.gather` з обмеженням `WAREHOUSE_LOOKUP_CONCURRENCY = 3`.
+  - [x] Зберегти порядок кандидатів і стійкість до помилок окремих запитів.
+  - [x] Додати тест `test_warehouse_lookup_across_cities_is_parallel_and_bounded`.
+  - [x] Успішно виконати всі 179 тестів проекту паралельно (`python -m pytest -n auto`).
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md`, `README.md`, `audit.md`.

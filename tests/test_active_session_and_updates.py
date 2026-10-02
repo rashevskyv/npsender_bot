@@ -891,3 +891,55 @@ def test_parsed_info_from_draft_falls_back_for_unstructured_drafts():
     assert parsed_info_from_draft({**base, "city_description": "Київ", "warehouse_description": "🏡 Адресна доставка: вул. Франка, 10"}) is None
     assert parsed_info_from_draft({**base, "city_description": "Київ", "warehouse_description": "Накладна на сайті"}) is None
     assert parsed_info_from_draft({**base, "city_description": "Не вказано", "warehouse_description": "Відділення №5"}) is None
+
+
+@pytest.mark.asyncio
+async def test_warehouse_lookup_across_cities_is_parallel_and_bounded(setup_handlers):
+    """Candidate-city warehouse lookups run concurrently (max 3 at once), keep order and survive errors."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from src.nova_poshta.models import CityInfo, WarehouseInfo
+    from src.ai.schemas import ParsedRecipientInfo
+    from src.bot.handlers import router, clear_user_active_session, WAREHOUSE_LOOKUP_CONCURRENCY
+
+    user_id = 99887799
+    clear_user_active_session(user_id)
+    cities = [CityInfo(Ref=f"c{i}_ref", Description=f"Петрівка{i}", AreaDescription="Київська") for i in range(6)]
+    parsed = ParsedRecipientInfo(
+        is_recipient_info=True, first_name="Тарас", last_name="Шевченко",
+        phone="0971234567", city_name="Петрівка", warehouse_number=1,
+    )
+    mock_msg = MagicMock()
+    mock_msg.from_user.id = user_id
+    mock_msg.chat.id = user_id
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+    mock_msg.answer = AsyncMock(return_value=status_msg)
+    setup_handlers.update_user_settings(user_id, nova_poshta_api_key="test_np_key", ai_api_key="test_ai_key")
+
+    in_flight = 0
+    max_in_flight = 0
+    queried = []
+
+    async def _fake_get_wh(city_ref, warehouse_number, is_postomat=False):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        queried.append(city_ref)
+        await asyncio.sleep(0.02)
+        in_flight -= 1
+        if city_ref == "c2_ref":
+            raise RuntimeError("NP timeout")
+        if city_ref == "c4_ref":
+            return WarehouseInfo(Ref="w4", Description="Відділення №1: вул. Шкільна, 4", Number="1", TypeOfWarehouse="branch", CityRef="c4_ref")
+        return None
+
+    with patch("src.ai.extractor.AIExtractor.parse_text", new_callable=AsyncMock, return_value=parsed), \
+         patch("src.nova_poshta.client.NovaPoshtaClient.search_city", new_callable=AsyncMock, return_value=cities), \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_warehouse", new_callable=AsyncMock, side_effect=_fake_get_wh):
+        await router._handle_combined_text_message(mock_msg, "Шевченко Тарас 0971234567 Петрівка відділення 1", user_id=user_id)
+
+    assert sorted(queried) == sorted(c.ref for c in cities)
+    assert 1 < max_in_flight <= WAREHOUSE_LOOKUP_CONCURRENCY
+    calls = [c[0][0] for c in status_msg.edit_text.call_args_list if c[0]]
+    assert "вул. Шкільна, 4" in calls[-1]
