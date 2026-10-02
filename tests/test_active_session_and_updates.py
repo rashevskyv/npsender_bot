@@ -844,3 +844,50 @@ async def test_followup_message_does_not_cancel_active_processing_task(setup_han
 
 
 
+
+
+def test_parsed_info_from_draft_rebuilds_branch_and_postomat_without_ai():
+    from src.bot.handlers import parsed_info_from_draft
+
+    branch = parsed_info_from_draft({
+        "city_description": "Берегомет (Чернівецька обл.)",
+        "warehouse_description": "Відділення №1: вул. Героїв Майдану, 237",
+        "recipient_name": "Залужна Юлія Петрівна",
+        "recipient_phone": "380971234567",
+        "cargo_description": "Сувенір",
+        "declared_value": 1500.0,
+        "cod_amount": 0.0,
+    })
+    assert branch.city_name == "Берегомет"
+    assert branch.region_name == "Берегомет (Чернівецька обл.)"
+    assert branch.warehouse_number == 1 and branch.is_postomat is False
+    assert (branch.last_name, branch.first_name, branch.middle_name) == ("Залужна", "Юлія", "Петрівна")
+    assert branch.phone == "380971234567"
+    assert branch.cargo_description == "Сувенір"
+    assert branch.declared_value == 1500.0
+    assert branch.cod_amount is None
+    assert branch.is_address_delivery is False
+
+    postomat = parsed_info_from_draft({
+        "city_description": "Одеса",
+        "warehouse_description": 'Поштомат "Нова Пошта" № 24991: просп. Князя Володимира Великого, 75А',
+        "recipient_name": "Мартинюк Є.",
+        "recipient_phone": "Не вказано",
+        "cargo_description": "Посилка",
+        "declared_value": 500.0,
+        "cod_amount": 1200.0,
+    })
+    assert postomat.warehouse_number == 24991 and postomat.is_postomat is True
+    assert postomat.region_name is None
+    assert postomat.phone is None
+    assert postomat.middle_name is None
+    assert postomat.cod_amount == 1200.0
+
+
+def test_parsed_info_from_draft_falls_back_for_unstructured_drafts():
+    from src.bot.handlers import parsed_info_from_draft
+
+    base = {"recipient_name": "Шевченко Тарас", "recipient_phone": "0971234567", "declared_value": 500.0}
+    assert parsed_info_from_draft({**base, "city_description": "Київ", "warehouse_description": "🏡 Адресна доставка: вул. Франка, 10"}) is None
+    assert parsed_info_from_draft({**base, "city_description": "Київ", "warehouse_description": "Накладна на сайті"}) is None
+    assert parsed_info_from_draft({**base, "city_description": "Не вказано", "warehouse_description": "Відділення №5"}) is None

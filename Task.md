@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.18
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.19
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -365,7 +365,13 @@
   - [x] Успішно виконати всі 171 тест проекту в паралельному режимі (`python -m pytest -n auto`).
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md` та `README.md`.
 
-
-
-
-
+- [x] **Крок 38: Оптимізація швидкодії та витрат токенів AI (v0.24.19)**
+  - [x] Замінити створення `httpx.AsyncClient` на кожен запит у `NovaPoshtaClient._post` спільним keep-alive клієнтом `_get_http_client()` (з прив'язкою до event loop).
+  - [x] Кешувати `AsyncOpenAI` клієнти у `_get_openai_client` замість створення нового на кожне повідомлення.
+  - [x] Об'єднати три дубльовані блоки AI-викликів у `AIExtractor._chat_json`; повторювати запит без `response_format` лише при `BadRequestError`.
+  - [x] Компактний JSON у промптах реєстру/дизамбігуації та обрізання полів чернеток до `REGISTER_DRAFT_FIELDS`.
+  - [x] Прискорити `CitySearchEngine.search` (відсікання за верхніми межами схожості, `lru_cache`) з перевіркою ідентичності результатів на 184 запитах; винести healing з event loop (`asyncio.to_thread`).
+  - [x] Редагування чернетки без AI-запиту: `parsed_info_from_draft` у `src/bot/handlers.py` (AI лише для адресної доставки та нерозпізнаних чернеток).
+  - [x] Додати 3 юніт-тести у `tests/test_ai_extractor.py` та 2 у `tests/test_active_session_and_updates.py`, оновити 2 тести retry у `tests/test_nova_poshta.py` під спільний HTTP-клієнт.
+  - [x] Успішно виконати всі 176 тестів проекту паралельно (`python -m pytest -n auto`).
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md`, `README.md`, `audit.md`.

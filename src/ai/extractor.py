@@ -2,10 +2,11 @@
 
 import json
 import logging
+import asyncio
 import datetime
 import re
-from typing import Optional, List, Dict, Any
-from openai import AsyncOpenAI
+from typing import Optional, List, Dict, Any, Tuple
+from openai import AsyncOpenAI, BadRequestError
 
 from src.config import Settings
 from src.utils.text_cleaner import (
@@ -221,6 +222,34 @@ UKRAINIAN_CITIES_REFERENCE = [
 ]
 
 
+# Draft fields the register-filter prompt actually uses (refs, phones, costs are dropped to save tokens).
+REGISTER_DRAFT_FIELDS = (
+    "int_doc_number", "recipient_name", "city_description", "warehouse_description",
+    "cargo_description", "declared_value", "cod_amount", "cod_payment_type",
+    "created_at", "scan_sheet_number",
+)
+
+_openai_clients: Dict[Tuple[str, Optional[str], Any], AsyncOpenAI] = {}
+
+
+def _compact_json(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _get_openai_client(api_key: str, base_url: Optional[str]) -> AsyncOpenAI:
+    """Reuse one AsyncOpenAI client (and its keep-alive connection pool) per credentials and event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    key = (api_key, base_url, loop)
+    client = _openai_clients.get(key)
+    if client is None:
+        # ponytail: unbounded dict, one entry per distinct AI key; add LRU eviction if user count explodes
+        client = _openai_clients[key] = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    return client
+
+
 class AIExtractor:
     """Async AI extractor leveraging OpenAI client with robust entity healing."""
 
@@ -228,11 +257,30 @@ class AIExtractor:
         self.settings = settings
         base_url = settings.ai_base_url if settings.ai_provider == "openai_compatible" else None
 
-        self.client = AsyncOpenAI(
-            api_key=settings.ai_api_key,
-            base_url=base_url,
-        )
+        self.client = _get_openai_client(settings.ai_api_key, base_url)
         self.model = settings.ai_model
+
+    async def _chat_json(self, system_prompt: str, user_content: str) -> Optional[Dict[str, Any]]:
+        """Run one chat completion and parse it as JSON; returns None on empty content.
+
+        Retries without `response_format` only when the provider rejects it (HTTP 400),
+        instead of repeating the whole token-costly request on any error.
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model, messages=messages, response_format={"type": "json_object"}
+            )
+        except BadRequestError as e:
+            logger.warning(f"AI provider rejected response_format=json_object ({e}); retrying without it")
+            response = await self.client.chat.completions.create(model=self.model, messages=messages)
+        content = response.choices[0].message.content
+        if not content:
+            return None
+        return json.loads(content.replace("```json", "").replace("```", "").strip())
 
     @classmethod
     def heal_parsed_recipient_info(
@@ -526,57 +574,23 @@ class AIExtractor:
             )
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                response_format={"type": "json_object"},
-            )
-            content = response.choices[0].message.content
-            if not content:
+            data = await self._chat_json(SYSTEM_PROMPT, user_prompt)
+            if data is None:
                 logger.warning("Empty response from AI model")
-                empty_res = ParsedRecipientInfo(
+                parsed_res = ParsedRecipientInfo(
                     is_recipient_info=False,
                     conversational_response="Я не зміг розпізнати повідомлення. Будь ласка, надішліть реквізити отримувача (ПІБ, телефон, місто, номер відділення) або скористайтеся кнопками нижче.",
                 )
-                return self.heal_parsed_recipient_info(text, empty_res)
-
-            data = json.loads(content)
-            parsed_res = ParsedRecipientInfo(**data)
-            return self.heal_parsed_recipient_info(text, parsed_res)
-        except Exception as e:
-            logger.error(f"Error parsing recipient text with AI: {e}")
-            try:
-                # Fallback without json_object constraint if unsupported
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                )
-                raw_text = response.choices[0].message.content or ""
-                clean_text = raw_text.replace("```json", "").replace("```", "").strip()
-                data = json.loads(clean_text)
+            else:
                 parsed_res = ParsedRecipientInfo(**data)
-                return self.heal_parsed_recipient_info(text, parsed_res)
-            except Exception as fallback_err:
-                logger.error(f"Fallback AI parsing failed: {fallback_err}")
-                empty_res = ParsedRecipientInfo(
-                    is_recipient_info=False,
-                    conversational_response="Привіт! Я AI-бот для автоматичного створення накладних Нової Пошти (ТТН). Надішліть мені ПІБ отримувача, телефон, місто та номер відділення/поштомату!",
-                )
-                healed_fallback = self.heal_parsed_recipient_info(text, empty_res)
-                if (
-                    healed_fallback.phone
-                    or healed_fallback.city_name
-                    or healed_fallback.warehouse_number
-                    or healed_fallback.last_name
-                ):
-                    return healed_fallback
-                return empty_res
+        except Exception as e:
+            logger.error(f"AI parsing failed, falling back to regex healing: {e}")
+            parsed_res = ParsedRecipientInfo(
+                is_recipient_info=False,
+                conversational_response="Привіт! Я AI-бот для автоматичного створення накладних Нової Пошти (ТТН). Надішліть мені ПІБ отримувача, телефон, місто та номер відділення/поштомату!",
+            )
+        # Healing runs the CPU-bound fuzzy city scan; keep it off the event loop so other users aren't blocked.
+        return await asyncio.to_thread(self.heal_parsed_recipient_info, text, parsed_res)
 
     async def filter_drafts_for_register(
         self,
@@ -594,111 +608,88 @@ class AIExtractor:
         }
 
         active_reg_block = (
-            f"Active Register (ScanSheet):\n{json.dumps(active_scansheet, ensure_ascii=False, indent=2)}\n\n"
+            f"Active Register (ScanSheet):\n{_compact_json(active_scansheet)}\n\n"
             if active_scansheet
             else ""
         )
+        prompt_drafts = [{k: d[k] for k in REGISTER_DRAFT_FIELDS if k in d} for d in drafts]
 
         user_content = (
-            f"Context:\n{json.dumps(time_context, ensure_ascii=False, indent=2)}\n\n"
-            f"Active Waybill Drafts ({len(drafts)}):\n{json.dumps(drafts, ensure_ascii=False, indent=2)}\n\n"
+            f"Context:\n{_compact_json(time_context)}\n\n"
+            f"Active Waybill Drafts ({len(drafts)}):\n{_compact_json(prompt_drafts)}\n\n"
             f"{active_reg_block}"
             f"User Request:\n{user_prompt}"
         )
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": REGISTER_FILTER_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-                response_format={"type": "json_object"},
-            )
-            content = response.choices[0].message.content
-            if not content:
+            data = await self._chat_json(REGISTER_FILTER_SYSTEM_PROMPT, user_content)
+            if data is None:
                 logger.warning("Empty response from AI model for register filtering")
                 return AIRegisterFilterResult(action="not_found", selected_doc_numbers=[])
-
-            data = json.loads(content)
             return AIRegisterFilterResult(**data)
         except Exception as e:
-            logger.error(f"Error filtering drafts for register with AI: {e}")
-            try:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": REGISTER_FILTER_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_content},
-                    ],
-                )
-                raw_text = response.choices[0].message.content or ""
-                clean_text = raw_text.replace("```json", "").replace("```", "").strip()
-                data = json.loads(clean_text)
-                return AIRegisterFilterResult(**data)
-            except Exception as fallback_err:
-                logger.error(f"Fallback AI register filtering failed: {fallback_err}")
-                p_lower = user_prompt.lower()
+            logger.error(f"AI register filtering failed, using keyword fallback: {e}")
+            p_lower = user_prompt.lower()
 
-                # Check for delete register intent
-                if any(w in p_lower for w in ["розформу", "скасу"]) and "реєстр" in p_lower:
-                    return AIRegisterFilterResult(
-                        action="delete_register",
-                        summary="Видалення реєстру",
-                        explanation="Автоматичне розпізнавання наміру видалення реєстру",
-                    )
-                if any(w in p_lower for w in ["видал", "знищ"]) and "реєстр" in p_lower and not any(k in p_lower for k in ["накладн", "ттн"]):
-                    return AIRegisterFilterResult(
-                        action="delete_register",
-                        summary="Видалення реєстру",
-                        explanation="Автоматичне розпізнавання наміру видалення реєстру",
-                    )
-
-                # Check for remove waybill intent
-                if any(w in p_lower for w in ["прибери", "видали", "вилучи", "забери", "викинути", "прибрати"]):
-                    # Look for 14-digit TTN
-                    ttn_match = re.search(r"\b(204\d{11})\b", user_prompt)
-                    if ttn_match:
-                        return AIRegisterFilterResult(
-                            action="remove_waybill",
-                            target_doc_number=ttn_match.group(1),
-                            selected_doc_numbers=[ttn_match.group(1)],
-                            summary=f"Вилучення накладної {ttn_match.group(1)} з реєстру",
-                            explanation="Автоматичне розпізнавання номера накладної",
-                        )
-
-                    # Look for ordinal or number like №2, 2
-                    num_match = re.search(r"(?:№|номер|накладн[а-я]*\s*№?)\s*(\d+)", p_lower)
-                    target_idx = None
-                    if num_match:
-                        target_idx = int(num_match.group(1))
-                    elif "перш" in p_lower:
-                        target_idx = 1
-                    elif "друг" in p_lower:
-                        target_idx = 2
-                    elif "трет" in p_lower:
-                        target_idx = 3
-                    elif "четверт" in p_lower:
-                        target_idx = 4
-                    elif "п'ят" in p_lower or "пят" in p_lower:
-                        target_idx = 5
-
-                    if target_idx:
-                        return AIRegisterFilterResult(
-                            action="remove_waybill",
-                            target_item_index=target_idx,
-                            summary=f"Вилучення накладної №{target_idx} з реєстру",
-                            explanation="Автоматичне розпізнавання порядкового номера накладної",
-                        )
-
-                # Programmatic fallback: if user prompt mentions "всі" or "усі" or "реєстр", select all drafts
-                all_nums = [str(d.get("int_doc_number", "")) for d in drafts if d.get("int_doc_number")]
+            # Check for delete register intent
+            if any(w in p_lower for w in ["розформу", "скасу"]) and "реєстр" in p_lower:
                 return AIRegisterFilterResult(
-                    action="create" if all_nums else "not_found",
-                    selected_doc_numbers=all_nums,
-                    summary=f"Усі активні чернетки ({len(all_nums)})" if all_nums else None,
-                    explanation="Автоматичний вибір усіх чернеток через недоступність AI",
+                    action="delete_register",
+                    summary="Видалення реєстру",
+                    explanation="Автоматичне розпізнавання наміру видалення реєстру",
                 )
+            if any(w in p_lower for w in ["видал", "знищ"]) and "реєстр" in p_lower and not any(k in p_lower for k in ["накладн", "ттн"]):
+                return AIRegisterFilterResult(
+                    action="delete_register",
+                    summary="Видалення реєстру",
+                    explanation="Автоматичне розпізнавання наміру видалення реєстру",
+                )
+
+            # Check for remove waybill intent
+            if any(w in p_lower for w in ["прибери", "видали", "вилучи", "забери", "викинути", "прибрати"]):
+                # Look for 14-digit TTN
+                ttn_match = re.search(r"\b(204\d{11})\b", user_prompt)
+                if ttn_match:
+                    return AIRegisterFilterResult(
+                        action="remove_waybill",
+                        target_doc_number=ttn_match.group(1),
+                        selected_doc_numbers=[ttn_match.group(1)],
+                        summary=f"Вилучення накладної {ttn_match.group(1)} з реєстру",
+                        explanation="Автоматичне розпізнавання номера накладної",
+                    )
+
+                # Look for ordinal or number like №2, 2
+                num_match = re.search(r"(?:№|номер|накладн[а-я]*\s*№?)\s*(\d+)", p_lower)
+                target_idx = None
+                if num_match:
+                    target_idx = int(num_match.group(1))
+                elif "перш" in p_lower:
+                    target_idx = 1
+                elif "друг" in p_lower:
+                    target_idx = 2
+                elif "трет" in p_lower:
+                    target_idx = 3
+                elif "четверт" in p_lower:
+                    target_idx = 4
+                elif "п'ят" in p_lower or "пят" in p_lower:
+                    target_idx = 5
+
+                if target_idx:
+                    return AIRegisterFilterResult(
+                        action="remove_waybill",
+                        target_item_index=target_idx,
+                        summary=f"Вилучення накладної №{target_idx} з реєстру",
+                        explanation="Автоматичне розпізнавання порядкового номера накладної",
+                    )
+
+            # Programmatic fallback: if user prompt mentions "всі" or "усі" or "реєстр", select all drafts
+            all_nums = [str(d.get("int_doc_number", "")) for d in drafts if d.get("int_doc_number")]
+            return AIRegisterFilterResult(
+                action="create" if all_nums else "not_found",
+                selected_doc_numbers=all_nums,
+                summary=f"Усі активні чернетки ({len(all_nums)})" if all_nums else None,
+                explanation="Автоматичний вибір усіх чернеток через недоступність AI",
+            )
 
     @classmethod
     def heuristic_disambiguate_candidates(
@@ -829,21 +820,12 @@ class AIExtractor:
         user_content = (
             f"User Text:\n{text}\n\n"
             f"Candidate Locations ({len(candidates)}):\n"
-            f"{json.dumps(formatted_candidates, ensure_ascii=False, indent=2)}"
+            f"{_compact_json(formatted_candidates)}"
         )
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": DISAMBIGUATION_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-                response_format={"type": "json_object"},
-            )
-            content = response.choices[0].message.content
-            if content:
-                data = json.loads(content)
+            data = await self._chat_json(DISAMBIGUATION_SYSTEM_PROMPT, user_content)
+            if data:
                 result = AICandidateDisambiguationResult(**data)
                 if (
                     result.confidence == "high"

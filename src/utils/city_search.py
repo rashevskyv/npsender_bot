@@ -9,6 +9,7 @@ missing apostrophes, and Russian transliterations.
 """
 
 import difflib
+import functools
 import json
 import logging
 import os
@@ -166,6 +167,11 @@ class CitySearchEngine:
 
         return sorted(entries, key=_sort_key, reverse=True)
 
+    @staticmethod
+    def _cannot_matter(upper_bound: float, best_sim: float, prune_floor: float) -> bool:
+        """True if a similarity capped by upper_bound can neither raise best_sim nor qualify the entry."""
+        return upper_bound <= best_sim or upper_bound < prune_floor
+
     def search(
         self,
         query: str,
@@ -184,6 +190,13 @@ class CitySearchEngine:
         Returns:
             List of matching CityInfo objects, sorted by relevance.
         """
+        # Memoized (fuzzy scan is ~100 ms): the same text is re-healed on every follow-up edit.
+        return list(self._search(query, limit, min_score, area_filter))
+
+    @functools.lru_cache(maxsize=4096)
+    def _search(
+        self, query: str, limit: int, min_score: float, area_filter: Optional[str]
+    ) -> List[CityInfo]:
         self._ensure_loaded()
         if not self._entries or not query:
             return []
@@ -235,6 +248,8 @@ class CitySearchEngine:
 
         candidates: List[Tuple[float, CityDatabaseEntry]] = []
         area_norm = area_filter.lower() if area_filter else None
+        # Below this similarity no bonus can lift an entry to min_score (bonuses total 0.18, plus margin).
+        prune_floor = min_score - 0.19
 
         for entry in self._entries:
             # Pre-filter by length: avoid expensive SequenceMatcher on wildly different lengths
@@ -251,13 +266,6 @@ class CitySearchEngine:
 
             best_sim = 0.0
             for q_var in q_variants:
-                # SequenceMatcher similarity ratio
-                s_ua = difflib.SequenceMatcher(None, q_var, b_ua).ratio()
-                s_ru = (
-                    difflib.SequenceMatcher(None, q_var, b_ru).ratio() if b_ru else 0.0
-                )
-                sim = max(s_ua, s_ru)
-
                 # Progressive suffix trimming ("прибирати по літері") for grammatical inflections
                 # (e.g. Синельниковому -> Синельникове, Львові -> Львів, Сумах -> Суми, Тернополі -> Тернопіль)
                 if len(q_var) >= 4 and entry.name_len >= 3:
@@ -265,11 +273,21 @@ class CitySearchEngine:
                         if len(q_var) - trim >= 3:
                             stem = q_var[:-trim]
                             if b_ua.startswith(stem) or (b_ru and b_ru.startswith(stem)):
-                                stem_score = 0.88 - (trim * 0.02)
-                                sim = max(sim, stem_score)
+                                best_sim = max(best_sim, 0.88 - (trim * 0.02))
 
-                if sim > best_sim:
-                    best_sim = sim
+            # SequenceMatcher similarity ratio. ratio() is the hot spot, so skip it whenever its
+            # cheap upper bounds prove it cannot raise best_sim or make the entry qualify.
+            for target in (b_ua, b_ru):
+                if not target:
+                    continue
+                matcher = difflib.SequenceMatcher(None, "", target)
+                for q_var in q_variants:
+                    matcher.set_seq1(q_var)
+                    if self._cannot_matter(matcher.real_quick_ratio(), best_sim, prune_floor):
+                        continue
+                    if self._cannot_matter(matcher.quick_ratio(), best_sim, prune_floor):
+                        continue
+                    best_sim = max(best_sim, matcher.ratio())
 
             # Score bonuses
             bonus = 0.0

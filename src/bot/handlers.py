@@ -322,6 +322,43 @@ async def fetch_user_active_drafts(
     return list(combined_drafts_map.values())
 
 
+WAREHOUSE_NUMBER_PATTERN = re.compile(r"№\s*(\d+)")
+UNKNOWN_VALUES = {"", "не вказано", "n/a"}
+
+
+def parsed_info_from_draft(draft: Dict[str, Any]) -> Optional[ParsedRecipientInfo]:
+    """Rebuild recipient info from a branch/postomat draft's stored fields, without an AI call.
+
+    Returns None when the draft cannot be reconstructed reliably (courier address delivery,
+    missing branch number or city), so the caller can fall back to AI parsing.
+    """
+    wh_desc = str(draft.get("warehouse_description") or "")
+    city_desc = str(draft.get("city_description") or "").strip()
+    wh_match = WAREHOUSE_NUMBER_PATTERN.search(wh_desc)
+    if not wh_match or "адресна доставка" in wh_desc.lower() or city_desc.lower() in UNKNOWN_VALUES:
+        return None
+
+    name_parts = str(draft.get("recipient_name") or "").split()
+    phone = re.sub(r"\D", "", str(draft.get("recipient_phone") or ""))
+    cod_amount = float(draft.get("cod_amount") or 0)
+    city_name = re.sub(r"\s*\([^)]*\)", "", city_desc).strip()
+    return ParsedRecipientInfo(
+        is_recipient_info=True,
+        last_name=name_parts[0] if name_parts else None,
+        first_name=name_parts[1] if len(name_parts) > 1 else None,
+        middle_name=" ".join(name_parts[2:]) or None,
+        phone=phone or None,
+        city_name=city_name,
+        # Full description ("Берегомет (Чернівецька обл.)") narrows same-name settlements on lookup.
+        region_name=city_desc if city_desc != city_name else None,
+        warehouse_number=int(wh_match.group(1)),
+        is_postomat="поштомат" in wh_desc.lower(),
+        cargo_description=draft.get("cargo_description") or None,
+        declared_value=draft.get("declared_value"),
+        cod_amount=cod_amount if cod_amount > 0 else None,
+    )
+
+
 def filter_user_drafts(
     drafts: List[SavedDraft],
     time_period: Optional[str] = None,
@@ -5176,8 +5213,10 @@ def register_handlers(
 
             status_msg = await callback.message.reply("⏳ *Завантаження чернетки накладної для редагування...*", parse_mode="Markdown")
 
-            user_ai_extractor = AIExtractor(eff_settings)
-            parsed_info = await user_ai_extractor.parse_text(dummy_text)
+            # The draft is already structured; only fall back to AI for drafts we can't rebuild.
+            parsed_info = parsed_info_from_draft(target_dict)
+            if parsed_info is None:
+                parsed_info = await AIExtractor(eff_settings).parse_text(dummy_text)
 
             session_id = str(uuid.uuid4())[:8]
             PENDING_SESSIONS[session_id] = {

@@ -407,3 +407,79 @@ async def test_disambiguate_candidates_ai_fallback_to_heuristic(monkeypatch):
     assert chosen == 1
 
 
+
+
+def _mock_ai_response(content):
+    from unittest.mock import MagicMock
+
+    resp = MagicMock()
+    choice = MagicMock()
+    choice.message.content = content
+    resp.choices = [choice]
+    return resp
+
+
+def _make_extractor(monkeypatch, create_mock):
+    from unittest.mock import MagicMock
+    from src.config import Settings
+    from src.ai.extractor import AIExtractor
+
+    settings = Settings(telegram_bot_token="t", nova_poshta_api_key="np", ai_api_key="ai")
+    extractor = AIExtractor(settings)
+    monkeypatch.setattr(extractor, "client", MagicMock(chat=MagicMock(completions=MagicMock(create=create_mock))))
+    return extractor
+
+
+@pytest.mark.asyncio
+async def test_ai_generic_error_is_not_retried(monkeypatch):
+    """A network/runtime error must not trigger a second token-costly AI request."""
+    from unittest.mock import AsyncMock
+
+    create = AsyncMock(side_effect=RuntimeError("timeout"))
+    extractor = _make_extractor(monkeypatch, create)
+    result = await extractor.parse_text("Київ, відділення 12, Шевченко Тарас, 0971234567")
+    assert create.await_count == 1
+    assert result.warehouse_number == 12
+
+
+@pytest.mark.asyncio
+async def test_ai_retries_without_response_format_on_400_and_strips_fences(monkeypatch):
+    import httpx
+    from unittest.mock import AsyncMock
+    from openai import BadRequestError
+
+    bad = BadRequestError(
+        "response_format unsupported",
+        response=httpx.Response(400, request=httpx.Request("POST", "http://ai")),
+        body=None,
+    )
+    create = AsyncMock(side_effect=[bad, _mock_ai_response('```json\n{"action": "list_registers"}\n```')])
+    extractor = _make_extractor(monkeypatch, create)
+    result = await extractor.filter_drafts_for_register("покажи мої реєстри", drafts=[])
+    assert result.action == "list_registers"
+    assert create.await_count == 2
+    assert "response_format" in create.await_args_list[0].kwargs
+    assert "response_format" not in create.await_args_list[1].kwargs
+
+
+@pytest.mark.asyncio
+async def test_register_prompt_is_compact_and_trimmed(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    create = AsyncMock(return_value=_mock_ai_response('{"action": "create", "selected_doc_numbers": ["20451506611097"]}'))
+    extractor = _make_extractor(monkeypatch, create)
+    drafts = [{
+        "int_doc_number": "20451506611097",
+        "ref": "11111111-2222-3333-4444-555555555555",
+        "recipient_phone": "380971234567",
+        "recipient_name": "Залужна Юлія",
+        "cost": 70.0,
+        "scan_sheet_number": None,
+    }]
+    await extractor.filter_drafts_for_register("створи реєстр", drafts=drafts)
+    user_content = create.await_args.kwargs["messages"][1]["content"]
+    assert '"int_doc_number":"20451506611097"' in user_content
+    assert '"scan_sheet_number":null' in user_content
+    assert "11111111-2222" not in user_content
+    assert "380971234567" not in user_content
+    assert "\n  " not in user_content

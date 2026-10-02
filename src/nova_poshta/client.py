@@ -42,6 +42,20 @@ UKRAINIAN_MONTHS = {
     12: "Грудень",
 }
 
+_HTTP_TIMEOUT = httpx.Timeout(timeout=30.0, connect=10.0, read=25.0, write=15.0)
+_http_client: Optional[httpx.AsyncClient] = None
+_http_client_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_http_client() -> httpx.AsyncClient:
+    """Return a shared keep-alive HTTP client (reuses TCP/TLS connections across API calls)."""
+    global _http_client, _http_client_loop
+    loop = asyncio.get_running_loop()
+    # Connections are bound to the event loop, so recreate the client if the loop changed (tests).
+    if _http_client is None or _http_client_loop is not loop or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
+        _http_client_loop = loop
+    return _http_client
 
 
 def _clean_phone(phone_str: Optional[str]) -> str:
@@ -391,30 +405,27 @@ class NovaPoshtaClient:
             "calledMethod": called_method,
             "methodProperties": method_properties,
         }
-        timeout_config = httpx.Timeout(timeout=30.0, connect=10.0, read=25.0, write=15.0)
-
         for attempt in range(max_retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=timeout_config) as client:
-                    response = await client.post(self.api_url, json=payload)
-                    response.raise_for_status()
-                    data = response.json()
-                    if not data.get("success", False):
-                        errors = ", ".join(data.get("errors", []))
-                        warnings = ", ".join(data.get("warnings", []))
-                        err_msg = f"Nova Poshta API Error [{model_name}/{called_method}]: {errors or warnings}"
+                response = await _get_http_client().post(self.api_url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                if not data.get("success", False):
+                    errors = ", ".join(data.get("errors", []))
+                    warnings = ", ".join(data.get("warnings", []))
+                    err_msg = f"Nova Poshta API Error [{model_name}/{called_method}]: {errors or warnings}"
 
-                        if ("many requests" in err_msg.lower() or "too many" in err_msg.lower()) and attempt < max_retries:
-                            backoff = 0.6 * (attempt + 1)
-                            logger.warning(
-                                f"Rate limited by Nova Poshta API ({err_msg}). Retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})..."
-                            )
-                            await asyncio.sleep(backoff)
-                            continue
+                    if ("many requests" in err_msg.lower() or "too many" in err_msg.lower()) and attempt < max_retries:
+                        backoff = 0.6 * (attempt + 1)
+                        logger.warning(
+                            f"Rate limited by Nova Poshta API ({err_msg}). Retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})..."
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
 
-                        logger.error(err_msg)
-                        raise RuntimeError(err_msg)
-                    return data
+                    logger.error(err_msg)
+                    raise RuntimeError(err_msg)
+                return data
             except (httpx.TimeoutException, httpx.NetworkError) as net_err:
                 err_type = type(net_err).__name__
                 err_detail = str(net_err).strip() or err_type

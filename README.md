@@ -6,6 +6,12 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **🚀 Performance & AI Token Optimization (v0.24.19)**:
+  - **Keep-Alive Connections**: Nova Poshta API and AI provider clients are shared and reuse TCP/TLS connections instead of opening a new one per request.
+  - **No Duplicate AI Calls**: A failed AI request is no longer repeated in full; the request is retried without JSON mode only when the provider rejects it (HTTP 400). Other failures go straight to the offline regex healing.
+  - **Leaner Prompts**: Register and disambiguation prompts use compact JSON and send only the draft fields the prompt uses (~40% fewer characters).
+  - **AI-Free Draft Editing**: Editing a branch/postomat draft rebuilds recipient details directly from the saved waybill instead of re-parsing them with AI; AI is used only for courier address drafts.
+  - **Faster Offline City Search**: Fuzzy settlement matching skips exact similarity computation when cheap upper bounds rule a candidate out (identical results, ~2.3× faster), caches repeated queries, and runs off the event loop.
 - **⚡ Nova Poshta API Network Resilience & Intelligent Retry Architecture (v0.24.16)**:
   - **Automatic Exponential Backoff Retry**: Wrapped all raw POST requests (`NovaPoshtaClient._post`) in an automatic retry loop specifically catching `httpx.TimeoutException`, `httpx.ConnectTimeout`, `httpx.ReadTimeout`, and `httpx.NetworkError` up to 3 retries (4 total attempts) with exponential backoff (`1.0s * (attempt + 1)`). Transient connection drops and VPS-to-API latency spikes are resolved transparently in the background without user intervention.
   - **Granular Timeouts**: Configured robust granular timeout settings (`httpx.Timeout(timeout=30.0, connect=10.0, read=25.0, write=15.0)`), giving handshakes adequate time during peak Nova Poshta API traffic.

@@ -788,15 +788,7 @@ async def test_post_retry_on_connect_timeout_success(monkeypatch):
     mock_client_instance = AsyncMock()
     mock_client_instance.post = AsyncMock(side_effect=mock_post_call)
 
-    class MockAsyncClientContext:
-        def __init__(self, *args, **kwargs):
-            pass
-        async def __aenter__(self):
-            return mock_client_instance
-        async def __aexit__(self, exc_type, exc_val, exc_tb):
-            pass
-
-    monkeypatch.setattr(httpx, "AsyncClient", MockAsyncClientContext)
+    monkeypatch.setattr("src.nova_poshta.client._get_http_client", lambda: mock_client_instance)
 
     # Call _post with max_retries=2
     res = await client._post("Counterparty", "getCounterparties", {}, max_retries=2)
@@ -818,15 +810,7 @@ async def test_post_retry_on_timeout_exhausted(monkeypatch):
     mock_client_instance = AsyncMock()
     mock_client_instance.post = AsyncMock(side_effect=httpx.ConnectTimeout(""))
 
-    class MockAsyncClientContext:
-        def __init__(self, *args, **kwargs):
-            pass
-        async def __aenter__(self):
-            return mock_client_instance
-        async def __aexit__(self, exc_type, exc_val, exc_tb):
-            pass
-
-    monkeypatch.setattr(httpx, "AsyncClient", MockAsyncClientContext)
+    monkeypatch.setattr("src.nova_poshta.client._get_http_client", lambda: mock_client_instance)
 
     with pytest.raises(RuntimeError) as exc_info:
         await client._post("Counterparty", "createRecipient", {}, max_retries=1)
