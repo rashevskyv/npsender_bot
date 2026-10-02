@@ -1,4 +1,4 @@
-# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.19
+# Список завдань (Task.md) - Nova Poshta AI Bot v0.24.20
 
 - [x] **Крок 1: Базова структура та конфігурація**
   - [x] Створити структуру каталогу проєкту (`src/`, `tests/`, `docs/`)
@@ -374,4 +374,11 @@
   - [x] Редагування чернетки без AI-запиту: `parsed_info_from_draft` у `src/bot/handlers.py` (AI лише для адресної доставки та нерозпізнаних чернеток).
   - [x] Додати 3 юніт-тести у `tests/test_ai_extractor.py` та 2 у `tests/test_active_session_and_updates.py`, оновити 2 тести retry у `tests/test_nova_poshta.py` під спільний HTTP-клієнт.
   - [x] Успішно виконати всі 176 тестів проекту паралельно (`python -m pytest -n auto`).
+  - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md`, `README.md`, `audit.md`.
+
+- [x] **Крок 39: Прізвище не розпізнається як населений пункт в офлайн-розборі (v0.24.20)**
+  - [x] Знайти причину: нечітке сканування токенів у кроці 3 `heal_parsed_recipient_info` зіставляло «Залужна» із селом «Залужне» і ПІБ губилося.
+  - [x] Для слів у групах, схожих на ПІБ (`NAME_RUN_PATTERN`), приймати лише точний збіг з назвою населеного пункту.
+  - [x] Додати регресійний тест `test_heal_does_not_turn_surname_into_lookalike_village`.
+  - [x] Успішно виконати всі 177 тестів проекту паралельно (`python -m pytest -n auto`).
   - [x] Оновити `Walkthrough.md`, `Task.md`, `plan.md`, `README.md`, `audit.md`.

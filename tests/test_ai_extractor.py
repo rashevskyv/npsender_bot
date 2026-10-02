@@ -483,3 +483,24 @@ async def test_register_prompt_is_compact_and_trimmed(monkeypatch):
     assert "11111111-2222" not in user_content
     assert "380971234567" not in user_content
     assert "\n  " not in user_content
+
+
+def test_heal_does_not_turn_surname_into_lookalike_village():
+    """Without a city, a surname like 'Залужна' must not fuzzy-match village 'Залужне' and drop the name."""
+    from src.ai.extractor import AIExtractor
+
+    healed = AIExtractor.heal_parsed_recipient_info(
+        "Залужна Юлія\n0671234567\nвідділення 5\nсувенір",
+        ParsedRecipientInfo(is_recipient_info=False),
+    )
+    assert healed.city_name is None
+    assert (healed.last_name, healed.first_name) == ("Залужна", "Юлія")
+    assert healed.warehouse_number == 5
+
+    # Fuzzy matching still works for standalone (inflected / lowercase) city words.
+    healed = AIExtractor.heal_parsed_recipient_info(
+        "Синельниковому\nвідділення 2\nІваненко Петро",
+        ParsedRecipientInfo(is_recipient_info=False),
+    )
+    assert healed.city_name == "Синельникове"
+    assert healed.last_name == "Іваненко"

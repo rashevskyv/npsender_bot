@@ -222,6 +222,11 @@ UKRAINIAN_CITIES_REFERENCE = [
 ]
 
 
+# Capitalized word followed by 1-2 capitalized words or initials on the same line (looks like a full name).
+NAME_RUN_PATTERN = re.compile(
+    r"\b[А-ЯЄІЇҐ][а-яєіїґ']+(?:[^\S\r\n]+(?:[А-ЯЄІЇҐ][а-яєіїґ']+|[А-ЯЄІЇҐ]\.(?:[^\S\r\n]*[А-ЯЄІЇҐ]\.)?)){1,2}"
+)
+
 # Draft fields the register-filter prompt actually uses (refs, phones, costs are dropped to save tokens).
 REGISTER_DRAFT_FIELDS = (
     "int_doc_number", "recipient_name", "city_description", "warehouse_description",
@@ -370,6 +375,13 @@ class AIExtractor:
             if not parsed.city_name:
                 # Scan tokens for settlements across Ukraine if still not identified
                 for line in text.splitlines():
+                    # Words of a person-name-like run ("Залужна Юлія", "Мартинюк Є.В.") may only match
+                    # a settlement exactly, never fuzzily (otherwise "Залужна" -> village "Залужне").
+                    name_run_words = {
+                        w.strip(".")
+                        for m in NAME_RUN_PATTERN.finditer(line)
+                        for w in m.group(0).split()
+                    }
                     tokens = [
                         w.strip(" ,;.:\"'()[]{}")
                         for w in line.split()
@@ -392,6 +404,8 @@ class AIExtractor:
                         ):
                             continue
                         canonical = city_search_engine.resolve_canonical_city_name(tok, min_score=0.85)
+                        if canonical and tok in name_run_words and canonical.lower() != tok.lower():
+                            continue
                         if canonical:
                             parsed.city_name = canonical
                             break

@@ -7,7 +7,7 @@ Task (from user): find and implement improvements that cut AI token spend and ra
 Scope: `src/ai/extractor.py`, `src/nova_poshta/client.py`, `src/utils/city_search.py`, their tests, project docs. `src/bot/handlers.py` touched only for the draft-edit path (round 2, user-approved). Untouched: `src/storage.py`, prompts' wording, models.
 
 Verification:
-- `python -m pytest -n auto` → 176 passed (baseline 171 + 5 new).
+- `python -m pytest -n auto` → 177 passed (baseline 171 + 6 new).
 - Fuzzy-search equivalence: 184 searches (46 queries × min_score 0.72/0.75/0.85 + area filter) snapshotted before the change and compared after → 0 diffs; avg 291 ms → 124 ms.
 - Register prompt size on 10 realistic drafts: 5772 → 3421 chars (−41%).
 
@@ -21,18 +21,20 @@ Verification:
 
 - **src/bot/handlers.py `parsed_info_from_draft` (round 2)**: "edit draft" re-parsed a bot-generated text with a full AI call. Now branch/postomat drafts are rebuilt from stored fields; AI is kept as fallback for address delivery, missing branch number, or unknown city. Full city description goes to `region_name`, which the existing lookup filter matches against `CityInfo.description`. Verified by `test_parsed_info_from_draft_rebuilds_branch_and_postomat_without_ai`, `test_parsed_info_from_draft_falls_back_for_unstructured_drafts`.
 
+- **src/ai/extractor.py `NAME_RUN_PATTERN` (round 3, v0.24.20)**: offline healing fuzzy-matched surname "Залужна" to village "Залужне" and then dropped the name. Words inside a name-like run now count as a settlement only on an exact match. Verified by `test_heal_does_not_turn_surname_into_lookalike_village` (fails without the fix) and 177/177 green.
+
 ### 3. Blockers / Handoff Items (Crucial)
 (none)
 
 ### 4. Recommendations & Code Quality Improvements (Optional/Minor)
-- [ ] **src/ai/extractor.py `heal_parsed_recipient_info` step 3 token scan**: pre-existing bug — for "Залужна Юлія\n0671234567\nвідділення 5" (AI unavailable, no city) the surname resolves to village "Залужне" and the name is then dropped. Skip tokens that look like the name line, or run name extraction before the settlement token scan.
+- [ ] **src/ai/extractor.py `heal_parsed_recipient_info` step 4**: pre-existing — "Берегомет Данелюк Олександр" on one line yields the city but no name, because the name regex's first (non-overlapping) match starts with the city word and is rejected. Retry the run without its leading city word.
 - [ ] **src/bot/handlers.py:3861-3872**: warehouse lookups across candidate cities run serially with a 0.25 s sleep each (added in v0.10.1 for rate limits). `asyncio.gather` with a small semaphore would cut latency; `_post` already backs off on "too many requests".
 - [ ] **src/bot/main.py**: shared HTTP clients are not closed on shutdown (harmless for a long-polling process; add `aclose()` in `finally` if clean shutdown logs matter).
 - [ ] Graphify: no `graphify-out/` exists in this repo, so there was no graph to refresh.
 
 ### 5. Next Assignment
 - **Original goal**: reduce AI token usage and latency of the Nova Poshta Telegram bot without changing user-visible behaviour.
-- **Already done**: everything in section 2 (v0.24.19), 176 tests green.
+- **Already done**: everything in section 2 (v0.24.19), 177 tests green.
 - **Required**: nothing blocking. Optional follow-ups are section 4, in listed order.
 - **Do not touch**: prompt wording in `SYSTEM_PROMPT` without an eval set of real messages; `_post` retry semantics.
 - Update `walkthrough.md` and `audit.md`, run `graphify update`, re-submit for review.
