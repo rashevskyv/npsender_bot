@@ -272,13 +272,13 @@ def get_confirmation_keyboard(
     has_multiple_profiles: bool = False,
 ) -> InlineKeyboardMarkup:
     """Build interactive confirmation keyboard with toggle buttons in Ukrainian."""
-    payer_label = "👤 Платник: Отримувач" if payer_type == "Recipient" else "📦 Платник: Відправник"
+    payer_label = "👤 Платник: Отримувач" if payer_type == "Recipient" else "👤 Платник: Відправник"
     cargo_label = "📦 Вантаж: Посилка" if cargo_type == "Parcel" else "📄 Вантаж: Документи"
 
     if not cod_amount or cod_amount <= 0:
         cod_label = "💸 Наложка: ❌ Немає"
     else:
-        cod_label = f"💰 Наложка: {int(cod_amount)} грн 🔄"
+        cod_label = f"💸 Наложка: {int(cod_amount)} грн"
 
     keyboard_rows = [
         [
@@ -299,7 +299,7 @@ def get_confirmation_keyboard(
         ],
         [
             InlineKeyboardButton(
-                text=f"💰 Оцінка: {int(declared_value)} грн 🔄",
+                text=f"🔄 💰 Оцінка: {int(declared_value)} грн",
                 callback_data=WaybillActionCallback(
                     action="cycle_value",
                     session_id=session_id,
@@ -351,7 +351,7 @@ def get_confirmation_keyboard(
     elif has_multiple_profiles and active_profile_name:
         keyboard_rows.append([
             InlineKeyboardButton(
-                text=f"👤 Відправник: {active_profile_name} 🔄",
+                text=f"🔄 👤 Відправник: {active_profile_name}",
                 callback_data=WaybillActionCallback(
                     action="cycle_sender",
                     session_id=session_id,

@@ -7,7 +7,7 @@ Task (from user): find and implement improvements that cut AI token spend and ra
 Scope: `src/ai/extractor.py`, `src/nova_poshta/client.py`, `src/utils/city_search.py`, their tests, project docs. `src/bot/handlers.py` touched only for the draft-edit path (round 2, user-approved). Untouched: `src/storage.py`, prompts' wording, models.
 
 Verification:
-- `python -m pytest -n auto` → 179 passed (baseline 171 + 8 new).
+- `python -m pytest -n auto` → 180 passed (baseline 171 + 9 new).
 - Fuzzy-search equivalence: 184 searches (46 queries × min_score 0.72/0.75/0.85 + area filter) snapshotted before the change and compared after → 0 diffs; avg 291 ms → 124 ms.
 - Register prompt size on 10 realistic drafts: 5772 → 3421 chars (−41%).
 
@@ -24,6 +24,7 @@ Verification:
 - **src/ai/extractor.py `NAME_RUN_PATTERN` (round 3, v0.24.20)**: offline healing fuzzy-matched surname "Залужна" to village "Залужне" and then dropped the name. Words inside a name-like run now count as a settlement only on an exact match. Verified by `test_heal_does_not_turn_surname_into_lookalike_village` (fails without the fix) and 177/177 green.
 - **src/ai/extractor.py name extraction (round 4, v0.24.21)**: "Берегомет Данелюк Олександр" gave the city but no name (the 3-word regex match started with the city and was rejected whole; matches don't overlap). A leading city word in a 3-word run is now dropped and the name taken from the remaining two words. Verified by `test_heal_extracts_name_written_after_city_on_same_line` (fails without the fix) and 178/178 green.
 - **src/bot/handlers.py warehouse lookup (round 5, v0.24.22)**: candidate-city `get_warehouse` calls ran serially with a 0.25 s sleep each. Now `asyncio.gather` bounded by `WAREHOUSE_LOOKUP_CONCURRENCY = 3`; order kept, per-city errors logged and skipped, rate limits left to `_post` backoff. Verified by `test_warehouse_lookup_across_cities_is_parallel_and_bounded` (fails on the old loop) and 179/179 green.
+- **src/ai/extractor.py branch/postomat regex (round 6, v0.24.23)**: `відділення #25` was not recognized (`#` not allowed before the number) and `відділення номер 0964070802` became branch 9640 (no right boundary). Added `#`/`:` and `(?!\d)`. Also `full_name` returns `Не вказано` instead of `N/A`, and confirmation-card toggle buttons use a single leading `🔄`. Verified by `test_heal_branch_number_with_hash_and_phone_not_truncated` (fails without the fix) and 180/180 green.
 
 ### 3. Blockers / Handoff Items (Crucial)
 (none)
@@ -34,7 +35,7 @@ Verification:
 
 ### 5. Next Assignment
 - **Original goal**: reduce AI token usage and latency of the Nova Poshta Telegram bot without changing user-visible behaviour.
-- **Already done**: everything in section 2 (v0.24.19), 179 tests green.
+- **Already done**: everything in section 2 (v0.24.19), 180 tests green.
 - **Required**: nothing blocking. Optional follow-ups are section 4, in listed order.
 - **Do not touch**: prompt wording in `SYSTEM_PROMPT` without an eval set of real messages; `_post` retry semantics.
 - Update `walkthrough.md` and `audit.md`, run `graphify update`, re-submit for review.

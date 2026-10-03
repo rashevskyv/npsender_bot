@@ -522,3 +522,25 @@ def test_heal_extracts_name_written_after_city_on_same_line():
         ParsedRecipientInfo(is_recipient_info=False),
     )
     assert (healed.last_name, healed.first_name, healed.middle_name) == ("Данелюк", "Олександр", "Іванович")
+
+
+def test_heal_branch_number_with_hash_and_phone_not_truncated():
+    """'відділення #25' must yield 25; a phone after 'номер' must not be cut into a branch number."""
+    from src.ai.extractor import AIExtractor
+
+    healed = AIExtractor.heal_parsed_recipient_info(
+        "м. Львів, відділення #25\nКондратюк Микола\n0964070802",
+        ParsedRecipientInfo(is_recipient_info=False),
+    )
+    assert (healed.city_name, healed.warehouse_number, healed.is_postomat) == ("Львів", 25, False)
+
+    healed = AIExtractor.heal_parsed_recipient_info(
+        "Київ, поштомат: #24991", ParsedRecipientInfo(is_recipient_info=False)
+    )
+    assert (healed.warehouse_number, healed.is_postomat) == (24991, True)
+
+    healed = AIExtractor.heal_parsed_recipient_info(
+        "Львів відділення номер 0964070802", ParsedRecipientInfo(is_recipient_info=False)
+    )
+    assert healed.warehouse_number is None
+    assert healed.phone == "0964070802"

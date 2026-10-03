@@ -230,7 +230,7 @@ class ParsedRecipientInfo(BaseModel):
     def full_name(self) -> str:
         """Construct full name string."""
         parts = [p for p in [self.last_name, self.first_name, self.middle_name] if p]
-        return " ".join(parts) if parts else "N/A"
+        return " ".join(parts) if parts else "Не вказано"
 
 
 class AICandidateDisambiguationResult(BaseModel):

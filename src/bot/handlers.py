@@ -3701,7 +3701,7 @@ def register_handlers(
             USER_ACTIVE_SESSIONS[user_id] = session_id
 
             missing_str = "\n".join([f"• {field}" for field in missing_fields])
-            known_name = parsed_info.full_name or "Не вказано"
+            known_name = parsed_info.full_name
             known_phone = parsed_info.phone or "Не вказано"
             known_city = parsed_info.city_name or "Не вказано"
             if is_address_deliv:

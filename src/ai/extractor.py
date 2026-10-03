@@ -321,7 +321,7 @@ class AIExtractor:
         if not parsed.warehouse_number:
             # Check postomat first (Ukrainian / Russian / Surzhyk variations)
             postomat_match = re.search(
-                r'(?:поштомат|почтомат|паштомат|пм|поштоматі|почтоматі)\s*(?:нп|№|номер)?\s*(\d{1,6})',
+                r'(?:поштомат|почтомат|паштомат|пм|поштоматі|почтоматі)[\s:]*(?:нп|№|#|номер)?\s*(\d{1,6})(?!\d)',
                 text,
                 re.IGNORECASE,
             )
@@ -331,7 +331,7 @@ class AIExtractor:
             else:
                 # Check branch
                 branch_match = re.search(
-                    r'(?:відділення|відділенні|відділ\.?|відд\.?|склад|складі|отделение|отд\.?)\s*(?:нп|№|номер)?\s*(\d{1,5})',
+                    r'(?:відділення|відділенні|відділ\.?|відд\.?|склад|складі|отделение|отд\.?)[\s:]*(?:нп|№|#|номер)?\s*(\d{1,5})(?!\d)',
                     text,
                     re.IGNORECASE,
                 )
@@ -340,7 +340,7 @@ class AIExtractor:
                     parsed.is_postomat = False
                 else:
                     # Check generic "НП 24991" or "№ 24991"
-                    generic_match = re.search(r'(?:нп|№|номер)\s*(\d{1,6})', text, re.IGNORECASE)
+                    generic_match = re.search(r'(?:нп|№|номер)\s*(\d{1,6})(?!\d)', text, re.IGNORECASE)
                     if generic_match:
                         num = int(generic_match.group(1))
                         parsed.warehouse_number = num
