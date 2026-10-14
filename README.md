@@ -6,6 +6,8 @@ An intelligent Telegram Bot built with Python (`aiogram 3.x`) and AI (OpenAI API
 
 ## ✨ Features
 
+- **🔁 Move a Waybill Between Registers (v0.24.25)**: When you ask for one register with several TTNs and one of them already sits in another register, the bot pulls it out of the old register first, then creates the new register with all of them. An emptied old register is disbanded; the register card says what was moved.
+- **🧹 Payout Toggle Removed (v0.24.24)**: The `Виплата: На картку / Готівкою` button is gone. Nova Poshta's public API has no field for a payout card (the bot sent `RedeliveryPaymentCard`, which the API silently ignored), and `Counterparty/getPaymentCards` returns `Method not found`. Every COD waybill is a plain `Money` backward delivery; the payout to a card is switched on in the Nova Poshta app. The created-waybill card now says so.
 - **🔢 Branch Numbers Written with `#` (v0.24.23)**: `відділення #25` / `поштомат: #24991` are now recognized in offline healing, a phone after `номер` is no longer cut into a fake branch number, the partial-data card shows `Не вказано` instead of `N/A` for a missing name, and the confirmation card buttons use one consistent `🔄` prefix.
 - **⚡ Parallel Branch Lookup Across Same-Name Settlements (v0.24.22)**: When several settlements match the city name, branch/postomat lookups run in parallel (up to 3 at a time) instead of one by one with a 0.25 s pause, while Nova Poshta rate limits are still handled by the automatic backoff.
 - **🧑 City-Then-Name on One Line in Offline Healing (v0.24.21)**: A line like `Берегомет Данелюк Олександр` now yields both the city and the recipient name (`Данелюк Олександр`) instead of dropping the name.

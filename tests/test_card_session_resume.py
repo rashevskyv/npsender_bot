@@ -186,71 +186,10 @@ async def test_text_message_16_digits_resumes_session(sample_session_setup):
     assert st_mgr.get_user_settings(user_id).sender_card_mask == "537541******5678"
 
 
-@pytest.mark.asyncio
-async def test_toggle_cod_type_adds_user_card_waiting_when_card_missing(sample_session_setup):
-    """Clicking payout to card without saved card triggers card waiting and notifies user."""
-    user_id = sample_session_setup["user_id"]
-    session_id = sample_session_setup["session_id"]
-
-    handler = _get_callback_handler("process_waybill_callback")
-
-    mock_cb = AsyncMock(spec=CallbackQuery)
-    mock_cb.from_user = User(id=user_id, is_bot=False, first_name="User")
-    mock_cb.message = AsyncMock()
-    mock_cb.message.chat.id = 111
-    mock_cb.message.message_id = 222
-    mock_cb.answer = AsyncMock()
-
-    cb_data = WaybillActionCallback(action="toggle_cod_type", session_id=session_id)
-
-    with patch("src.bot.handlers.evaluate_cod_limits", new_callable=AsyncMock) as mock_eval:
-        mock_eval.return_value = {"warn_line": "", "suggested_profile": None}
-        with patch.object(NovaPoshtaClient, "get_payment_cards", new_callable=AsyncMock) as mock_get_cards:
-            mock_get_cards.return_value = []
-            await handler(mock_cb, cb_data)
-
-    assert user_id in USER_CARD_WAITING
-    mock_cb.answer.assert_called_once()
-    assert "Введіть 16 цифр картки" in mock_cb.answer.call_args[0][0]
-    assert PENDING_SESSIONS[session_id]["cod_payment_type"] == "card"
 
 
-@pytest.mark.asyncio
-async def test_create_waybill_populates_redelivery_payment_card(mock_settings):
-    """NovaPoshtaClient.create_waybill includes RedeliveryPaymentCard when cod_payment_type is card."""
-    client = NovaPoshtaClient(mock_settings)
 
-    with patch.object(client, "_post", new_callable=AsyncMock) as mock_post:
-        mock_post.return_value = {
-            "success": True,
-            "data": [{
-                "IntDocNumber": "20450000000000",
-                "Ref": "wb_ref_123",
-                "CostOnSite": 85.0,
-                "EstimatedDeliveryDate": "23.09.2026",
-            }],
-        }
 
-        res = await client.create_waybill(
-            recipient_cp_ref="rcp_1",
-            recipient_contact_ref="cnt_1",
-            recipient_phone="0501234567",
-            recipient_city_ref="city_1",
-            recipient_warehouse_ref="wh_1",
-            cod_amount=2500.0,
-            cod_payment_type="card",
-            payment_card="444111******5537",
-        )
-
-        assert res.int_doc_number == "20450000000000"
-        mock_post.assert_called_once()
-        props = mock_post.call_args[1]["method_properties"]
-
-        assert props.get("RedeliveryPaymentCard") == "444111******5537"
-        bw = props.get("BackwardDeliveryData", [])
-        assert len(bw) == 1
-        assert bw[0].get("RedeliveryPaymentCard") == "444111******5537"
-        assert bw[0].get("CargoType") == "Money"
 
 
 def test_extract_standalone_bank_card():

@@ -316,10 +316,68 @@ async def fetch_user_active_drafts(
                 "is_light_return": is_lr,
                 "scan_sheet_number": live_ss_num,
             }
-        else:
+        elif live_ss_num:
             combined_drafts_map[doc_num]["scan_sheet_number"] = live_ss_num
 
     return list(combined_drafts_map.values())
+
+
+async def detach_drafts_from_old_registers(
+    user_id: int,
+    user_np_client: NovaPoshtaClient,
+    storage_manager: UserSettingsManager,
+    drafts: List[Dict[str, Any]],
+) -> Tuple[List[str], List[str]]:
+    """Remove drafts from the registers they already sit in, so they can join a new register.
+
+    Returns (moved TTN numbers, numbers of old registers left empty and disbanded).
+    """
+    # ponytail: if the new register creation fails after this, the moved TTNs stay in no register
+    by_register: Dict[str, List[Dict[str, Any]]] = {}
+    for d in drafts:
+        ss_num = str(d.get("scan_sheet_number") or "").strip()
+        if ss_num:
+            by_register.setdefault(ss_num, []).append(d)
+    if not by_register:
+        return [], []
+
+    saved_by_number = {s.number: s for s in storage_manager.get_user_scansheets(user_id)}
+    live_by_number = {}
+    try:
+        live_by_number = {s.number: s for s in await user_np_client.get_scan_sheets(days_back=30)}
+    except Exception as e:
+        logger.warning(f"Failed to fetch scan sheet list for old register lookup: {e}")
+
+    moved: List[str] = []
+    disbanded: List[str] = []
+    for ss_num, ss_drafts in by_register.items():
+        saved = saved_by_number.get(ss_num)
+        live = live_by_number.get(ss_num)
+        old_ref = saved.ref if saved else (live.ref if live else None)
+        refs = list({str(x) for d in ss_drafts for x in (d.get("ref"), d.get("int_doc_number")) if x})
+        try:
+            removed = await user_np_client.remove_documents_from_scan_sheet(refs, scan_sheet_ref=old_ref)
+        except Exception as e:
+            logger.warning(f"Failed to remove {refs} from register {ss_num}: {e}")
+            removed = False
+        if not removed:
+            continue
+        nums = [str(d.get("int_doc_number")) for d in ss_drafts]
+        moved.extend(nums)
+        storage_manager.update_drafts_scansheet(user_id, nums, None)
+        if not saved:
+            continue
+        for n in nums:
+            saved = storage_manager.remove_document_from_user_scansheet(user_id, saved.ref, n) or saved
+        # Local record must be empty; the live count (taken before the move) must hold only the moved TTNs.
+        if not saved.document_numbers and (not live or live.count_of_documents <= len(nums)):
+            try:
+                await user_np_client.delete_scan_sheet(saved.ref)
+            except Exception as e:
+                logger.warning(f"Failed to delete empty register {ss_num}: {e}")
+            storage_manager.delete_user_scansheet(user_id, saved.ref)
+            disbanded.append(ss_num)
+    return moved, disbanded
 
 
 WAREHOUSE_LOOKUP_CONCURRENCY = 3
@@ -1121,7 +1179,7 @@ def register_handlers(
         cargo_type = session.get("cargo_type", "Parcel")
         editing_ref = session.get("editing_draft_ref")
 
-        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
 
         eval_res = await evaluate_cod_limits(
             user_id=user_id,
@@ -3164,6 +3222,11 @@ def register_handlers(
                         parse_mode="Markdown",
                     )
                     deleted = await user_np_client.delete_scan_sheet(target_ref)
+                    if deleted:
+                        storage_manager.update_drafts_scansheet(actual_user_id, [
+                            n for s in storage_manager.get_user_scansheets(actual_user_id)
+                            if s.ref == target_ref for n in s.document_numbers
+                        ], None)
                     storage_manager.delete_user_scansheet(actual_user_id, target_ref)
                     USER_LAST_SCANSHEET_CONTEXT.pop(actual_user_id, None)
 
@@ -3285,6 +3348,7 @@ def register_handlers(
                     storage_manager.remove_document_from_user_scansheet(
                         actual_user_id, reg_ref or reg_number, doc_to_remove_num
                     )
+                    storage_manager.update_drafts_scansheet(actual_user_id, [doc_to_remove_num], None)
 
                     # Update context items
                     remaining_items = [it for it in items if it.get("int_doc_number") != doc_to_remove_num]
@@ -3353,6 +3417,9 @@ def register_handlers(
                     return
 
                 selected_nums_set = set(ai_reg_result.selected_doc_numbers)
+                if ai_reg_result.action == "create" and not re.search(r"\b(?:крім|окрім|без)\b", text.lower()):
+                    # TTNs the user typed explicitly always go in, even if the AI skipped an already-registered one
+                    selected_nums_set |= set(re.findall(r"\b20\d{12}\b", text))
                 matched_drafts = [
                     d for d in active_drafts if str(d.get("int_doc_number")) in selected_nums_set
                 ]
@@ -3374,12 +3441,23 @@ def register_handlers(
                     doc_refs = [d["ref"] for d in matched_drafts]
                     doc_nums = [d["int_doc_number"] for d in matched_drafts]
 
+                    # A waybill sits in one register only: pull the selected ones out of their old registers first
+                    moved_nums, disbanded_regs = await detach_drafts_from_old_registers(
+                        actual_user_id, user_np_client, storage_manager, matched_drafts
+                    )
+
                     try:
                         scansheet_info = await user_np_client.create_scan_sheet(doc_refs)
                     except Exception as ss_err:
                         logger.error(f"Error creating scan sheet via Nova Poshta API: {ss_err}", exc_info=True)
+                        moved_note = ""
+                        if moved_nums:
+                            moved_note = f"\n\n⚠️ Накладні {', '.join(moved_nums)} вже вилучено зі старого реєстру"
+                            if disbanded_regs:
+                                moved_note += f", реєстр {', '.join(disbanded_regs)} розформовано"
+                            moved_note += "."
                         await status_msg.edit_text(
-                            f"❌ *Помилка створення реєстру:* {ss_err}",
+                            f"❌ *Помилка створення реєстру:* {ss_err}{moved_note}",
                             parse_mode="Markdown",
                         )
                         return
@@ -3457,6 +3535,12 @@ def register_handlers(
                         if rejected_lines:
                             rejected_block = "\n\n⚠️ *Не додано до цього реєстру:*\n" + "\n".join(rejected_lines)
 
+                    moved_block = ""
+                    if moved_nums:
+                        moved_block = "\n\n🔁 *Перенесено з іншого реєстру:* " + ", ".join(f"`{n}`" for n in moved_nums)
+                        if disbanded_regs:
+                            moved_block += "\n🗑 *Порожній реєстр розформовано:* " + ", ".join(f"`{n}`" for n in disbanded_regs)
+
                     try:
                         await status_msg.delete()
                     except Exception:
@@ -3467,7 +3551,7 @@ def register_handlers(
                         f"📋 *Номер реєстру:* `{scansheet_info.number}`\n"
                         f"📅 *Дата створення:* {scansheet_info.date_created}\n"
                         f"📦 *Кількість накладних:* {scansheet_info.count_of_documents}\n\n"
-                        f"📄 *Накладні у реєстрі:*\n{details_block}{rejected_block}\n\n"
+                        f"📄 *Накладні у реєстрі:*\n{details_block}{rejected_block}{moved_block}\n\n"
                         "📱 *Покажіть цей штрихкод оператору Нової Пошти для сканування!*"
                     )
 
@@ -4090,7 +4174,7 @@ def register_handlers(
         USER_ACTIVE_SESSIONS[user_id] = session_id
         USER_LAST_PARSED_INFO[user_id] = parsed_info
 
-        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
 
         eval_res = await evaluate_cod_limits(
             user_id=user_id,
@@ -4469,7 +4553,7 @@ def register_handlers(
             dest_desc = session.get("destination_description")
             cargo_desc = session["cargo_description"]
             cod_type = session.get("cod_payment_type", "cash")
-            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
 
             eval_res = await _evaluate_cod_limits(
                 user_id=user_id,
@@ -4545,7 +4629,7 @@ def register_handlers(
             cargo_desc = session["cargo_description"]
             declared_val = session["declared_value"]
             cod_type = session.get("cod_payment_type", "cash")
-            cod_str = "❌ Немає" if next_cod <= 0 else f"{int(next_cod)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+            cod_str = "❌ Немає" if next_cod <= 0 else f"{int(next_cod)} грн"
 
             eval_res = await _evaluate_cod_limits(
                 user_id=user_id,
@@ -4598,47 +4682,6 @@ def register_handlers(
             await callback.answer(f"Накладений платіж: {msg_str}")
             return
 
-        if action == "toggle_cod_type":
-            new_type = "card" if session.get("cod_payment_type", "cash") == "cash" else "cash"
-            session["cod_payment_type"] = new_type
-
-            u_custom = storage_manager.get_user_settings(user_id)
-            card_mask = eff_settings.sender_card_mask or u_custom.sender_card_mask
-
-            if new_type == "card" and not card_mask:
-                try:
-                    cards = await user_np_client.get_payment_cards(eff_settings.sender_counterparty_ref)
-                    if cards:
-                        first_card = cards[0]
-                        c_num = first_card.get("Number") or first_card.get("Description") or ""
-                        c_ref = first_card.get("Ref") or ""
-                        if c_num:
-                            card_mask = c_num
-                            storage_manager.update_user_settings(user_id, sender_card_mask=c_num, sender_card_ref=c_ref)
-                            await callback.answer(f"💳 Автоматично підключено картку з кабінету: {c_num}")
-                except Exception as e:
-                    logger.debug(f"Could not auto-fetch cards from NP: {e}")
-
-            if new_type == "card" and not card_mask:
-                USER_CARD_WAITING.add(user_id)
-                await callback.answer(
-                    "⚠️ Введіть 16 цифр картки або команду /set_card НомерКартки",
-                    show_alert=True,
-                )
-            else:
-                type_ua = "На картку" if new_type == "card" else "Готівкою у відділенні"
-                await callback.answer(f"Виплату змінено на: {type_ua}")
-
-            session["chat_id"] = callback.message.chat.id
-            session["message_id"] = callback.message.message_id
-            card_text, reply_markup = await _build_waybill_preview_message(session_id, user_id)
-            await callback.message.edit_text(
-                card_text,
-                parse_mode="Markdown",
-                reply_markup=reply_markup,
-            )
-            return
-
         if action == "switch_profile":
             eval_res = await _evaluate_cod_limits(
                 user_id=user_id,
@@ -4673,7 +4716,7 @@ def register_handlers(
             declared_val = session["declared_value"]
             cod_val = session.get("cod_amount", 0.0)
             cod_type = session.get("cod_payment_type", "cash")
-            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
 
             eval_res2 = await _evaluate_cod_limits(
                 user_id=user_id,
@@ -4748,7 +4791,7 @@ def register_handlers(
             declared_val = session["declared_value"]
             cod_val = session.get("cod_amount", 0.0)
             cod_type = session.get("cod_payment_type", "cash")
-            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
 
             eval_res = await _evaluate_cod_limits(
                 user_id=user_id,
@@ -4811,7 +4854,7 @@ def register_handlers(
             declared_val = session["declared_value"]
             cod_val = session.get("cod_amount", 0.0)
             cod_type = session.get("cod_payment_type", "cash")
-            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
 
             eval_res = await _evaluate_cod_limits(
                 user_id=user_id,
@@ -4995,7 +5038,6 @@ def register_handlers(
                     )
                     storage_manager.delete_user_draft(user_id, editing_ref)
                 else:
-                    card_to_use = eff_settings.sender_card_ref or eff_settings.sender_card_mask
                     wb_res = await user_np_client.create_waybill(
                         recipient_cp_ref=recipient_res.counterparty_ref,
                         recipient_contact_ref=recipient_res.contact_person_ref,
@@ -5008,8 +5050,6 @@ def register_handlers(
                         weight=eff_settings.default_weight,
                         declared_value=declared_value,
                         cod_amount=cod_amount,
-                        cod_payment_type=cod_payment_type,
-                        payment_card=card_to_use if cod_payment_type == "card" else None,
                         service_type=service_type,
                     )
 
@@ -5042,13 +5082,7 @@ def register_handlers(
                 cod_str = "❌ Немає" if not cod_amount or cod_amount <= 0 else f"{int(cod_amount)} грн"
                 card_notice = ""
                 if cod_amount and cod_amount > 0:
-                    if cod_payment_type == "card":
-                        c_card = card_to_use or eff_settings.sender_card_mask
-                        c_info = f" (💳 на картку `{c_card}`)" if c_card else " (💳 на картку)"
-                        cod_str = f"{int(cod_amount)} грн{c_info}"
-                        card_notice = "💳 *Виплата на картку:* Кошти надійдуть на картку через NovaPay після сплати отримувачем (або за підтвердженням у додатку НП).\n"
-                    else:
-                        cod_str = f"{int(cod_amount)} грн (💵 готівка)"
+                    card_notice = "💳 Виплату на картку вмикайте в додатку Нової Пошти.\n"
 
                 cod_limit_line = ""
                 if cod_amount and cod_amount > 0:
@@ -5354,7 +5388,7 @@ def register_handlers(
         session["parsed_info"] = parsed_info
         USER_LAST_PARSED_INFO[user_id] = parsed_info
 
-        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
 
         card_text = (
             "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
@@ -5448,7 +5482,7 @@ def register_handlers(
         session["parsed_info"] = parsed_info
         USER_LAST_PARSED_INFO[user_id] = parsed_info
 
-        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн ({'Картка' if cod_type == 'card' else 'Готівка'})"
+        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
 
         card_text = (
             "📋 *Розпарсені дані отримувача для перевірки:*\n\n"

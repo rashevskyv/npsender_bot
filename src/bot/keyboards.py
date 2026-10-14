@@ -255,7 +255,7 @@ def get_profile_delete_keyboard(
 class WaybillActionCallback(CallbackData, prefix="wb"):
     """Callback data schema for waybill actions."""
 
-    action: str  # "confirm", "force_confirm", "cancel", "toggle_payer", "toggle_cargo", "cycle_value", "cycle_cod", "toggle_cod_type", "back_to_card", "switch_profile", "cycle_sender"
+    action: str  # "confirm", "force_confirm", "cancel", "toggle_payer", "toggle_cargo", "cycle_value", "cycle_cod", "back_to_card", "switch_profile", "cycle_sender"
     session_id: str  # unique ID or state reference
 
 
@@ -314,26 +314,6 @@ def get_confirmation_keyboard(
             ),
         ],
     ]
-
-    # Add COD payout type toggle row when COD amount > 0
-    if cod_amount and cod_amount > 0:
-        if cod_payment_type == "card":
-            card_info = f" ({sender_card_mask})" if sender_card_mask else " (⚠️ Вказати картку)"
-            payout_label = f"🔄 💳 Виплата: На картку{card_info}"
-        else:
-            payout_label = "🔄 💵 Виплата: Готівкою у відділенні"
-
-        keyboard_rows.append(
-            [
-                InlineKeyboardButton(
-                    text=payout_label,
-                    callback_data=WaybillActionCallback(
-                        action="toggle_cod_type",
-                        session_id=session_id,
-                    ).pack(),
-                )
-            ]
-        )
 
     # If recommendation exists to switch user with more limit
     if suggested_profile:

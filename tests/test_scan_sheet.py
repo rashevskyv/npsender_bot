@@ -1117,3 +1117,74 @@ async def test_fetch_user_active_drafts_propagates_scan_sheet_number(tmp_path):
 
 
 
+
+
+@pytest.mark.asyncio
+async def test_create_register_moves_waybill_out_of_old_register(tmp_path):
+    import os
+    from src.bot.handlers import register_handlers, router, USER_LAST_SCANSHEET_CONTEXT
+    from src.storage import UserSettingsManager, SavedDraft, SavedScanSheet
+    from src.config import Settings
+    from src.ai.schemas import ParsedRecipientInfo, AIRegisterFilterResult
+    from src.nova_poshta.models import ScanSheetInfo
+    from unittest.mock import patch, AsyncMock, MagicMock
+
+    USER_LAST_SCANSHEET_CONTEXT.clear()
+    manager = UserSettingsManager(
+        filepath=os.path.join(tmp_path, "s.json"),
+        drafts_filepath=os.path.join(tmp_path, "d.json"),
+        scansheets_filepath=os.path.join(tmp_path, "ss.json"),
+    )
+    manager.update_user_settings(777, nova_poshta_api_key="np", ai_api_key="ai")
+    base = dict(recipient_phone="380990000000", city_description="Київ", warehouse_description="Відділення №1",
+                payer_type="Recipient", cargo_description="Пристрій", declared_value=500.0, cost=80.0,
+                created_at="2026-10-14 18:00:00")
+    manager.add_user_draft(777, SavedDraft(ref="ref-new", int_doc_number="20451561069727", recipient_name="А", **base))
+    manager.add_user_draft(777, SavedDraft(ref="ref-old", int_doc_number="20451559497088", recipient_name="Б",
+                                           scan_sheet_number="105-81235079", **base))
+    manager.add_user_scansheet(777, SavedScanSheet(ref="old-reg-ref", number="105-81235079",
+                                                   date_created="2026-10-14", count_of_documents=1,
+                                                   document_numbers=["20451559497088"]))
+    register_handlers(Settings(TELEGRAM_BOT_TOKEN="dummy", SENDER_REF="s", SENDER_CONTACT_REF="c",
+                               SENDER_PHONE="380991234567"), MagicMock(), MagicMock(), manager)
+
+    calls = []
+    with patch("src.ai.extractor.AIExtractor.parse_text", new_callable=AsyncMock) as mock_parse, \
+         patch("src.ai.extractor.AIExtractor.filter_drafts_for_register", new_callable=AsyncMock) as mock_filter, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.create_scan_sheet", new_callable=AsyncMock) as mock_create, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.remove_documents_from_scan_sheet", new_callable=AsyncMock) as mock_remove, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.delete_scan_sheet", new_callable=AsyncMock) as mock_delete, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_scan_sheets", new_callable=AsyncMock, return_value=[
+             ScanSheetInfo(Ref="old-reg-ref", Number="105-81235079", DateTime="", CountOfDocuments=1)]), \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_internet_document_list", new_callable=AsyncMock, return_value=[]), \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_documents_status", new_callable=AsyncMock, return_value={}):
+        mock_parse.return_value = ParsedRecipientInfo(is_recipient_info=False, is_register_intent=True,
+                                                      register_action="create")
+        # The AI dropped the already-registered waybill; the explicit TTN in the text must bring it back.
+        mock_filter.return_value = AIRegisterFilterResult(action="create", selected_doc_numbers=["20451561069727"])
+        mock_remove.side_effect = lambda *a, **k: calls.append("remove") or True
+        mock_create.side_effect = lambda refs: calls.append("create") or ScanSheetInfo(
+            Ref="new-reg-ref", Number="105-81272253", DateTime="2026-10-14 19:03:58",
+            CountOfDocuments=2, success_documents=list(refs))
+        mock_delete.return_value = True
+
+        msg = MagicMock()
+        msg.from_user.id = 777
+        status = MagicMock(edit_text=AsyncMock(), delete=AsyncMock())
+        msg.answer = AsyncMock(return_value=status)
+        msg.answer_photo = AsyncMock()
+
+        await router._handle_combined_text_message(
+            msg, "20451561069727 та 20451559497088 постав в один реєстр", user_id=777)
+
+    assert calls == ["remove", "create"]
+    assert mock_remove.call_args.kwargs["scan_sheet_ref"] == "old-reg-ref"
+    assert set(mock_create.call_args.args[0]) == {"ref-new", "ref-old"}
+    mock_delete.assert_awaited_once_with("old-reg-ref")
+    sheets = manager.get_user_scansheets(777)
+    assert [s.number for s in sheets] == ["105-81272253"]
+    assert set(sheets[0].document_numbers) == {"20451561069727", "20451559497088"}
+    caption = msg.answer_photo.call_args.kwargs["caption"]
+    assert "Перенесено з іншого реєстру" in caption and "105-81235079" in caption
+    # Both drafts now point at the new register only.
+    assert {d.scan_sheet_number for d in manager.get_user_drafts(777)} == {"105-81272253"}

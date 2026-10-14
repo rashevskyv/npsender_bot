@@ -255,8 +255,8 @@ async def test_city_selection_and_follow_up_update_retains_chosen_city(setup_han
 
 
 @pytest.mark.asyncio
-async def test_waybill_action_toggle_cod_type_and_cycles_no_unbound_local_error():
-    """Regression test: clicking toggle_cod_type, cycle_cod, cycle_value must not raise UnboundLocalError."""
+async def test_waybill_action_cycles_no_unbound_local_error():
+    """Regression test: clicking cycle_cod, cycle_value must not raise UnboundLocalError."""
     from src.nova_poshta.models import CODMonthlyStats
 
     user_id = 999
@@ -306,17 +306,6 @@ async def test_waybill_action_toggle_cod_type_and_cycles_no_unbound_local_error(
     mock_cb.message.edit_text = AsyncMock()
     mock_cb.message.edit_reply_markup = AsyncMock()
     mock_cb.answer = AsyncMock()
-
-    # 1. Test toggle_cod_type (switch from cash to card)
-    cb_toggle = WaybillActionCallback(action="toggle_cod_type", session_id=session_id)
-    with patch("src.nova_poshta.client.NovaPoshtaClient.get_monthly_cod_stats", new_callable=AsyncMock) as mock_stats:
-        mock_stats.return_value = CODMonthlyStats(
-            year=2026, month=9, month_name="Вересень 2026", from_date="01.09.2026", to_date="30.09.2026",
-            total_count=1, total_sum=1000.0, items=[]
-        )
-        await waybill_callback_handler(mock_cb, cb_toggle)
-        assert PENDING_SESSIONS[session_id]["cod_payment_type"] == "card"
-        mock_cb.message.edit_text.assert_called()
 
     # 2. Test cycle_cod
     cb_cod = WaybillActionCallback(action="cycle_cod", session_id=session_id)

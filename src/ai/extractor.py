@@ -138,8 +138,8 @@ Your task:
 
 3. If action is "create":
    Select the matching waybills (`selected_doc_numbers`):
-   • Explicit TTN numbers: If user mentions one or more specific TTN numbers (e.g. "20451506611097"), match those exact drafts from `drafts`.
-   • Unregistered drafts filter: A waybill cannot belong to two registers. For general requests ("з усіх чернеток", "з усіх накладних", "створи реєстр", "за сьогодні", "всі чернетки"), select ONLY drafts where `scan_sheet_number` is null/empty/None. Do NOT include drafts that are already in another register.
+   • Explicit TTN numbers: If user mentions one or more specific TTN numbers (e.g. "20451506611097"), match those exact drafts from `drafts`, EVEN IF their `scan_sheet_number` is set (the bot moves them out of the old register).
+   • Unregistered drafts filter: A waybill cannot belong to two registers. For general requests without explicit TTN numbers ("з усіх чернеток", "з усіх накладних", "створи реєстр", "за сьогодні", "всі чернетки"), select ONLY drafts where `scan_sheet_number` is null/empty/None. Do NOT include drafts that are already in another register.
    • All drafts: If user requests all drafts ("з усіх моїх чернеток", "з усіх накладних", "з усіх", "всі чернетки", "створи реєстр") without restricting filters -> return all un-registered `int_doc_number` values present in `drafts`.
    • Date / Time filters: Use `current_timestamp` to evaluate relative time phrases:
      - "сьогодні" (today) -> drafts where `created_at` date matches current date.
@@ -706,7 +706,10 @@ class AIExtractor:
                     )
 
             # Programmatic fallback: if user prompt mentions "всі" or "усі" or "реєстр", select all drafts
-            all_nums = [str(d.get("int_doc_number", "")) for d in drafts if d.get("int_doc_number")]
+            all_nums = [
+                str(d.get("int_doc_number", "")) for d in drafts
+                if d.get("int_doc_number") and not d.get("scan_sheet_number")
+            ]
             return AIRegisterFilterResult(
                 action="create" if all_nums else "not_found",
                 selected_doc_numbers=all_nums,
