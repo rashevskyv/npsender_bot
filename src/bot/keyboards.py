@@ -9,7 +9,7 @@ from aiogram.filters.callback_data import CallbackData
 
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
-    """Build persistent main reply keyboard with buttons."""
+    """Build the main reply keyboard. Not is_persistent: Telegram Desktop cannot collapse a persistent one."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -34,7 +34,6 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
             ],
         ],
         resize_keyboard=True,
-        is_persistent=True,
     )
 
 

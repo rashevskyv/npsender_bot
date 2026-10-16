@@ -37,7 +37,7 @@ async def main():
     register_handlers(settings, ai_extractor, np_client, storage_manager)
     dp.include_router(router)
 
-    # Drop the "Меню" button so the persistent reply keyboard shows on desktop as on mobile
+    # Drop the "Меню" button so the reply keyboard toggle shows on desktop as on mobile
     await setup_bot_commands(bot)
 
     logger.info("Starting Bot Long Polling...")
@@ -48,7 +48,7 @@ async def main():
 
 
 async def setup_bot_commands(bot: Bot) -> None:
-    """Remove the "Меню" command button: the persistent reply keyboard is the only menu, on desktop too.
+    """Remove the "Меню" command button: the reply keyboard (with its show/hide toggle) is the only menu.
 
     Telegram shows the "Меню" button while the bot has commands, so the list is cleared.
     Commands still work when typed.

@@ -205,7 +205,7 @@ async def test_get_loyalty_info(mock_settings):
 
 @pytest.mark.asyncio
 async def test_setup_bot_commands():
-    """The "Меню" button is gone: commands cleared, default menu button, the reply keyboard stays persistent."""
+    """The "Меню" button is gone: commands cleared, default menu button, the reply keyboard stays collapsible."""
     from aiogram.types import MenuButtonDefault
     from src.bot.keyboards import get_main_reply_keyboard
 
@@ -214,7 +214,8 @@ async def test_setup_bot_commands():
     mock_bot.delete_my_commands.assert_called_once()
     mock_bot.set_my_commands.assert_not_called()
     assert isinstance(mock_bot.set_chat_menu_button.call_args.kwargs["menu_button"], MenuButtonDefault)
-    assert get_main_reply_keyboard().model_dump(exclude_none=True)["is_persistent"] is True
+    # A persistent keyboard has no hide toggle on Telegram Desktop
+    assert "is_persistent" not in get_main_reply_keyboard().model_dump(exclude_none=True)
 
 
 @pytest.mark.asyncio
