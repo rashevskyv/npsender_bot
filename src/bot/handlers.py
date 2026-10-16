@@ -319,7 +319,8 @@ async def fetch_user_active_drafts(
         elif live_ss_num:
             combined_drafts_map[doc_num]["scan_sheet_number"] = live_ss_num
 
-    return list(combined_drafts_map.values())
+    # Newest first: NP numbers grow over time, and local created_at holds only the date
+    return sorted(combined_drafts_map.values(), key=lambda d: str(d.get("int_doc_number") or ""), reverse=True)
 
 
 async def detach_drafts_from_old_registers(
@@ -378,6 +379,54 @@ async def detach_drafts_from_old_registers(
             storage_manager.delete_user_scansheet(user_id, saved.ref)
             disbanded.append(ss_num)
     return moved, disbanded
+
+
+async def build_register_context(
+    user_np_client: NovaPoshtaClient,
+    sheet: SavedScanSheet,
+    active_drafts: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build the register context (number, ref, items) for AI prompts and follow-up actions.
+
+    Live documents from NP win over the locally stored list.
+    """
+    doc_refs_map = {}
+    live_doc_numbers = []
+    if sheet.ref:
+        try:
+            for ad in await user_np_client.get_scan_sheet_documents(sheet.ref):
+                n = str(ad.get("Number", "")).strip()
+                r = str(ad.get("Ref", "")).strip()
+                if n:
+                    live_doc_numbers.append(n)
+                    if r:
+                        doc_refs_map[n] = r
+        except Exception as e:
+            logger.warning(f"Failed to fetch live docs for scansheet {sheet.ref}: {e}")
+
+    eff_doc_numbers = live_doc_numbers if live_doc_numbers else sheet.document_numbers
+    drafts_by_num = {str(d.get("int_doc_number")): d for d in active_drafts}
+    items = []
+    for idx, num in enumerate(eff_doc_numbers, 1):
+        d_info = drafts_by_num.get(num, {})
+        items.append({
+            "index": idx,
+            "int_doc_number": num,
+            "ref": doc_refs_map.get(num) or d_info.get("ref", num),
+            "recipient_name": d_info.get("recipient_name", ""),
+            "city_description": d_info.get("city_description", ""),
+            "warehouse_description": d_info.get("warehouse_description", ""),
+            "cargo_description": d_info.get("cargo_description", ""),
+            "declared_value": d_info.get("declared_value", 500),
+            "cod_amount": d_info.get("cod_amount", 0),
+        })
+    return {
+        "ref": sheet.ref,
+        "number": sheet.number,
+        "date_created": sheet.date_created,
+        "count_of_documents": len(items),
+        "items": items,
+    }
 
 
 WAREHOUSE_LOOKUP_CONCURRENCY = 3
@@ -1159,6 +1208,28 @@ def register_handlers(
 ):
     """Factory to inject dependencies into router handlers."""
 
+    async def _delete_waybill_any_profile(user_id: int, ref: str) -> bool:
+        """Delete a waybill with the sender profile that owns it: the active one first, then the others.
+
+        NP rejects a delete made with another sender's key, so a waybill created before a sender switch
+        needs its owner's key. Register errors are re-raised: no other profile can fix those.
+        """
+        active_p = storage_manager.get_active_profile(user_id)
+        profile_ids = [None] + [
+            p.id for p in storage_manager.get_sender_profiles(user_id) if not active_p or p.id != active_p.id
+        ]
+        for pid in profile_ids:
+            client = NovaPoshtaClient(storage_manager.get_effective_settings(user_id, settings, profile_id=pid))
+            try:
+                if await client.delete_waybill(ref):
+                    return True
+            except Exception as e:
+                err_msg = str(e)
+                if "019fe6ed-54bf-7d7c-9bed-c30d0b31d983" in err_msg or "ScanSheet" in err_msg or "реєстр" in err_msg.lower():
+                    raise
+                logger.warning(f"Delete of waybill {ref} with profile {pid or 'active'} failed: {e}")
+        return False
+
     async def _build_waybill_preview_message(
         session_id: str,
         user_id: int,
@@ -1212,6 +1283,7 @@ def register_handlers(
                     f"🔁 *Перемкнуто на відправника:* {active_p.name}\n"
                     f"📞 *Телефон відправника:* `{sender_phone}`\n"
                     + (f"🏤 *Відправка з:* {departure}\n" if departure else "")
+                    + ("ℹ️ Стару ТТН буде видалено, нову створено від цього відправника.\n" if editing_ref else "")
                     + "\n"
                 )
         departure_warn = (
@@ -3153,48 +3225,7 @@ def register_handlers(
                     storage_manager.cleanup_invalid_scansheets(actual_user_id)
                     user_saved_sheets = storage_manager.get_user_scansheets(actual_user_id)
                     if user_saved_sheets:
-                        recent = user_saved_sheets[0]
-
-                        # Fetch live documents from Nova Poshta API for exact document refs if available
-                        doc_refs_map = {}
-                        live_doc_numbers = []
-                        if recent.ref:
-                            try:
-                                api_docs = await user_np_client.get_scan_sheet_documents(recent.ref)
-                                for ad in api_docs:
-                                    n = str(ad.get("Number", "")).strip()
-                                    r = str(ad.get("Ref", "")).strip()
-                                    if n:
-                                        live_doc_numbers.append(n)
-                                        if r:
-                                            doc_refs_map[n] = r
-                            except Exception as e:
-                                logger.warning(f"Failed to fetch live docs for scansheet {recent.ref}: {e}")
-
-                        eff_doc_numbers = live_doc_numbers if live_doc_numbers else recent.document_numbers
-                        drafts_by_num = {str(d.get("int_doc_number")): d for d in active_drafts}
-                        built_items = []
-                        for idx, num in enumerate(eff_doc_numbers, 1):
-                            d_info = drafts_by_num.get(num, {})
-                            doc_ref_val = doc_refs_map.get(num) or d_info.get("ref", num)
-                            built_items.append({
-                                "index": idx,
-                                "int_doc_number": num,
-                                "ref": doc_ref_val,
-                                "recipient_name": d_info.get("recipient_name", ""),
-                                "city_description": d_info.get("city_description", ""),
-                                "warehouse_description": d_info.get("warehouse_description", ""),
-                                "cargo_description": d_info.get("cargo_description", ""),
-                                "declared_value": d_info.get("declared_value", 500),
-                                "cod_amount": d_info.get("cod_amount", 0),
-                            })
-                        last_scansheet = {
-                            "ref": recent.ref,
-                            "number": recent.number,
-                            "date_created": recent.date_created,
-                            "count_of_documents": len(built_items),
-                            "items": built_items,
-                        }
+                        last_scansheet = await build_register_context(user_np_client, user_saved_sheets[0], active_drafts)
 
                 if not active_drafts and not last_scansheet:
                     await status_msg.edit_text(
@@ -3267,45 +3298,7 @@ def register_handlers(
                             None
                         )
                         if matched_s:
-                            doc_refs_map = {}
-                            live_doc_numbers = []
-                            if matched_s.ref:
-                                try:
-                                    api_docs = await user_np_client.get_scan_sheet_documents(matched_s.ref)
-                                    for ad in api_docs:
-                                        n = str(ad.get("Number", "")).strip()
-                                        r = str(ad.get("Ref", "")).strip()
-                                        if n:
-                                            live_doc_numbers.append(n)
-                                            if r:
-                                                doc_refs_map[n] = r
-                                except Exception as e:
-                                    logger.warning(f"Failed to fetch live docs for scansheet {matched_s.ref}: {e}")
-
-                            eff_doc_numbers = live_doc_numbers if live_doc_numbers else matched_s.document_numbers
-                            drafts_by_num = {str(d.get("int_doc_number")): d for d in active_drafts}
-                            built_items = []
-                            for idx, num in enumerate(eff_doc_numbers, 1):
-                                d_info = drafts_by_num.get(num, {})
-                                doc_ref_val = doc_refs_map.get(num) or d_info.get("ref", num)
-                                built_items.append({
-                                    "index": idx,
-                                    "int_doc_number": num,
-                                    "ref": doc_ref_val,
-                                    "recipient_name": d_info.get("recipient_name", ""),
-                                    "city_description": d_info.get("city_description", ""),
-                                    "warehouse_description": d_info.get("warehouse_description", ""),
-                                    "cargo_description": d_info.get("cargo_description", ""),
-                                    "declared_value": d_info.get("declared_value", 500),
-                                    "cod_amount": d_info.get("cod_amount", 0),
-                                })
-                            last_scansheet = {
-                                "ref": matched_s.ref,
-                                "number": matched_s.number,
-                                "date_created": matched_s.date_created,
-                                "count_of_documents": len(built_items),
-                                "items": built_items,
-                            }
+                            last_scansheet = await build_register_context(user_np_client, matched_s, active_drafts)
 
                     if not last_scansheet or not last_scansheet.get("items"):
                         await status_msg.edit_text(
@@ -3435,7 +3428,7 @@ def register_handlers(
                     return
 
                 selected_nums_set = set(ai_reg_result.selected_doc_numbers)
-                if ai_reg_result.action == "create" and not re.search(r"\b(?:крім|окрім|без)\b", text.lower()):
+                if ai_reg_result.action in ("create", "add_waybill") and not re.search(r"\b(?:крім|окрім|без)\b", text.lower()):
                     # TTNs the user typed explicitly always go in, even if the AI skipped an already-registered one
                     selected_nums_set |= set(re.findall(r"\b20\d{12}\b", text))
                 matched_drafts = [
@@ -3450,14 +3443,41 @@ def register_handlers(
                     )
                     return
 
-                if ai_reg_result.action == "create":
+                if ai_reg_result.action in ("create", "add_waybill"):
+                    target_reg = None  # existing register to extend (add_waybill)
+                    if ai_reg_result.action == "add_waybill":
+                        reg_q = str(ai_reg_result.register_number_or_ref or "").strip()
+                        named = next(
+                            (sh for sh in storage_manager.get_user_scansheets(actual_user_id) if reg_q and reg_q in (sh.number, sh.ref)),
+                            None,
+                        )
+                        if named:
+                            target_reg = await build_register_context(user_np_client, named, active_drafts)
+                        elif not reg_q:
+                            target_reg = last_scansheet
+                        if not target_reg or not target_reg.get("ref"):
+                            await status_msg.edit_text(
+                                f"❌ *Не знайдено реєстру{f' № `{reg_q}`' if reg_q else ''}, до якого можна додати накладну.*",
+                                parse_mode="Markdown",
+                            )
+                            return
+                        in_target = {str(it.get("int_doc_number")) for it in target_reg.get("items", [])}
+                        matched_drafts = [d for d in matched_drafts if str(d.get("int_doc_number")) not in in_target]
+                        if not matched_drafts:
+                            await status_msg.edit_text(
+                                f"ℹ️ *Ці накладні вже в реєстрі № `{target_reg.get('number')}`.*",
+                                parse_mode="Markdown",
+                            )
+                            return
+
                     summary_title = ai_reg_result.summary or f"{len(matched_drafts)} накладних"
                     await status_msg.edit_text(
-                        f"⏳ *Формування реєстру (ScanSheet) для {summary_title}...*",
+                        f"⏳ *Додавання {summary_title} до реєстру № `{target_reg['number']}`...*"
+                        if target_reg
+                        else f"⏳ *Формування реєстру (ScanSheet) для {summary_title}...*",
                         parse_mode="Markdown",
                     )
                     doc_refs = [d["ref"] for d in matched_drafts]
-                    doc_nums = [d["int_doc_number"] for d in matched_drafts]
 
                     # A waybill sits in one register only: pull the selected ones out of their old registers first
                     moved_nums, disbanded_regs = await detach_drafts_from_old_registers(
@@ -3465,7 +3485,18 @@ def register_handlers(
                     )
 
                     try:
-                        scansheet_info = await user_np_client.create_scan_sheet(doc_refs)
+                        # ponytail: a TTN of another sender is rejected by NP itself; the error text explains it
+                        scansheet_info = await user_np_client.create_scan_sheet(
+                            doc_refs, scan_sheet_ref=target_reg["ref"] if target_reg else None
+                        )
+                        ref_ignored_note = ""
+                        if target_reg and scansheet_info.ref and scansheet_info.ref != target_reg["ref"]:
+                            # NP opened a new register instead of extending the one we asked for
+                            logger.warning(f"insertDocuments ignored Ref {target_reg['ref']}, got {scansheet_info.ref}")
+                            ref_ignored_note = (
+                                f"\n\n⚠️ *Нова Пошта відкрила новий реєстр замість додавання до № `{target_reg['number']}`.*"
+                            )
+                            target_reg = None
                     except Exception as ss_err:
                         logger.error(f"Error creating scan sheet via Nova Poshta API: {ss_err}", exc_info=True)
                         moved_note = ""
@@ -3491,21 +3522,32 @@ def register_handlers(
 
                     actual_doc_nums = [d["int_doc_number"] for d in truly_added_drafts]
 
-                    saved_scansheet = SavedScanSheet(
-                        ref=scansheet_info.ref,
-                        number=scansheet_info.number,
-                        date_created=scansheet_info.date_created,
-                        count_of_documents=scansheet_info.count_of_documents,
-                        document_numbers=actual_doc_nums,
-                    )
-                    storage_manager.add_user_scansheet(actual_user_id, saved_scansheet)
-                    storage_manager.update_drafts_scansheet(
-                        actual_user_id, actual_doc_nums, scansheet_info.number
-                    )
+                    if target_reg:
+                        # NP may answer an add with the register's Ref only: keep the known number and date
+                        reg_ref, reg_number = target_reg["ref"], target_reg["number"]
+                        reg_date = target_reg.get("date_created", "")
+                        card_drafts = target_reg.get("items", []) + truly_added_drafts
+                        storage_manager.add_documents_to_user_scansheet(
+                            actual_user_id, reg_ref, [str(d["int_doc_number"]) for d in card_drafts],
+                            number=reg_number, date_created=reg_date,
+                        )
+                        card_title = "✅ *Накладну додано до реєстру!*"
+                    else:
+                        reg_ref, reg_number, reg_date = scansheet_info.ref, scansheet_info.number, scansheet_info.date_created
+                        card_drafts = truly_added_drafts
+                        storage_manager.add_user_scansheet(actual_user_id, SavedScanSheet(
+                            ref=reg_ref,
+                            number=reg_number,
+                            date_created=reg_date,
+                            count_of_documents=scansheet_info.count_of_documents,
+                            document_numbers=actual_doc_nums,
+                        ))
+                        card_title = "✅ *Реєстр (ScanSheet) успішно створено!*"
+                    storage_manager.update_drafts_scansheet(actual_user_id, actual_doc_nums, reg_number)
 
                     # Update context for follow-up actions (like removal of waybills)
                     scansheet_items = []
-                    for idx, d in enumerate(truly_added_drafts, 1):
+                    for idx, d in enumerate(card_drafts, 1):
                         scansheet_items.append({
                             "index": idx,
                             "int_doc_number": str(d.get("int_doc_number")),
@@ -3518,16 +3560,16 @@ def register_handlers(
                             "cod_amount": d.get("cod_amount", 0),
                         })
                     USER_LAST_SCANSHEET_CONTEXT[actual_user_id] = {
-                        "ref": scansheet_info.ref,
-                        "number": scansheet_info.number,
-                        "date_created": scansheet_info.date_created,
-                        "count_of_documents": scansheet_info.count_of_documents,
+                        "ref": reg_ref,
+                        "number": reg_number,
+                        "date_created": reg_date,
+                        "count_of_documents": len(card_drafts),
                         "items": scansheet_items,
                     }
 
                     # Construct detailed list of included TTNs
                     details_lines = []
-                    for idx, d in enumerate(truly_added_drafts, 1):
+                    for idx, d in enumerate(card_drafts, 1):
                         cod_str = f" | 💵 Наложка: {int(d.get('cod_amount', 0))} грн" if d.get("cod_amount") else ""
                         line = (
                             f"*{idx}. ТТН:* `{d['int_doc_number']}` | {d['recipient_name']}\n"
@@ -3565,29 +3607,29 @@ def register_handlers(
                         pass
 
                     caption_text = (
-                        f"✅ *Реєстр (ScanSheet) успішно створено!*\n\n"
-                        f"📋 *Номер реєстру:* `{scansheet_info.number}`\n"
-                        f"📅 *Дата створення:* {scansheet_info.date_created}\n"
-                        f"📦 *Кількість накладних:* {scansheet_info.count_of_documents}\n\n"
-                        f"📄 *Накладні у реєстрі:*\n{details_block}{rejected_block}{moved_block}\n\n"
+                        f"{card_title}\n\n"
+                        f"📋 *Номер реєстру:* `{reg_number}`\n"
+                        f"📅 *Дата створення:* {reg_date}\n"
+                        f"📦 *Кількість накладних:* {len(card_drafts)}\n\n"
+                        f"📄 *Накладні у реєстрі:*\n{details_block}{rejected_block}{moved_block}{ref_ignored_note}\n\n"
                         "📱 *Покажіть цей штрихкод оператору Нової Пошти для сканування!*"
                     )
 
                     try:
-                        barcode_bytes = generate_code128_barcode(scansheet_info.number)
-                        photo_file = BufferedInputFile(barcode_bytes, filename=f"scansheet_{scansheet_info.number}.png")
+                        barcode_bytes = generate_code128_barcode(reg_number)
+                        photo_file = BufferedInputFile(barcode_bytes, filename=f"scansheet_{reg_number}.png")
                         await message.answer_photo(
                             photo=photo_file,
                             caption=caption_text,
                             parse_mode="Markdown",
-                            reply_markup=get_register_keyboard(ref=scansheet_info.ref),
+                            reply_markup=get_register_keyboard(ref=reg_ref),
                         )
                     except Exception as bc_err:
-                        logger.error(f"Error generating barcode photo for scansheet {scansheet_info.number}: {bc_err}")
+                        logger.error(f"Error generating barcode photo for scansheet {reg_number}: {bc_err}")
                         await message.answer(
                             caption_text,
                             parse_mode="Markdown",
-                            reply_markup=get_register_keyboard(ref=scansheet_info.ref),
+                            reply_markup=get_register_keyboard(ref=reg_ref),
                         )
                     return
 
@@ -4689,37 +4731,51 @@ def register_handlers(
                     dest_desc = warehouse.description
 
                 # Create or Update Waybill
+                wb_kwargs = dict(
+                    recipient_cp_ref=recipient_res.counterparty_ref,
+                    recipient_contact_ref=recipient_res.contact_person_ref,
+                    recipient_phone=parsed_info.phone or "",
+                    recipient_city_ref=city.ref,
+                    recipient_warehouse_ref=target_address_ref,
+                    payer_type=payer_type,
+                    description=cargo_desc,
+                    seats_amount=eff_settings.default_seats_amount,
+                    weight=eff_settings.default_weight,
+                    declared_value=declared_value,
+                    service_type=service_type,
+                )
+                recreated_note = ""
                 if editing_ref:
-                    wb_res = await user_np_client.update_waybill(
-                        document_ref=editing_ref,
-                        recipient_cp_ref=recipient_res.counterparty_ref,
-                        recipient_contact_ref=recipient_res.contact_person_ref,
-                        recipient_phone=parsed_info.phone or "",
-                        recipient_city_ref=city.ref,
-                        recipient_warehouse_ref=target_address_ref,
-                        payer_type=payer_type,
-                        description=cargo_desc,
-                        seats_amount=eff_settings.default_seats_amount,
-                        weight=eff_settings.default_weight,
-                        declared_value=declared_value,
-                        service_type=service_type,
-                    )
+                    try:
+                        wb_res = await user_np_client.update_waybill(document_ref=editing_ref, **wb_kwargs)
+                    except RuntimeError as upd_err:
+                        if "not found by owner" not in str(upd_err):
+                            raise
+                        # The sender changed: NP cannot move a waybill to another sender,
+                        # so create it anew under the active sender, then drop the old one with its owner's key.
+                        old_draft = next(
+                            (d for d in storage_manager.get_user_drafts(user_id) if d.ref == editing_ref), None
+                        )
+                        old_num = old_draft.int_doc_number if old_draft else editing_ref
+                        if old_draft and old_draft.scan_sheet_number:
+                            raise RuntimeError(
+                                f"ТТН {old_num} уже в реєстрі {old_draft.scan_sheet_number}. "
+                                "Спершу приберіть її з реєстру, потім змініть відправника."
+                            )
+                        wb_res = await user_np_client.create_waybill(cod_amount=cod_amount, **wb_kwargs)
+                        try:
+                            old_deleted = await _delete_waybill_any_profile(user_id, editing_ref)
+                        except Exception as del_err:
+                            logger.warning(f"Old waybill {old_num} kept after sender change: {del_err}")
+                            old_deleted = False
+                        recreated_note = (
+                            f"🔁 *Відправник змінився:* стару ТТН `{old_num}` видалено, створено нову.\n"
+                            if old_deleted
+                            else f"⚠️ *Відправник змінився:* нову ТТН створено, але стару ТТН `{old_num}` видалити не вдалося. Перемкніться на попереднього відправника й видаліть її в чернетках.\n"
+                        )
                     storage_manager.delete_user_draft(user_id, editing_ref)
                 else:
-                    wb_res = await user_np_client.create_waybill(
-                        recipient_cp_ref=recipient_res.counterparty_ref,
-                        recipient_contact_ref=recipient_res.contact_person_ref,
-                        recipient_phone=parsed_info.phone or "",
-                        recipient_city_ref=city.ref,
-                        recipient_warehouse_ref=target_address_ref,
-                        payer_type=payer_type,
-                        description=cargo_desc,
-                        seats_amount=eff_settings.default_seats_amount,
-                        weight=eff_settings.default_weight,
-                        declared_value=declared_value,
-                        cod_amount=cod_amount,
-                        service_type=service_type,
-                    )
+                    wb_res = await user_np_client.create_waybill(cod_amount=cod_amount, **wb_kwargs)
 
                 PENDING_SESSIONS.pop(session_id, None)
                 USER_ACTIVE_SESSIONS.pop(user_id, None)
@@ -4746,7 +4802,10 @@ def register_handlers(
                     f"https://novaposhta.ua/tracking/?cargo_number={wb_res.int_doc_number}"
                 )
                 payer_ua = "Отримувач" if payer_type == "Recipient" else "Відправник"
-                success_title = " успішно оновлено" if editing_ref else " успішно створено"
+                if recreated_note:
+                    success_title = " створено заново від нового відправника"
+                else:
+                    success_title = " успішно оновлено" if editing_ref else " успішно створено"
                 cod_str = "❌ Немає" if not cod_amount or cod_amount <= 0 else f"{int(cod_amount)} грн"
                 card_notice = ""
                 if cod_amount and cod_amount > 0:
@@ -4770,6 +4829,7 @@ def register_handlers(
 
                 success_card = (
                     f"✅ *Express-накладну{success_title}!*\n\n"
+                    f"{recreated_note}"
                     f"🎫 *Номер ТТН:* `{wb_res.int_doc_number}`\n"
                     f"👤 *Отримувач:* {parsed_info.full_name}\n"
                     f"📞 *Телефон:* `{parsed_info.phone}`\n"
@@ -4836,7 +4896,7 @@ def register_handlers(
                             )
                             return
 
-                deleted = await user_np_client.delete_waybill(ref)
+                deleted = await _delete_waybill_any_profile(user_id, ref)
                 storage_manager.delete_user_draft(user_id, ref)
                 if current_draft:
                     storage_manager.delete_user_draft(user_id, current_draft.ref)
@@ -4849,7 +4909,8 @@ def register_handlers(
                     )
                 else:
                     await callback.message.edit_text(
-                        "🗑 *Накладну видалено з локальної бази.*",
+                        "⚠️ *Накладну прибрано лише з локальної бази.* Нова Пошта не дала її видалити "
+                        "жодним ключем ваших відправників. Перевірте її в кабінеті Нової Пошти.",
                         parse_mode="Markdown",
                     )
             except Exception as e:

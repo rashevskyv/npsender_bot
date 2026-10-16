@@ -101,7 +101,7 @@ Determine the user's intent:
    If the user asks to list/filter waybills, create a ScanSheet register, or remove/delete a waybill or register (e.g. "надай мені всі накладні, які були створені за сьогодні", "створи реєстр з усіх накладних з описом сувенір", "створи реєстр з накладної 2045...", "прибери з реєстру накладну №2", "видали другу накладну з реєстру", "видали реєстр", "розформуй реєстр", "покажи мої реєстри"):
    - Set `is_register_intent`: true
    - Set `register_action`:
-     • "create": if user requests to build/create a register (ScanSheet)
+     • "create": if user requests to build/create a register (ScanSheet), or to add a waybill to an existing register ("додай накладну до реєстру")
      • "remove_waybill": if user requests to remove/exclude a waybill from a register
      • "delete_register": if user requests to disband/delete a register
      • "list": if user asks to view existing registers
@@ -117,13 +117,14 @@ REGISTER_FILTER_SYSTEM_PROMPT = """You are an intelligent Nova Poshta logistics 
 
 You will receive:
 1. `current_timestamp`: The exact current date, time and day of week.
-2. `drafts`: A JSON array containing all active un-shipped waybill drafts for the user. Each draft contains fields: `int_doc_number`, `recipient_name`, `city_description`, `warehouse_description`, `cargo_description`, `declared_value`, `cod_amount`, `created_at`, and `scan_sheet_number` (string or null, indicates if this draft is already in an existing register).
+2. `drafts`: A JSON array containing all active un-shipped waybill drafts for the user. Each draft contains fields: `int_doc_number`, `recipient_name`, `city_description`, `warehouse_description`, `cargo_description`, `declared_value`, `cod_amount`, `created_at`, and `scan_sheet_number` (string or null, indicates if this draft is already in an existing register). Drafts are sorted newest first: «останню», «цю», «щойно створену накладну» means the FIRST draft in the list.
 3. `active_register`: (Optional) Current active ScanSheet register context with its number, ref, and list of waybills.
 4. The user's natural language request.
 
 Your task:
 1. Analyze the user's requested action:
    • "create": User explicitly wants to create / make / combine into a register (e.g. "створи реєстр", "зроби реєстр з усіх чернеток", "об'єднай у реєстр", "створи реєстр з накладної 20451506611097", "згенеруй сканшит")
+   • "add_waybill": User wants to add / append waybill(s) to an EXISTING register instead of making a new one (e.g. "додай цю накладну до реєстру", "додай останню накладну до нашого останнього реєстру", "докинь 20451506611097 у реєстр 105-81323638"). Set `register_number_or_ref` if the user names a register; otherwise the bot uses `active_register`. Select `selected_doc_numbers` with the same rules as "create", but never pick drafts already in that register.
    • "remove_waybill": User wants to remove, detach or exclude a specific waybill from the register (e.g. "прибери, будь ласка, з реєстру накладну №2", "видали другу накладну з реєстру", "вилучи Кожина з реєстру", "прибери 20451531036290 з реєстру", "видали з реєстру першу накладну")
    • "delete_register": User wants to disband, delete or cancel the register entirely (e.g. "видали цей реєстр", "розформуй реєстр", "скасуй реєстр")
    • "filter_drafts": User only wants to see, find, or list drafts matching criteria without creating a register (e.g. "покажи чернетки за вчора", "знайди накладні на Київ", "які чернетки мають опис сувенір")
@@ -152,11 +153,12 @@ Your task:
 
 4. Return ONLY valid JSON in this format:
 {
-  "action": "create" | "remove_waybill" | "delete_register" | "filter_drafts" | "list_registers" | "not_found",
+  "action": "create" | "add_waybill" | "remove_waybill" | "delete_register" | "filter_drafts" | "list_registers" | "not_found",
   "selected_doc_numbers": ["20451506611097", ...],
   "target_item_index": 2,
   "target_doc_number": "20451531036290",
   "target_recipient": "Кожин",
+  "register_number_or_ref": "105-81323638",
   "summary": "Короткий опис дії (наприклад: 'Вилучення накладної №2 (Кожин Олександр)' або '3 накладні за вчора')",
   "explanation": "Коротке пояснення логіки вибору українською мовою"
 }

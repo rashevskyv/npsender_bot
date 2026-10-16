@@ -467,3 +467,61 @@ async def test_cmd_set_alias_and_reset(multi_user_manager, mock_settings):
         reset_p = multi_user_manager.get_active_profile(1)
         assert reset_p.alias is None
 
+
+
+@pytest.mark.asyncio
+async def test_edit_confirm_after_sender_switch_recreates_waybill(multi_user_manager, mock_settings):
+    """A waybill of sender 1 edited under sender 2: NP refuses the update, so the bot creates a new one and deletes the old."""
+    from src.storage import SavedDraft
+    from src.nova_poshta.models import CounterpartyRecipientResult, WaybillCreateResult
+
+    multi_user_manager.add_user_draft(1, SavedDraft(
+        ref="old-ref", int_doc_number="20451562800000", recipient_name="Іван Тест", recipient_phone="0991112233",
+        city_description="Київ", warehouse_description="Відділення №1", payer_type="Recipient",
+        cargo_description="Тест", declared_value=500.0, cost=80.0, created_at="16.10.2026",
+    ))
+    multi_user_manager.set_active_profile(1, "p2")
+    multi_user_manager.update_sender_profile(1, "p2", sender_city_ref="city-s", sender_address_ref="addr-s")
+
+    session_id = "edit-session"
+    PENDING_SESSIONS[session_id] = {
+        "user_id": 1,
+        "editing_draft_ref": "old-ref",
+        "parsed_info": ParsedRecipientInfo(full_name="Іван Тест", phone="0991112233", city_name="Київ", warehouse_number="1"),
+        "city": CityInfo(Ref="city-ref-1", Description="Київ"),
+        "warehouse": WarehouseInfo(Ref="wh-ref-1", Description="Відділення №1", Number="1",
+                                   TypeOfWarehouse="Warehouse", CityRef="city-ref-1"),
+        "destination_description": "Відділення №1",
+        "declared_value": 500.0, "cargo_type": "Parcel", "cargo_description": "Тест",
+        "cod_amount": 0.0, "cod_payment_type": "cash", "payer_type": "Recipient",
+    }
+    callback = AsyncMock(spec=CallbackQuery)
+    callback.from_user = User(id=1, is_bot=False, first_name="Test")
+    callback.message = AsyncMock()
+    callback.answer = AsyncMock()
+
+    # Only sender 1's key may delete the old waybill
+    keys_used = []
+
+    async def fake_delete(self, ref):
+        keys_used.append(self.settings.nova_poshta_api_key)
+        if self.settings.nova_poshta_api_key != "np_key_1":
+            raise RuntimeError(f"Nova Poshta API Error [InternetDocument/delete]: {ref}, 0")
+        return True
+
+    with patch.object(NovaPoshtaClient, "create_recipient_counterparty", new_callable=AsyncMock,
+                      return_value=CounterpartyRecipientResult(counterparty_ref="rcp", contact_person_ref="rcc")), \
+         patch.object(NovaPoshtaClient, "update_waybill", new_callable=AsyncMock, side_effect=RuntimeError(
+             "Nova Poshta API Error [InternetDocument/update]: InternetDocument not found by owner")), \
+         patch.object(NovaPoshtaClient, "create_waybill", new_callable=AsyncMock, return_value=WaybillCreateResult(
+             int_doc_number="20451562899999", ref="new-ref", cost=90.0)) as mock_create, \
+         patch.object(NovaPoshtaClient, "delete_waybill", fake_delete):
+        await _get_callback_handler("process_waybill_callback")(
+            callback, WaybillActionCallback(action="confirm", session_id=session_id))
+
+    assert mock_create.call_args.kwargs["cod_amount"] == 0.0
+    assert keys_used == ["np_key_2", "np_key_1"]
+    card = callback.message.edit_text.call_args[0][0]
+    assert "створено заново від нового відправника" in card
+    assert "стару ТТН `20451562800000` видалено" in card
+    assert [d.ref for d in multi_user_manager.get_user_drafts(1)] == ["new-ref"]

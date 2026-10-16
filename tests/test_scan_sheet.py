@@ -1163,7 +1163,7 @@ async def test_create_register_moves_waybill_out_of_old_register(tmp_path):
         # The AI dropped the already-registered waybill; the explicit TTN in the text must bring it back.
         mock_filter.return_value = AIRegisterFilterResult(action="create", selected_doc_numbers=["20451561069727"])
         mock_remove.side_effect = lambda *a, **k: calls.append("remove") or True
-        mock_create.side_effect = lambda refs: calls.append("create") or ScanSheetInfo(
+        mock_create.side_effect = lambda refs, **_: calls.append("create") or ScanSheetInfo(
             Ref="new-reg-ref", Number="105-81272253", DateTime="2026-10-14 19:03:58",
             CountOfDocuments=2, success_documents=list(refs))
         mock_delete.return_value = True
@@ -1188,3 +1188,78 @@ async def test_create_register_moves_waybill_out_of_old_register(tmp_path):
     assert "Перенесено з іншого реєстру" in caption and "105-81235079" in caption
     # Both drafts now point at the new register only.
     assert {d.scan_sheet_number for d in manager.get_user_drafts(777)} == {"105-81272253"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("np_ref", ["reg-ref", "other-ref"])
+async def test_add_waybill_to_last_register_extends_it(tmp_path, np_ref):
+    """"Додай цю останню накладну до останнього реєстру" adds the newest draft to the existing register, not a new one."""
+    import os
+    from src.bot.handlers import register_handlers, router, USER_LAST_SCANSHEET_CONTEXT
+    from src.storage import UserSettingsManager, SavedDraft, SavedScanSheet
+    from src.config import Settings
+    from src.ai.schemas import ParsedRecipientInfo, AIRegisterFilterResult
+    from src.nova_poshta.models import ScanSheetInfo
+    from unittest.mock import patch, AsyncMock, MagicMock
+
+    USER_LAST_SCANSHEET_CONTEXT.clear()
+    manager = UserSettingsManager(
+        filepath=os.path.join(tmp_path, "s.json"),
+        drafts_filepath=os.path.join(tmp_path, "d.json"),
+        scansheets_filepath=os.path.join(tmp_path, "ss.json"),
+    )
+    manager.update_user_settings(777, nova_poshta_api_key="np", ai_api_key="ai")
+    base = dict(recipient_phone="380990000000", city_description="Київ", warehouse_description="Відділення №1",
+                payer_type="Recipient", cargo_description="Пристрій", declared_value=500.0, cost=80.0,
+                created_at="16.10.2026")
+    manager.add_user_draft(777, SavedDraft(ref="ref-a", int_doc_number="20451562539764", recipient_name="А",
+                                           scan_sheet_number="105-81323638", **base))
+    manager.add_user_draft(777, SavedDraft(ref="ref-b", int_doc_number="20451562537828", recipient_name="Б",
+                                           scan_sheet_number="105-81323638", **base))
+    manager.add_user_draft(777, SavedDraft(ref="ref-old", int_doc_number="20451561425435", recipient_name="Стара", **base))
+    manager.add_user_draft(777, SavedDraft(ref="ref-new", int_doc_number="20451562881319", recipient_name="Нова", **base))
+    manager.add_user_scansheet(777, SavedScanSheet(ref="reg-ref", number="105-81323638", date_created="2026-10-16 13:49:04",
+                                                   count_of_documents=2,
+                                                   document_numbers=["20451562539764", "20451562537828"]))
+    register_handlers(Settings(TELEGRAM_BOT_TOKEN="dummy", SENDER_REF="s", SENDER_CONTACT_REF="c",
+                               SENDER_PHONE="380991234567"), MagicMock(), MagicMock(), manager)
+
+    with patch("src.ai.extractor.AIExtractor.parse_text", new_callable=AsyncMock) as mock_parse, \
+         patch("src.ai.extractor.AIExtractor.filter_drafts_for_register", new_callable=AsyncMock) as mock_filter, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.create_scan_sheet", new_callable=AsyncMock) as mock_create, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_scan_sheet_documents", new_callable=AsyncMock, return_value=[]), \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_internet_document_list", new_callable=AsyncMock, return_value=[]), \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_documents_status", new_callable=AsyncMock, return_value={}):
+        mock_parse.return_value = ParsedRecipientInfo(is_recipient_info=False, is_register_intent=True,
+                                                      register_action="create")
+        mock_filter.return_value = AIRegisterFilterResult(action="add_waybill", selected_doc_numbers=["20451562881319"])
+        # NP answers the add with the register Ref but no Number
+        mock_create.return_value = ScanSheetInfo(Ref=np_ref, Number="" if np_ref == "reg-ref" else "105-99",
+                                                 DateTime="", CountOfDocuments=1,
+                                                 success_documents=["ref-new"])
+
+        msg = MagicMock()
+        msg.from_user.id = 777
+        status = MagicMock(edit_text=AsyncMock(), delete=AsyncMock())
+        msg.answer = AsyncMock(return_value=status)
+        msg.answer_photo = AsyncMock()
+
+        await router._handle_combined_text_message(
+            msg, "Додай ось цю останню накладну до нашого реєстру який ми створювали в самому останнім", user_id=777)
+
+    # The newest draft goes first to the AI
+    assert mock_filter.call_args.kwargs["drafts"][0]["int_doc_number"] == "20451562881319"
+    assert mock_create.call_args.args[0] == ["ref-new"]
+    assert mock_create.call_args.kwargs["scan_sheet_ref"] == "reg-ref"
+    sheets = manager.get_user_scansheets(777)
+    caption = msg.answer_photo.call_args.kwargs["caption"]
+    if np_ref == "reg-ref":
+        assert [s.number for s in sheets] == ["105-81323638"]
+        assert sheets[0].document_numbers == ["20451562539764", "20451562537828", "20451562881319"]
+        assert "Накладну додано до реєстру" in caption and "105-81323638" in caption
+        assert "*Кількість накладних:* 3" in caption
+    else:
+        # NP ignored the Ref: the new register is saved and shown, the old one stays as it was
+        assert [s.number for s in sheets] == ["105-99", "105-81323638"]
+        assert sheets[1].document_numbers == ["20451562539764", "20451562537828"]
+        assert "Нова Пошта відкрила новий реєстр" in caption and "105-99" in caption

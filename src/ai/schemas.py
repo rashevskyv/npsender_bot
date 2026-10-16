@@ -11,7 +11,7 @@ class AIRegisterFilterResult(BaseModel):
 
     action: str = Field(
         default="create",
-        description="Action type: 'create' (generate register), 'remove_waybill' (remove specific waybill from register), 'delete_register' (disband register), 'filter_drafts' (only display matched drafts), 'list_registers' (view existing registers), 'not_found' (no matching drafts)",
+        description="Action type: 'create' (generate register), 'add_waybill' (add waybills to an existing register), 'remove_waybill' (remove specific waybill from register), 'delete_register' (disband register), 'filter_drafts' (only display matched drafts), 'list_registers' (view existing registers), 'not_found' (no matching drafts)",
     )
     selected_doc_numbers: List[str] = Field(
         default_factory=list,

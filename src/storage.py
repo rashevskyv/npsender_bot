@@ -707,6 +707,21 @@ class UserSettingsManager:
                 return s
         return None
 
+    def add_documents_to_user_scansheet(
+        self, user_id: int, scansheet_ref: str, doc_numbers: List[str], number: str = "", date_created: str = ""
+    ) -> None:
+        """Append document numbers to a saved scansheet; save a new record if this one was not stored yet."""
+        for s in self.scansheets.get(str(user_id), []):
+            if s.ref == scansheet_ref:
+                s.document_numbers += [n for n in doc_numbers if n not in s.document_numbers]
+                s.count_of_documents = len(s.document_numbers)
+                self.save_scansheets()
+                return
+        self.add_user_scansheet(user_id, SavedScanSheet(
+            ref=scansheet_ref, number=number, date_created=date_created,
+            count_of_documents=len(doc_numbers), document_numbers=list(doc_numbers),
+        ))
+
     def purge_old_or_sent_scansheets(self, user_id: int, refs: List[str]) -> int:
         """Purge ScanSheets matching any ref in refs list for user ID."""
         uid_str = str(user_id)

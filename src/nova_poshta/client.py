@@ -1586,12 +1586,17 @@ class NovaPoshtaClient:
             estimated_delivery_date=doc_info.get("EstimatedDeliveryDate"),
         )
 
-    async def create_scan_sheet(self, document_refs: List[str]) -> ScanSheetInfo:
-        """Create a Nova Poshta ScanSheet (Register) from a list of waybill Ref GUIDs / numbers."""
+    async def create_scan_sheet(
+        self, document_refs: List[str], scan_sheet_ref: Optional[str] = None
+    ) -> ScanSheetInfo:
+        """Create a Nova Poshta ScanSheet (Register) from waybill Refs / numbers, or add them to an existing one by its Ref."""
+        method_props: Dict[str, Any] = {"DocumentRefs": document_refs}
+        if scan_sheet_ref:
+            method_props["Ref"] = scan_sheet_ref
         res = await self._post(
             model_name="ScanSheet",
             called_method="insertDocuments",
-            method_properties={"DocumentRefs": document_refs},
+            method_properties=method_props,
         )
         data = res.get("data", [])
         if not data:
@@ -1600,7 +1605,7 @@ class NovaPoshtaClient:
             raise RuntimeError(f"Помилка створення реєстру: {err_msg}")
 
         info = data[0]
-        ref_val = str(info.get("Ref", "") or "").strip()
+        ref_val = str(info.get("Ref", "") or "").strip() or (scan_sheet_ref or "")
         num_val = str(info.get("Number", "") or "").strip()
         data_block = info.get("Data") if isinstance(info.get("Data"), dict) else {}
 
@@ -1658,7 +1663,8 @@ class NovaPoshtaClient:
             cnt = len(success_docs)
 
         # 3. If no register was returned or NO documents were successfully added, raise an explicit error
-        if not ref_val or not num_val or (cnt == 0 and len(document_refs) > 0):
+        # An add to an existing register may come back without a Number: the caller already knows it
+        if not ref_val or (not num_val and not scan_sheet_ref) or (cnt == 0 and len(document_refs) > 0):
             err_parts = []
             for item in error_items:
                 prefix = f"ТТН {item['number']}: " if item['number'] else ""
