@@ -34,7 +34,7 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
             ],
         ],
         resize_keyboard=True,
-        persistent=True,
+        is_persistent=True,
     )
 
 

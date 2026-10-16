@@ -37,7 +37,7 @@ async def main():
     register_handlers(settings, ai_extractor, np_client, storage_manager)
     dp.include_router(router)
 
-    # Setup Telegram Desktop and Mobile persistent Menu button
+    # Drop the "Меню" button so the persistent reply keyboard shows on desktop as on mobile
     await setup_bot_commands(bot)
 
     logger.info("Starting Bot Long Polling...")
@@ -48,26 +48,17 @@ async def main():
 
 
 async def setup_bot_commands(bot: Bot) -> None:
-    """Configure default bot commands and persistent menu button for Desktop and Mobile."""
-    from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonCommands
+    """Remove the "Меню" command button: the persistent reply keyboard is the only menu, on desktop too.
 
-    commands = [
-        BotCommand(command="start", description="Головне меню / перезапуск"),
-        BotCommand(command="users", description="👥 Керування користувачами та лімітами"),
-        BotCommand(command="settings", description="⚙️ Налаштування профілю"),
-        BotCommand(command="client_card", description="💳 Картка клієнта для сканування"),
-        BotCommand(command="outgoing", description="📤 Вихідні відправлення"),
-        BotCommand(command="incoming", description="📥 Вхідні відправлення"),
-        BotCommand(command="drafts", description="📝 Чернетки ТТН"),
-        BotCommand(command="scansheet", description="📋 Реєстри (ScanSheet)"),
-        BotCommand(command="cod", description="💰 Накладений платіж"),
-        BotCommand(command="track", description="🔍 Відстежити посилку"),
-        BotCommand(command="help", description="❓ Довідка та команди"),
-    ]
+    Telegram shows the "Меню" button while the bot has commands, so the list is cleared.
+    Commands still work when typed.
+    """
+    from aiogram.types import BotCommandScopeDefault, MenuButtonDefault
+
     try:
-        await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
-        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-        logger.info("Bot commands and menu button successfully configured.")
+        await bot.delete_my_commands(scope=BotCommandScopeDefault())
+        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+        logger.info("Bot command menu removed; the reply keyboard is the menu.")
     except Exception as e:
         logger.warning(f"Failed to set bot commands: {e}")
 

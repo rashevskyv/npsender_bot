@@ -3076,6 +3076,7 @@ def register_handlers(
             )
 
     @router.message(Command("registers"))
+    @router.message(Command("scansheet"))
     @router.message(F.text == "📋 Реєстри (ScanSheet)")
     async def cmd_registers(message: Message):
         """Show list of active created registers (ScanSheets) within last 2 days."""
