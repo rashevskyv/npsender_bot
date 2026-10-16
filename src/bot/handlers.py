@@ -1162,6 +1162,7 @@ def register_handlers(
     async def _build_waybill_preview_message(
         session_id: str,
         user_id: int,
+        sender_switched: bool = False,
     ) -> Tuple[str, InlineKeyboardMarkup]:
         """Centralized renderer for the waybill draft verification card and action keyboard."""
         session = PENDING_SESSIONS.get(session_id, {})
@@ -1195,8 +1196,24 @@ def register_handlers(
         profiles = storage_manager.get_sender_profiles(user_id)
         active_p = storage_manager.get_active_profile(user_id)
         has_multiple_profiles = len(profiles) > 1
-        active_name = active_p.name if active_p else None
-        sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple_profiles) else ""
+        active_name = None
+        sender_prefix = ""
+        switch_notice = ""
+        if active_p:
+            sender_phone = active_p.sender_phone or "тел. не вказано"
+            sender_prefix = f"👤 *Відправник:* {active_p.name} (`{sender_phone}`)\n"
+            # Button label: short name first, phone last, so both fit on a phone screen
+            active_name = f"{format_profile_display_name(active_p, profiles)} · {sender_phone}"
+            if sender_switched:
+                city_name_s = active_p.sender_city_name or active_p.api_sender_city_name
+                wh_name_s = active_p.sender_warehouse_name or active_p.api_sender_warehouse_name
+                departure = ", ".join(x for x in (city_name_s, wh_name_s) if x)
+                switch_notice = (
+                    f"🔁 *Перемкнуто на відправника:* {active_p.name}\n"
+                    f"📞 *Телефон відправника:* `{sender_phone}`\n"
+                    + (f"🏤 *Відправка з:* {departure}\n" if departure else "")
+                    + "\n"
+                )
         departure_warn = (
             "⚠️ *Пункт відправки:* Не вказано місто або відділення! (/set_city та /set_warehouse)\n"
             if (not eff_settings.sender_city_ref or not eff_settings.sender_address_ref)
@@ -1208,6 +1225,7 @@ def register_handlers(
         city_name = city.description if hasattr(city, "description") else (getattr(city, "name", str(city)) if city else "Не вказано")
 
         card_text = (
+            f"{switch_notice}"
             "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
             f"{sender_prefix}"
             f"{departure_warn}"
@@ -4174,58 +4192,8 @@ def register_handlers(
         USER_ACTIVE_SESSIONS[user_id] = session_id
         USER_LAST_PARSED_INFO[user_id] = parsed_info
 
-        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
-
-        eval_res = await evaluate_cod_limits(
-            user_id=user_id,
-            cod_val=cod_val,
-            user_np_client=user_np_client,
-            storage_manager=storage_manager,
-            eff_settings=eff_settings,
-            editing_ref=editing_ref,
-        )
-        warn_line = eval_res.get("warn_line", "")
-        suggested_prof = eval_res.get("suggested_profile")
-
-        profiles = storage_manager.get_sender_profiles(user_id)
-        active_p = storage_manager.get_active_profile(user_id)
-        has_multiple_profiles = len(profiles) > 1
-        active_name = active_p.name if active_p else None
-        sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple_profiles) else ""
-
-        card_text = (
-            "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
-            f"{sender_prefix}"
-            f"👤 *Отримувач:* {parsed_info.full_name}\n"
-            f"📞 *Телефон:* `{parsed_info.phone}`\n"
-            f"🏙 *Місто:* {matched_city.description}\n"
-            f"📦 *Пункт призначення:* {dest_desc}\n"
-            f"📝 *Опис вантажу:* {cargo_desc}\n"
-            f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
-            f"💵 *Накладений платіж:* {cod_str}\n"
-            f"{warn_line}\n"
-            "Перевірте дані та оберіть дію нижче:"
-        )
-
-        u_custom = storage_manager.get_user_settings(user_id)
-        card_mask = eff_settings.sender_card_mask or u_custom.sender_card_mask
-
-        await status_msg.edit_text(
-            card_text,
-            parse_mode="Markdown",
-            reply_markup=get_confirmation_keyboard(
-                payer_type=payer_type,
-                cargo_type=cargo_type,
-                declared_value=declared_val,
-                cod_amount=cod_val,
-                cod_payment_type=cod_type,
-                sender_card_mask=card_mask,
-                session_id=session_id,
-                suggested_profile=suggested_prof,
-                active_profile_name=active_name,
-                has_multiple_profiles=has_multiple_profiles,
-            ),
-        )
+        card_text, markup = await _build_waybill_preview_message(session_id, user_id)
+        await status_msg.edit_text(card_text, parse_mode="Markdown", reply_markup=markup)
         if session_id in PENDING_SESSIONS:
             PENDING_SESSIONS[session_id]["chat_id"] = status_msg.chat.id
             PENDING_SESSIONS[session_id]["message_id"] = status_msg.message_id
@@ -4504,16 +4472,8 @@ def register_handlers(
         if action == "toggle_payer":
             new_payer = "Sender" if session.get("payer_type", "Recipient") == "Recipient" else "Recipient"
             session["payer_type"] = new_payer
-            await callback.message.edit_reply_markup(
-                reply_markup=get_confirmation_keyboard(
-                    payer_type=new_payer,
-                    cargo_type=session.get("cargo_type", "Parcel"),
-                    declared_value=session.get("declared_value", 500.0),
-                    cod_amount=session.get("cod_amount", 0.0),
-                    cod_payment_type=session.get("cod_payment_type", "cash"),
-                    session_id=session_id,
-                )
-            )
+            _, markup = await _build_waybill_preview_message(session_id, user_id)
+            await callback.message.edit_reply_markup(reply_markup=markup)
             payer_ua = "Отримувач" if new_payer == "Recipient" else "Відправник"
             await callback.answer(f"Платника змінено на: {payer_ua}")
             return
@@ -4521,14 +4481,8 @@ def register_handlers(
         if action == "toggle_cargo":
             new_cargo = "Documents" if session.get("cargo_type", "Parcel") == "Parcel" else "Parcel"
             session["cargo_type"] = new_cargo
-            await callback.message.edit_reply_markup(
-                reply_markup=get_confirmation_keyboard(
-                    payer_type=session.get("payer_type", "Recipient"),
-                    cargo_type=new_cargo,
-                    declared_value=session.get("declared_value", 500.0),
-                    session_id=session_id,
-                )
-            )
+            _, markup = await _build_waybill_preview_message(session_id, user_id)
+            await callback.message.edit_reply_markup(reply_markup=markup)
             cargo_ua = "Посилка" if new_cargo == "Parcel" else "Документи"
             await callback.answer(f"Тип вантажу змінено на: {cargo_ua}")
             return
@@ -4547,64 +4501,8 @@ def register_handlers(
 
             session["declared_value"] = next_val
 
-            parsed_info = session["parsed_info"]
-            city = session["city"]
-            warehouse = session.get("warehouse")
-            dest_desc = session.get("destination_description")
-            cargo_desc = session["cargo_description"]
-            cod_type = session.get("cod_payment_type", "cash")
-            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
-
-            eval_res = await _evaluate_cod_limits(
-                user_id=user_id,
-                cod_val=cod_val,
-                user_np_client=user_np_client,
-                storage_manager=storage_manager,
-                eff_settings=eff_settings,
-                editing_ref=session.get("editing_draft_ref"),
-            )
-            warn_line = eval_res.get("warn_line", "")
-            s_prof = eval_res.get("suggested_profile")
-
-            profiles = storage_manager.get_sender_profiles(user_id)
-            active_p = storage_manager.get_active_profile(user_id)
-            has_multiple = len(profiles) > 1
-            active_name = active_p.name if active_p else None
-            sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple) else ""
-
-            card_text = (
-                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
-                f"{sender_prefix}"
-                f"👤 *Отримувач:* {parsed_info.full_name}\n"
-                f"📞 *Телефон:* `{parsed_info.phone}`\n"
-                f"🏙 *Місто:* {city.description}\n"
-                f"📦 *Пункт призначення:* {dest_desc}\n"
-                f"📝 *Опис вантажу:* {cargo_desc}\n"
-                f"💰 *Оціночна вартість:* {int(next_val)} грн (Мін. 500 грн)\n"
-                f"💵 *Накладений платіж:* {cod_str}\n"
-                f"{warn_line}\n"
-                "Перевірте дані та оберіть дію нижче:"
-            )
-
-            u_custom = storage_manager.get_user_settings(user_id)
-            card_mask = u_custom.sender_card_mask
-
-            await callback.message.edit_text(
-                card_text,
-                parse_mode="Markdown",
-                reply_markup=get_confirmation_keyboard(
-                    payer_type=session["payer_type"],
-                    cargo_type=session["cargo_type"],
-                    declared_value=next_val,
-                    cod_amount=cod_val,
-                    cod_payment_type=cod_type,
-                    sender_card_mask=card_mask,
-                    session_id=session_id,
-                    suggested_profile=s_prof,
-                    active_profile_name=active_name,
-                    has_multiple_profiles=has_multiple,
-                ),
-            )
+            card_text, markup = await _build_waybill_preview_message(session_id, user_id)
+            await callback.message.edit_text(card_text, parse_mode="Markdown", reply_markup=markup)
             await callback.answer(f"Оціночну вартість встановлено: {int(next_val)} грн")
             return
 
@@ -4621,63 +4519,8 @@ def register_handlers(
             if next_cod > session["declared_value"]:
                 session["declared_value"] = next_cod
 
-            u_custom = storage_manager.get_user_settings(user_id)
-            card_mask = u_custom.sender_card_mask
-            parsed_info = session["parsed_info"]
-            city = session["city"]
-            dest_desc = session.get("destination_description")
-            cargo_desc = session["cargo_description"]
-            declared_val = session["declared_value"]
-            cod_type = session.get("cod_payment_type", "cash")
-            cod_str = "❌ Немає" if next_cod <= 0 else f"{int(next_cod)} грн"
-
-            eval_res = await _evaluate_cod_limits(
-                user_id=user_id,
-                cod_val=next_cod,
-                user_np_client=user_np_client,
-                storage_manager=storage_manager,
-                eff_settings=eff_settings,
-                editing_ref=session.get("editing_draft_ref"),
-            )
-            warn_line = eval_res.get("warn_line", "")
-            s_prof = eval_res.get("suggested_profile")
-
-            profiles = storage_manager.get_sender_profiles(user_id)
-            active_p = storage_manager.get_active_profile(user_id)
-            has_multiple = len(profiles) > 1
-            active_name = active_p.name if active_p else None
-            sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple) else ""
-
-            card_text = (
-                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
-                f"{sender_prefix}"
-                f"👤 *Отримувач:* {parsed_info.full_name}\n"
-                f"📞 *Телефон:* `{parsed_info.phone}`\n"
-                f"🏙 *Місто:* {city.description}\n"
-                f"📦 *Пункт призначення:* {dest_desc}\n"
-                f"📝 *Опис вантажу:* {cargo_desc}\n"
-                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
-                f"💵 *Накладений платіж:* {cod_str}\n"
-                f"{warn_line}\n"
-                "Перевірте дані та оберіть дію нижче:"
-            )
-
-            await callback.message.edit_text(
-                card_text,
-                parse_mode="Markdown",
-                reply_markup=get_confirmation_keyboard(
-                    payer_type=session["payer_type"],
-                    cargo_type=session["cargo_type"],
-                    declared_value=declared_val,
-                    cod_amount=next_cod,
-                    cod_payment_type=cod_type,
-                    sender_card_mask=card_mask,
-                    session_id=session_id,
-                    suggested_profile=s_prof,
-                    active_profile_name=active_name,
-                    has_multiple_profiles=has_multiple,
-                ),
-            )
+            card_text, markup = await _build_waybill_preview_message(session_id, user_id)
+            await callback.message.edit_text(card_text, parse_mode="Markdown", reply_markup=markup)
             msg_str = "Скасовано" if next_cod <= 0 else f"{int(next_cod)} грн"
             await callback.answer(f"Накладений платіж: {msg_str}")
             return
@@ -4702,72 +4545,13 @@ def register_handlers(
 
             if target_pid:
                 switched = storage_manager.set_active_profile(user_id, target_pid)
-                eff_settings = storage_manager.get_effective_settings(user_id, settings)
-                user_np_client = NovaPoshtaClient(eff_settings)
                 switched_name = switched.name if switched else "іншого"
                 ans_text = f"✅ Відправника перемкнуто на «{switched_name}»! Баланс оновлено."
             else:
                 ans_text = "⚠️ Немає інших користувачів"
 
-            parsed_info = session["parsed_info"]
-            city = session["city"]
-            dest_desc = session.get("destination_description")
-            cargo_desc = session["cargo_description"]
-            declared_val = session["declared_value"]
-            cod_val = session.get("cod_amount", 0.0)
-            cod_type = session.get("cod_payment_type", "cash")
-            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
-
-            eval_res2 = await _evaluate_cod_limits(
-                user_id=user_id,
-                cod_val=cod_val,
-                user_np_client=user_np_client,
-                storage_manager=storage_manager,
-                eff_settings=eff_settings,
-                editing_ref=session.get("editing_draft_ref"),
-            )
-            warn_line = eval_res2.get("warn_line", "")
-            s_prof2 = eval_res2.get("suggested_profile")
-
-            profiles2 = storage_manager.get_sender_profiles(user_id)
-            active_p2 = storage_manager.get_active_profile(user_id)
-            has_multiple2 = len(profiles2) > 1
-            active_name2 = active_p2.name if active_p2 else None
-            sender_prefix = f"👤 *Відправник:* {active_name2}\n" if (active_name2 and has_multiple2) else ""
-
-            card_text = (
-                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
-                f"{sender_prefix}"
-                f"👤 *Отримувач:* {parsed_info.full_name}\n"
-                f"📞 *Телефон:* `{parsed_info.phone}`\n"
-                f"🏙 *Місто:* {city.description}\n"
-                f"📦 *Пункт призначення:* {dest_desc}\n"
-                f"📝 *Опис вантажу:* {cargo_desc}\n"
-                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
-                f"💵 *Накладений платіж:* {cod_str}\n"
-                f"{warn_line}\n"
-                "Перевірте дані та оберіть дію нижче:"
-            )
-
-            u_custom = storage_manager.get_user_settings(user_id)
-            card_mask = u_custom.sender_card_mask
-
-            await callback.message.edit_text(
-                card_text,
-                parse_mode="Markdown",
-                reply_markup=get_confirmation_keyboard(
-                    payer_type=session["payer_type"],
-                    cargo_type=session["cargo_type"],
-                    declared_value=declared_val,
-                    cod_amount=cod_val,
-                    cod_payment_type=cod_type,
-                    sender_card_mask=card_mask,
-                    session_id=session_id,
-                    suggested_profile=s_prof2,
-                    active_profile_name=active_name2,
-                    has_multiple_profiles=has_multiple2,
-                ),
-            )
+            card_text, markup = await _build_waybill_preview_message(session_id, user_id, sender_switched=bool(target_pid))
+            await callback.message.edit_text(card_text, parse_mode="Markdown", reply_markup=markup)
             await callback.answer(ans_text)
             return
 
@@ -4778,134 +4562,18 @@ def register_handlers(
                 curr_idx = next((i for i, p in enumerate(profiles) if p.id == active_p.id), 0)
                 next_p = profiles[(curr_idx + 1) % len(profiles)]
                 storage_manager.set_active_profile(user_id, next_p.id)
-                eff_settings = storage_manager.get_effective_settings(user_id, settings)
-                user_np_client = NovaPoshtaClient(eff_settings)
                 ans_text = f"👤 Обрано відправника: «{next_p.name}»"
             else:
                 ans_text = "⚠️ Лише один користувач"
 
-            parsed_info = session["parsed_info"]
-            city = session["city"]
-            dest_desc = session.get("destination_description")
-            cargo_desc = session["cargo_description"]
-            declared_val = session["declared_value"]
-            cod_val = session.get("cod_amount", 0.0)
-            cod_type = session.get("cod_payment_type", "cash")
-            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
-
-            eval_res = await _evaluate_cod_limits(
-                user_id=user_id,
-                cod_val=cod_val,
-                user_np_client=user_np_client,
-                storage_manager=storage_manager,
-                eff_settings=eff_settings,
-                editing_ref=session.get("editing_draft_ref"),
-            )
-            warn_line = eval_res.get("warn_line", "")
-            s_prof = eval_res.get("suggested_profile")
-
-            profiles2 = storage_manager.get_sender_profiles(user_id)
-            active_p2 = storage_manager.get_active_profile(user_id)
-            has_multiple2 = len(profiles2) > 1
-            active_name2 = active_p2.name if active_p2 else None
-            sender_prefix = f"👤 *Відправник:* {active_name2}\n" if (active_name2 and has_multiple2) else ""
-
-            card_text = (
-                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
-                f"{sender_prefix}"
-                f"👤 *Отримувач:* {parsed_info.full_name}\n"
-                f"📞 *Телефон:* `{parsed_info.phone}`\n"
-                f"🏙 *Місто:* {city.description}\n"
-                f"📦 *Пункт призначення:* {dest_desc}\n"
-                f"📝 *Опис вантажу:* {cargo_desc}\n"
-                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
-                f"💵 *Накладений платіж:* {cod_str}\n"
-                f"{warn_line}\n"
-                "Перевірте дані та оберіть дію нижче:"
-            )
-
-            u_custom = storage_manager.get_user_settings(user_id)
-            card_mask = u_custom.sender_card_mask
-
-            await callback.message.edit_text(
-                card_text,
-                parse_mode="Markdown",
-                reply_markup=get_confirmation_keyboard(
-                    payer_type=session["payer_type"],
-                    cargo_type=session["cargo_type"],
-                    declared_value=declared_val,
-                    cod_amount=cod_val,
-                    cod_payment_type=cod_type,
-                    sender_card_mask=card_mask,
-                    session_id=session_id,
-                    suggested_profile=s_prof,
-                    active_profile_name=active_name2,
-                    has_multiple_profiles=has_multiple2,
-                ),
-            )
+            card_text, markup = await _build_waybill_preview_message(session_id, user_id, sender_switched=len(profiles) > 1 and active_p is not None)
+            await callback.message.edit_text(card_text, parse_mode="Markdown", reply_markup=markup)
             await callback.answer(ans_text)
             return
 
         if action == "back_to_card":
-            parsed_info = session["parsed_info"]
-            city = session["city"]
-            dest_desc = session.get("destination_description")
-            cargo_desc = session["cargo_description"]
-            declared_val = session["declared_value"]
-            cod_val = session.get("cod_amount", 0.0)
-            cod_type = session.get("cod_payment_type", "cash")
-            cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
-
-            eval_res = await _evaluate_cod_limits(
-                user_id=user_id,
-                cod_val=cod_val,
-                user_np_client=user_np_client,
-                storage_manager=storage_manager,
-                eff_settings=eff_settings,
-                editing_ref=session.get("editing_draft_ref"),
-            )
-            warn_line = eval_res.get("warn_line", "")
-            s_prof = eval_res.get("suggested_profile")
-
-            profiles = storage_manager.get_sender_profiles(user_id)
-            active_p = storage_manager.get_active_profile(user_id)
-            has_multiple = len(profiles) > 1
-            active_name = active_p.name if active_p else None
-            sender_prefix = f"👤 *Відправник:* {active_name}\n" if (active_name and has_multiple) else ""
-
-            card_text = (
-                "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
-                f"{sender_prefix}"
-                f"👤 *Отримувач:* {parsed_info.full_name}\n"
-                f"📞 *Телефон:* `{parsed_info.phone}`\n"
-                f"🏙 *Місто:* {city.description}\n"
-                f"📦 *Пункт призначення:* {dest_desc}\n"
-                f"📝 *Опис вантажу:* {cargo_desc}\n"
-                f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
-                f"💵 *Накладений платіж:* {cod_str}\n"
-                f"{warn_line}\n"
-                "Перевірте дані та оберіть дію нижче:"
-            )
-
-            u_custom = storage_manager.get_user_settings(user_id)
-            card_mask = u_custom.sender_card_mask
-
-            await callback.message.edit_text(
-                card_text,
-                parse_mode="Markdown",
-                reply_markup=get_confirmation_keyboard(
-                    payer_type=session["payer_type"],
-                    cargo_type=session["cargo_type"],
-                    declared_value=declared_val,
-                    cod_amount=cod_val,
-                    cod_payment_type=cod_type,
-                    sender_card_mask=card_mask,
-                    session_id=session_id,
-                    suggested_profile=s_prof,
-                    active_profile_name=active_name,
-                    has_multiple_profiles=has_multiple,
-                ),
-            )
+            card_text, markup = await _build_waybill_preview_message(session_id, user_id)
+            await callback.message.edit_text(card_text, parse_mode="Markdown", reply_markup=markup)
             await callback.answer()
             return
 
@@ -5388,36 +5056,8 @@ def register_handlers(
         session["parsed_info"] = parsed_info
         USER_LAST_PARSED_INFO[user_id] = parsed_info
 
-        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
-
-        card_text = (
-            "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
-            f"👤 *Отримувач:* {parsed_info.full_name}\n"
-            f"📞 *Телефон:* `{parsed_info.phone}`\n"
-            f"🏙 *Місто:* {matched_city.description}\n"
-            f"📦 *Пункт призначення:* {warehouse.description}\n"
-            f"📝 *Опис вантажу:* {cargo_desc}\n"
-            f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
-            f"💵 *Накладений платіж:* {cod_str}\n\n"
-            "Перевірте дані та оберіть дію нижче:"
-        )
-
-        u_custom = storage_manager.get_user_settings(user_id)
-        card_mask = u_custom.sender_card_mask
-
-        await callback.message.edit_text(
-            card_text,
-            parse_mode="Markdown",
-            reply_markup=get_confirmation_keyboard(
-                payer_type=payer_type,
-                cargo_type=cargo_type,
-                declared_value=declared_val,
-                cod_amount=cod_val,
-                cod_payment_type=cod_type,
-                sender_card_mask=card_mask,
-                session_id=session_id,
-            ),
-        )
+        card_text, markup = await _build_waybill_preview_message(session_id, user_id)
+        await callback.message.edit_text(card_text, parse_mode="Markdown", reply_markup=markup)
         await callback.answer(f"Обрано: {matched_city.description}")
 
     @router.callback_query(StreetSelectCallback.filter())
@@ -5482,36 +5122,8 @@ def register_handlers(
         session["parsed_info"] = parsed_info
         USER_LAST_PARSED_INFO[user_id] = parsed_info
 
-        cod_str = "❌ Немає" if cod_val <= 0 else f"{int(cod_val)} грн"
-
-        card_text = (
-            "📋 *Розпарсені дані отримувача для перевірки:*\n\n"
-            f"👤 *Отримувач:* {parsed_info.full_name}\n"
-            f"📞 *Телефон:* `{parsed_info.phone}`\n"
-            f"🏙 *Місто:* {city.description}\n"
-            f"📦 *Пункт призначення:* {dest_desc}\n"
-            f"📝 *Опис вантажу:* {cargo_desc}\n"
-            f"💰 *Оціночна вартість:* {int(declared_val)} грн (Мін. 500 грн)\n"
-            f"💵 *Накладений платіж:* {cod_str}\n\n"
-            "Перевірте дані та оберіть дію нижче:"
-        )
-
-        u_custom = storage_manager.get_user_settings(user_id)
-        card_mask = u_custom.sender_card_mask
-
-        await callback.message.edit_text(
-            card_text,
-            parse_mode="Markdown",
-            reply_markup=get_confirmation_keyboard(
-                payer_type=session.get("payer_type", eff_settings.default_payer_type),
-                cargo_type=session.get("cargo_type", eff_settings.default_cargo_type),
-                declared_value=declared_val,
-                cod_amount=cod_val,
-                cod_payment_type=cod_type,
-                sender_card_mask=card_mask,
-                session_id=session_id,
-            ),
-        )
+        card_text, markup = await _build_waybill_preview_message(session_id, user_id)
+        await callback.message.edit_text(card_text, parse_mode="Markdown", reply_markup=markup)
         await callback.answer(f"Обрано: {street_display}")
 
     @router.callback_query(RegisterActionCallback.filter())

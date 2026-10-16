@@ -383,6 +383,14 @@ async def test_process_waybill_callback_switch_profile(multi_user_manager, mock_
         callback.answer.assert_called_with(f"✅ Відправника перемкнуто на «{p2.name}»! Баланс оновлено.")
         callback.message.edit_text.assert_called_once()
 
+        # Card opens with the switch notice and shows the new sender's phone on the card and the button
+        card_text = callback.message.edit_text.call_args[0][0]
+        assert card_text.startswith("🔁 *Перемкнуто на відправника:* Профіль 2 (ФОП)")
+        assert f"👤 *Відправник:* {p2.name} (`380992222222`)" in card_text
+        markup = callback.message.edit_text.call_args.kwargs["reply_markup"]
+        sender_btn = [b for row in markup.inline_keyboard for b in row if b.callback_data == "wb:cycle_sender:test-session-123"]
+        assert sender_btn and sender_btn[0].text.endswith("· 380992222222")
+
 
 @pytest.mark.asyncio
 async def test_user_profile_rename_callback_and_input(multi_user_manager, mock_settings):
