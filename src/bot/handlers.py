@@ -381,6 +381,39 @@ async def detach_drafts_from_old_registers(
     return moved, disbanded
 
 
+async def shipped_doc_numbers(user_np_client: NovaPoshtaClient, doc_numbers: List[str]) -> Optional[set]:
+    """TTN numbers NP already took for delivery; None when the status check failed."""
+    if not doc_numbers:
+        return set()
+    try:
+        statuses = await user_np_client.get_documents_status(list(set(doc_numbers)))
+    except Exception as e:
+        logger.warning(f"Failed to check TTN statuses for registers: {e}")
+        return None
+    return {n for n, st in statuses.items() if st.get("is_shipped")}
+
+
+async def get_active_scansheets(
+    user_id: int,
+    user_np_client: NovaPoshtaClient,
+    storage_manager: UserSettingsManager,
+) -> List[SavedScanSheet]:
+    """Saved registers the user still works with: none of their TTNs is shipped.
+
+    A register with at least one shipped TTN is purged from local storage and never shown or used again.
+    If NP statuses are unavailable, nothing is hidden.
+    """
+    storage_manager.cleanup_invalid_scansheets(user_id)
+    sheets = storage_manager.get_user_scansheets(user_id)
+    shipped = await shipped_doc_numbers(user_np_client, [n for s in sheets for n in s.document_numbers])
+    if not shipped:
+        return sheets
+    sent_refs = [s.ref for s in sheets if any(n in shipped for n in s.document_numbers)]
+    if sent_refs:
+        storage_manager.purge_old_or_sent_scansheets(user_id, sent_refs)
+    return [s for s in sheets if s.ref not in sent_refs]
+
+
 async def build_register_context(
     user_np_client: NovaPoshtaClient,
     sheet: SavedScanSheet,
@@ -3058,59 +3091,30 @@ def register_handlers(
             "🔍 *Отримання ваших активних реєстрів з Нової Пошти...*", parse_mode="Markdown"
         )
         try:
-            storage_manager.cleanup_invalid_scansheets(user_id)
             raw_api_sheets = await user_np_client.get_scan_sheets(days_back=2)
-            raw_saved_sheets = storage_manager.get_user_scansheets(user_id)
+            # Registers with a shipped TTN are dropped here and never shown
+            active_saved = await get_active_scansheets(user_id, user_np_client, storage_manager)
 
             # Purge locally saved sheets older than 2 days
-            old_saved_refs = [
-                s.ref for s in raw_saved_sheets
-                if not _is_recent_scansheet(s.date_created, max_days=2)
-            ]
+            old_saved_refs = [s.ref for s in active_saved if not _is_recent_scansheet(s.date_created, max_days=2)]
             if old_saved_refs:
                 storage_manager.purge_old_or_sent_scansheets(user_id, old_saved_refs)
-                raw_saved_sheets = storage_manager.get_user_scansheets(user_id)
+            recent_saved_sheets = [s for s in active_saved if s.ref not in old_saved_refs]
 
-            # Filter API sheets by recent date, non-empty number/ref & non-printed status
-            recent_api_sheets = [
+            # Live registers not stored locally: recent, non-printed, non-empty, and none of their TTNs shipped
+            saved_keys = {k for s in recent_saved_sheets for k in (s.ref, s.number)}
+            extra_api_sheets = [
                 s for s in raw_api_sheets
-                if s.ref and s.number and str(s.number).strip()
+                if s.ref and s.number and str(s.number).strip() and s.ref not in saved_keys and s.number not in saved_keys
                 and not s.is_printed and _is_recent_scansheet(s.date_created, max_days=2) and s.count_of_documents > 0
             ]
-
-            # Collect document numbers from saved sheets to check if they are all shipped
-            all_doc_numbers = []
-            for sheet in raw_saved_sheets:
-                if sheet.document_numbers:
-                    all_doc_numbers.extend(sheet.document_numbers)
-
-            shipped_doc_set = set()
-            if all_doc_numbers and eff_settings.nova_poshta_api_key:
-                try:
-                    doc_statuses = await user_np_client.get_documents_status(all_doc_numbers)
-                    for d_num, s_info in doc_statuses.items():
-                        if s_info.get("is_shipped"):
-                            shipped_doc_set.add(d_num)
-                except Exception as e:
-                    logger.error(f"Error checking TTN statuses for registers: {e}")
-
-            # Filter saved sheets: purge sheets where all TTNs are shipped or missing valid numbers
-            recent_saved_sheets = []
-            sent_saved_refs = []
-            for sheet in raw_saved_sheets:
-                if not sheet.ref or not sheet.number or not str(sheet.number).strip():
-                    sent_saved_refs.append(sheet.ref)
-                    continue
-                if not _is_recent_scansheet(sheet.date_created, max_days=2):
-                    sent_saved_refs.append(sheet.ref)
-                    continue
-                if sheet.document_numbers and all(d_num in shipped_doc_set for d_num in sheet.document_numbers):
-                    sent_saved_refs.append(sheet.ref)
-                    continue
-                recent_saved_sheets.append(sheet)
-
-            if sent_saved_refs:
-                storage_manager.purge_old_or_sent_scansheets(user_id, sent_saved_refs)
+            api_docs = await asyncio.gather(*(user_np_client.get_scan_sheet_documents(s.ref) for s in extra_api_sheets))
+            api_nums = [[str(d.get("Number", "")).strip() for d in docs] for docs in api_docs]
+            api_shipped = await shipped_doc_numbers(user_np_client, [n for nums in api_nums for n in nums if n])
+            recent_api_sheets = [
+                s for s, nums in zip(extra_api_sheets, api_nums)
+                if not (api_shipped and any(n in api_shipped for n in nums))
+            ]
 
             if not recent_api_sheets and not recent_saved_sheets:
                 await status_msg.edit_text(
@@ -3220,12 +3224,15 @@ def register_handlers(
                 active_drafts = await fetch_user_active_drafts(actual_user_id, user_np_client, storage_manager)
 
                 # Prepare active register context if available
+                # Only registers without shipped TTNs count; the remembered one must still be among them
+                active_sheets = await get_active_scansheets(actual_user_id, user_np_client, storage_manager)
+                active_refs = {sh.ref for sh in active_sheets}
                 last_scansheet = USER_LAST_SCANSHEET_CONTEXT.get(actual_user_id)
-                if not last_scansheet:
-                    storage_manager.cleanup_invalid_scansheets(actual_user_id)
-                    user_saved_sheets = storage_manager.get_user_scansheets(actual_user_id)
-                    if user_saved_sheets:
-                        last_scansheet = await build_register_context(user_np_client, user_saved_sheets[0], active_drafts)
+                if last_scansheet and last_scansheet.get("ref") not in active_refs:
+                    USER_LAST_SCANSHEET_CONTEXT.pop(actual_user_id, None)
+                    last_scansheet = None
+                if not last_scansheet and active_sheets:
+                    last_scansheet = await build_register_context(user_np_client, active_sheets[0], active_drafts)
 
                 if not active_drafts and not last_scansheet:
                     await status_msg.edit_text(
@@ -3254,10 +3261,9 @@ def register_handlers(
                         target_ref = last_scansheet.get("ref")
                         target_num = last_scansheet.get("number")
                     else:
-                        user_sheets = storage_manager.get_user_scansheets(actual_user_id)
-                        if user_sheets:
-                            target_ref = user_sheets[0].ref
-                            target_num = user_sheets[0].number
+                        if active_sheets:
+                            target_ref = active_sheets[0].ref
+                            target_num = active_sheets[0].number
 
                     if not target_ref:
                         await status_msg.edit_text(
@@ -3292,9 +3298,8 @@ def register_handlers(
                     # If user specified a specific register number or ref, switch to it
                     if ai_reg_result.register_number_or_ref:
                         reg_q = str(ai_reg_result.register_number_or_ref).strip()
-                        user_saved_sheets = storage_manager.get_user_scansheets(actual_user_id)
                         matched_s = next(
-                            (s for s in user_saved_sheets if s.number == reg_q or s.ref == reg_q),
+                            (s for s in active_sheets if s.number == reg_q or s.ref == reg_q),
                             None
                         )
                         if matched_s:
@@ -3448,7 +3453,7 @@ def register_handlers(
                     if ai_reg_result.action == "add_waybill":
                         reg_q = str(ai_reg_result.register_number_or_ref or "").strip()
                         named = next(
-                            (sh for sh in storage_manager.get_user_scansheets(actual_user_id) if reg_q and reg_q in (sh.number, sh.ref)),
+                            (sh for sh in active_sheets if reg_q and reg_q in (sh.number, sh.ref)),
                             None,
                         )
                         if named:

@@ -1263,3 +1263,89 @@ async def test_add_waybill_to_last_register_extends_it(tmp_path, np_ref):
         assert [s.number for s in sheets] == ["105-99", "105-81323638"]
         assert sheets[1].document_numbers == ["20451562539764", "20451562537828"]
         assert "Нова Пошта відкрила новий реєстр" in caption and "105-99" in caption
+
+
+def _registers_setup(tmp_path):
+    import os
+    import datetime
+    from src.bot.handlers import register_handlers, USER_LAST_SCANSHEET_CONTEXT
+    from src.storage import UserSettingsManager, SavedDraft, SavedScanSheet
+    from src.config import Settings
+    from unittest.mock import MagicMock
+
+    USER_LAST_SCANSHEET_CONTEXT.clear()
+    manager = UserSettingsManager(
+        filepath=os.path.join(tmp_path, "s.json"),
+        drafts_filepath=os.path.join(tmp_path, "d.json"),
+        scansheets_filepath=os.path.join(tmp_path, "ss.json"),
+    )
+    manager.update_user_settings(777, nova_poshta_api_key="np", ai_api_key="ai")
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    base = dict(recipient_phone="380990000000", city_description="Київ", warehouse_description="Відділення №1",
+                payer_type="Recipient", cargo_description="Пристрій", declared_value=500.0, cost=80.0,
+                created_at="16.10.2026")
+    manager.add_user_draft(777, SavedDraft(ref="ref-c", int_doc_number="20451560000003", recipient_name="В",
+                                           scan_sheet_number="105-00000001", **base))
+    manager.add_user_draft(777, SavedDraft(ref="ref-new", int_doc_number="20451569999999", recipient_name="Нова", **base))
+    # Older register: nothing shipped. Newer register: one of its two TTNs is already shipped.
+    manager.add_user_scansheet(777, SavedScanSheet(ref="reg-old", number="105-00000001", date_created=now,
+                                                   count_of_documents=1, document_numbers=["20451560000003"]))
+    manager.add_user_scansheet(777, SavedScanSheet(ref="reg-sent", number="105-00000002", date_created=now,
+                                                   count_of_documents=2,
+                                                   document_numbers=["20451560000001", "20451560000002"]))
+    register_handlers(Settings(TELEGRAM_BOT_TOKEN="dummy", SENDER_REF="s", SENDER_CONTACT_REF="c",
+                               SENDER_PHONE="380991234567"), MagicMock(), MagicMock(), manager)
+    return manager
+
+
+SHIPPED_STATUS = {"20451560000001": {"is_shipped": True, "is_draft": False}}
+
+
+@pytest.mark.asyncio
+async def test_registers_list_hides_register_with_a_shipped_waybill(tmp_path):
+    from src.bot.handlers import router
+    from unittest.mock import patch, AsyncMock, MagicMock
+
+    manager = _registers_setup(tmp_path)
+    cmd = next(h.callback for h in reversed(router.message.handlers) if "cmd_registers" in str(h.callback))
+    with patch("src.nova_poshta.client.NovaPoshtaClient.get_scan_sheets", new_callable=AsyncMock, return_value=[]), \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_documents_status", new_callable=AsyncMock,
+               return_value=SHIPPED_STATUS):
+        msg = MagicMock()
+        msg.from_user.id = 777
+        msg.answer = AsyncMock(return_value=MagicMock(edit_text=AsyncMock(), delete=AsyncMock()))
+        await cmd(msg)
+
+    shown = " ".join(c.args[0] for c in msg.answer.call_args_list)
+    assert "105-00000001" in shown and "105-00000002" not in shown
+    assert [s.number for s in manager.get_user_scansheets(777)] == ["105-00000001"]
+
+
+@pytest.mark.asyncio
+async def test_add_waybill_skips_register_with_a_shipped_waybill(tmp_path):
+    from src.bot.handlers import router
+    from src.ai.schemas import ParsedRecipientInfo, AIRegisterFilterResult
+    from src.nova_poshta.models import ScanSheetInfo
+    from unittest.mock import patch, AsyncMock, MagicMock
+
+    _registers_setup(tmp_path)
+    with patch("src.ai.extractor.AIExtractor.parse_text", new_callable=AsyncMock, return_value=ParsedRecipientInfo(
+             is_recipient_info=False, is_register_intent=True, register_action="create")), \
+         patch("src.ai.extractor.AIExtractor.filter_drafts_for_register", new_callable=AsyncMock,
+               return_value=AIRegisterFilterResult(action="add_waybill", selected_doc_numbers=["20451569999999"])) as mock_filter, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.create_scan_sheet", new_callable=AsyncMock,
+               return_value=ScanSheetInfo(Ref="reg-old", Number="105-00000001", DateTime="", CountOfDocuments=2,
+                                          success_documents=["ref-new"])) as mock_create, \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_scan_sheet_documents", new_callable=AsyncMock, return_value=[]), \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_internet_document_list", new_callable=AsyncMock, return_value=[]), \
+         patch("src.nova_poshta.client.NovaPoshtaClient.get_documents_status", new_callable=AsyncMock,
+               return_value=SHIPPED_STATUS):
+        msg = MagicMock()
+        msg.from_user.id = 777
+        msg.answer = AsyncMock(return_value=MagicMock(edit_text=AsyncMock(), delete=AsyncMock()))
+        msg.answer_photo = AsyncMock()
+        await router._handle_combined_text_message(msg, "Додай цю накладну до останнього реєстру", user_id=777)
+
+    # The newest register has a shipped TTN, so the AI and the add see only the older one
+    assert mock_filter.call_args.kwargs["active_scansheet"]["number"] == "105-00000001"
+    assert mock_create.call_args.kwargs["scan_sheet_ref"] == "reg-old"
