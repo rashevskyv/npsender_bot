@@ -210,7 +210,8 @@ async def gather_account_digests(
             incoming=sorted(incoming, key=lambda w: w.cod_amount, reverse=True),
         )
 
-    results = await asyncio.gather(*[_one(p) for p in profiles])
+    # One profile at a time: parallel profiles trip NP's "To many requests" limit and could drop data.
+    results = [await _one(p) for p in profiles]
     return [r for r in results if r]
 
 
