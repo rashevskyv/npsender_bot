@@ -1,4 +1,4 @@
-"""Money-transfer (COD payout) report for the button, and the once-a-day new-transfer reminder.
+"""Money-transfer (COD payout) report for the button, and the once-a-day uncollected-transfer reminder.
 
 A "грошовий переказ" here is the money from a cash-on-delivery (накладений платіж)
 shipment coming back to the sender. The important state is "waiting" — cash the
@@ -139,22 +139,22 @@ def format_transfers_report(reports: List[ProfileReport], title: str) -> str:
     return "\n".join(lines)
 
 
-def format_new_transfers_message(new_items: List[Tuple[str, CODItemInfo]]) -> str:
-    """Build the daily reminder about newly-collectible cash transfers."""
-    lines = ["🔔 *Нові грошові перекази — є що забрати!*", ""]
+def format_transfers_reminder(items: List[Tuple[str, CODItemInfo]]) -> str:
+    """Build the daily reminder listing uncollected cash transfers."""
+    lines = ["🔔 *Не забрані грошові перекази — є що забрати!*", ""]
     total = 0.0
-    for name, it in new_items:
+    for name, it in items:
         city = it.city_recipient or "—"
         rec = it.recipient_name or "—"
         lines.append(f"👤 {name}: `{int(it.cod_amount)} грн` → {city}, {rec} (ТТН `{it.int_doc_number}`)")
         total += it.cod_amount
     lines.append("")
-    lines.append(f"💰 *Разом нових: {int(total)} грн ({len(new_items)} переказів)*")
+    lines.append(f"💰 *Разом не забрано: {int(total)} грн ({len(items)} переказів)*")
     return "\n".join(lines)
 
 
 async def run_transfer_check(bot, storage_manager: UserSettingsManager, settings: Settings) -> int:
-    """One pass: for every bot user, notify about newly-waiting cash transfers. Returns users notified."""
+    """One pass: remind every bot user about ALL their uncollected cash transfers. Returns users reminded."""
     notified_users = 0
     for uid_str in list(storage_manager.data.keys()):
         try:
@@ -173,27 +173,18 @@ async def run_transfer_check(bot, storage_manager: UserSettingsManager, settings
         if not waiting:
             continue
 
-        already = set(storage_manager.get_notified_transfers(uid))
-        new_items = [(name, it) for name, it in waiting if it.int_doc_number not in already]
-        if not new_items:
-            continue
-
-        # Send in chunks so a long list never trips Telegram's 4096-char limit.
-        # Mark only what was actually sent, so a failed chunk retries next run.
-        sent_numbers: List[str] = []
+        # Send all uncollected, chunked so a long list never trips Telegram's 4096-char limit.
         sent_any = False
-        for i in range(0, len(new_items), 30):
-            chunk = new_items[i:i + 30]
+        for i in range(0, len(waiting), 30):
+            chunk = waiting[i:i + 30]
             try:
-                await bot.send_message(uid, format_new_transfers_message(chunk), parse_mode="Markdown")
+                await bot.send_message(uid, format_transfers_reminder(chunk), parse_mode="Markdown")
                 sent_any = True
-                sent_numbers.extend(it.int_doc_number for _, it in chunk)
             except Exception as e:
                 logger.warning(f"Failed to send transfer reminder to {uid}: {e}")
                 break
         if sent_any:
             notified_users += 1
-            storage_manager.add_notified_transfers(uid, sent_numbers)
     return notified_users
 
 

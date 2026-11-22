@@ -74,9 +74,6 @@ class UserCustomSettings(BaseModel):
     cod_monthly_limit_count: Optional[int] = 10
     cod_warning_enabled: bool = True
 
-    # Waybill numbers of money transfers already reported by the daily reminder
-    notified_transfers: List[str] = Field(default_factory=list)
-
 
 class SavedDraft(BaseModel):
     """Created waybill draft details."""
@@ -454,24 +451,6 @@ class UserSettingsManager:
 
         self.data[uid_str] = updated_obj
         self.save_settings()
-
-    def get_notified_transfers(self, user_id: int) -> List[str]:
-        """Return waybill numbers of money transfers already reported to this user."""
-        return list(self.get_user_settings(user_id).notified_transfers or [])
-
-    def add_notified_transfers(self, user_id: int, numbers: List[str]) -> None:
-        """Mark money-transfer waybill numbers as reported (FIFO-capped at 500)."""
-        existing = self.get_notified_transfers(user_id)
-        changed = False
-        for n in numbers:
-            if n and n not in existing:
-                existing.append(n)
-                changed = True
-        if not changed:
-            return
-        if len(existing) > 500:  # ponytail: FIFO trim, raise if a user keeps >500 open transfers
-            existing = existing[-500:]
-        self.update_user_settings(user_id, notified_transfers=existing)
 
     def reset_user_settings(self, user_id: int):
         """Reset custom settings for a user ID."""

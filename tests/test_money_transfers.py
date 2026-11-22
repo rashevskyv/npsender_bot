@@ -1,4 +1,4 @@
-"""Tests for money-transfer (COD payout) classification, report, and daily new-detection."""
+"""Tests for money-transfer (COD payout) classification, report, and daily uncollected reminder."""
 
 import pytest
 from unittest.mock import AsyncMock
@@ -8,7 +8,7 @@ from src.nova_poshta.models import CODItemInfo
 from src.storage import UserSettingsManager, SenderProfile, UserCustomSettings
 from src.config import Settings
 import src.bot.reminders as reminders
-from src.bot.reminders import format_transfers_report, run_transfer_check
+from src.bot.reminders import format_transfers_report, format_transfers_reminder, run_transfer_check
 
 
 def _item(num, amount, pay="cash", state_id="9", state_name="Отримано",
@@ -70,7 +70,7 @@ class _FakeBot:
 
 
 @pytest.mark.asyncio
-async def test_run_transfer_check_notifies_only_new(tmp_path, monkeypatch):
+async def test_run_transfer_check_sends_all_waiting_every_run(tmp_path, monkeypatch):
     storage = UserSettingsManager(
         filepath=str(tmp_path / "s.json"),
         drafts_filepath=str(tmp_path / "d.json"),
@@ -88,29 +88,39 @@ async def test_run_transfer_check_notifies_only_new(tmp_path, monkeypatch):
     settings = Settings(TELEGRAM_BOT_TOKEN="t", NOVA_POSHTA_API_KEY="k", AI_API_KEY="a")
     bot = _FakeBot()
 
-    # First run: both waiting transfers are new -> one message
+    # Every run lists all uncollected transfers (no "already notified" suppression).
     notified = await run_transfer_check(bot, storage, settings)
     assert notified == 1
     assert len(bot.sent) == 1
     assert "900" in bot.sent[0][1] and "901" in bot.sent[0][1]
-    assert set(storage.get_notified_transfers(555)) == {"900", "901"}
 
-    # Second run: nothing new -> no message
     notified2 = await run_transfer_check(bot, storage, settings)
-    assert notified2 == 0
-    assert len(bot.sent) == 1
+    assert notified2 == 1
+    assert len(bot.sent) == 2
+    assert "900" in bot.sent[1][1] and "901" in bot.sent[1][1]
 
 
-def test_add_notified_transfers_dedup_and_cap(tmp_path):
+@pytest.mark.asyncio
+async def test_run_transfer_check_silent_when_nothing_waiting(tmp_path, monkeypatch):
     storage = UserSettingsManager(
         filepath=str(tmp_path / "s.json"),
         drafts_filepath=str(tmp_path / "d.json"),
         scansheets_filepath=str(tmp_path / "ss.json"),
     )
-    storage.data["7"] = UserCustomSettings(nova_poshta_api_key="k")
-    storage.add_notified_transfers(7, ["a", "b"])
-    storage.add_notified_transfers(7, ["b", "c"])  # b is a dup
-    assert storage.get_notified_transfers(7) == ["a", "b", "c"]
-    # cap at 500
-    storage.add_notified_transfers(7, [str(i) for i in range(600)])
-    assert len(storage.get_notified_transfers(7)) == 500
+    storage.data["555"] = UserCustomSettings(nova_poshta_api_key="k")
+    # all collected / card -> nothing to remind about
+    reports = [("Іван", [_item("900", 1200, state_id="11", state_name="виплачено"),
+                         _item("901", 3400, pay="card")])]
+    monkeypatch.setattr(reminders, "gather_profiles_transfers", AsyncMock(return_value=reports))
+
+    settings = Settings(TELEGRAM_BOT_TOKEN="t", NOVA_POSHTA_API_KEY="k", AI_API_KEY="a")
+    bot = _FakeBot()
+    notified = await run_transfer_check(bot, storage, settings)
+    assert notified == 0
+    assert bot.sent == []
+
+
+def test_format_transfers_reminder_lists_items():
+    text = format_transfers_reminder([("Іван", _item("900", 1200, state_id="9", city="Львів"))])
+    assert "900" in text and "1200" in text and "Львів" in text
+    assert "Разом не забрано: 1200 грн (1 переказів)" in text
