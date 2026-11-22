@@ -1,22 +1,34 @@
-"""Money-transfer (COD payout) report for the button, and the once-a-day uncollected-transfer reminder.
+"""Money-transfer report ("💸" button) and the "📬 Що забрати" digest (button + once-a-day reminder).
 
 A "грошовий переказ" here is the money from a cash-on-delivery (накладений платіж)
 shipment coming back to the sender. The important state is "waiting" — cash the
 sender has not collected yet. See client.classify_transfer_status.
+
+The digest groups, per account: client card + phone, incoming parcels that arrived and are
+not picked up, and uncollected transfers; it adds a passport reminder from 30 000 грн.
 """
 
 import asyncio
 import datetime
 import logging
+from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
+
+from aiogram.types import BufferedInputFile
 
 from src.config import Settings
 from src.storage import UserSettingsManager
 from src.nova_poshta.client import NovaPoshtaClient, classify_transfer_status
-from src.nova_poshta.models import CODItemInfo
+from src.nova_poshta.models import CODItemInfo, WaybillItemInfo
 from src.bot.keyboards import format_profile_display_name
+from src.utils.barcode_gen import generate_client_card_image
 
 logger = logging.getLogger(__name__)
+
+# Nova Poshta asks for a passport / an active phone number at pickup from this sum (inclusive).
+PASSPORT_THRESHOLD = 30000.0
+# Max lines per list in one message (keeps the text under Telegram's 4096-char limit).
+_MAX_LINES = 15
 
 # (profile display name, its COD shipments for the period)
 ProfileReport = Tuple[str, List[CODItemInfo]]
@@ -53,24 +65,29 @@ async def gather_profiles_transfers(
         eff = storage_manager.get_effective_settings(user_id, global_settings, profile_id=p.id)
         if not eff.nova_poshta_api_key or not eff.sender_phone:
             return None
-        client = NovaPoshtaClient(eff)
-        merged: dict = {}
-        for (yy, mm) in ym_list:
-            try:
-                stats = await client.get_monthly_cod_stats(
-                    year=yy, month=mm,
-                    user_phone=eff.sender_phone,
-                    user_cp_ref=eff.sender_counterparty_ref,
-                )
-            except Exception as e:
-                logger.warning(f"Transfer fetch failed for profile {p.id} {yy}-{mm}: {e}")
-                continue
-            for it in stats.items:
-                merged[it.int_doc_number] = it
-        return format_profile_display_name(p, profiles), list(merged.values())
+        items = await _profile_transfers(NovaPoshtaClient(eff), eff, ym_list, p.id)
+        return format_profile_display_name(p, profiles), items
 
     results = await asyncio.gather(*[_one(p) for p in profiles])
     return [r for r in results if r]
+
+
+async def _profile_transfers(client: NovaPoshtaClient, eff: Settings, ym_list, profile_id: str = "") -> List[CODItemInfo]:
+    """COD shipments of one profile over the given (year, month) list, deduped by waybill number."""
+    merged: dict = {}
+    for (yy, mm) in ym_list:
+        try:
+            stats = await client.get_monthly_cod_stats(
+                year=yy, month=mm,
+                user_phone=eff.sender_phone,
+                user_cp_ref=eff.sender_counterparty_ref,
+            )
+        except Exception as e:
+            logger.warning(f"Transfer fetch failed for profile {profile_id} {yy}-{mm}: {e}")
+            continue
+        for it in stats.items:
+            merged[it.int_doc_number] = it
+    return list(merged.values())
 
 
 def _waiting_items(items: List[CODItemInfo]) -> List[CODItemInfo]:
@@ -139,22 +156,164 @@ def format_transfers_report(reports: List[ProfileReport], title: str) -> str:
     return "\n".join(lines)
 
 
-def format_transfers_reminder(items: List[Tuple[str, CODItemInfo]]) -> str:
-    """Build the daily reminder listing uncollected cash transfers."""
-    lines = ["🔔 *Не забрані грошові перекази — є що забрати!*", ""]
-    total = 0.0
-    for name, it in items:
-        city = it.city_recipient or "—"
-        rec = it.recipient_name or "—"
-        lines.append(f"👤 {name}: `{int(it.cod_amount)} грн` → {city}, {rec} (ТТН `{it.int_doc_number}`)")
-        total += it.cod_amount
-    lines.append("")
-    lines.append(f"💰 *Разом не забрано: {int(total)} грн ({len(items)} переказів)*")
-    return "\n".join(lines)
+@dataclass
+class AccountDigest:
+    """Everything that waits to be collected on ONE sender account (profile)."""
+
+    name: str
+    eff: Settings
+    transfers: List[CODItemInfo] = field(default_factory=list)  # cash payouts not collected yet
+    incoming: List[WaybillItemInfo] = field(default_factory=list)  # arrived, not picked up yet
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.transfers and not self.incoming
+
+    @property
+    def needs_passport(self) -> bool:
+        """Any waiting transfer or incoming COD of PASSPORT_THRESHOLD or more."""
+        return any(t.cod_amount >= PASSPORT_THRESHOLD for t in self.transfers) or any(
+            w.cod_amount >= PASSPORT_THRESHOLD for w in self.incoming
+        )
+
+
+async def gather_account_digests(
+    user_id: int,
+    storage_manager: UserSettingsManager,
+    global_settings: Settings,
+    months: int = 2,
+) -> List[AccountDigest]:
+    """One pass per account: money transfers and arrived incoming parcels are fetched together."""
+    profiles = storage_manager.get_sender_profiles(user_id)
+    ym_list = _recent_year_months(months)
+
+    async def _one(p) -> Optional[AccountDigest]:
+        eff = storage_manager.get_effective_settings(user_id, global_settings, profile_id=p.id)
+        if not eff.nova_poshta_api_key or not eff.sender_phone:
+            return None
+        client = NovaPoshtaClient(eff)
+        transfers, incoming = await asyncio.gather(
+            _profile_transfers(client, eff, ym_list, p.id),
+            client.get_uncollected_incoming(user_phone=eff.sender_phone),
+            return_exceptions=True,
+        )
+        if isinstance(transfers, Exception):
+            logger.warning(f"Transfers failed for profile {p.id}: {transfers}")
+            transfers = []
+        if isinstance(incoming, Exception):
+            logger.warning(f"Incoming failed for profile {p.id}: {incoming}")
+            incoming = []
+        return AccountDigest(
+            name=format_profile_display_name(p, profiles),
+            eff=eff,
+            transfers=_waiting_items(transfers),
+            incoming=sorted(incoming, key=lambda w: w.cod_amount, reverse=True),
+        )
+
+    results = await asyncio.gather(*[_one(p) for p in profiles])
+    return [r for r in results if r]
+
+
+async def build_account_card(eff: Settings) -> Optional[bytes]:
+    """Client-card PNG with a scannable barcode for the account (loyalty card, else phone). None on failure."""
+    try:
+        full_name = eff.sender_name or ""
+        phone = eff.sender_phone or ""
+        card_id = ""
+        info = await NovaPoshtaClient(eff).get_loyalty_info(api_key_override=eff.nova_poshta_api_key)
+        if info:
+            full_name = info.get("full_name") or full_name
+            phone = info.get("phone") or phone
+            card_id = info.get("loyalty_card") or info.get("user_login") or ""
+        clean_phone = "".join(ch for ch in phone if ch.isdigit())
+        if card_id:
+            barcode_val, barcode_lbl = card_id, card_id
+        else:
+            barcode_val = clean_phone or "0000000000"
+            barcode_lbl = f"+{clean_phone}" if clean_phone else barcode_val
+        return generate_client_card_image(
+            full_name=full_name or "Клієнт Нової Пошти",
+            phone=phone,
+            card_number=card_id,
+            barcode_data=barcode_val,
+            barcode_label=barcode_lbl,
+        )
+    except Exception as e:
+        logger.warning(f"Client card build failed: {e}")
+        return None
+
+
+def format_digest_header(d: AccountDigest) -> str:
+    """Photo caption: the account name and its phone as plain text (the card image carries the barcode)."""
+    return f"👤 *{d.name}*\n📞 `{d.eff.sender_phone}`"
+
+
+def format_digest_body(d: AccountDigest) -> str:
+    """Text under the card: passport reminder, waybill numbers to pick up, uncollected money transfers."""
+    lines: List[str] = []
+    if d.needs_passport:
+        limit = f"{int(PASSPORT_THRESHOLD):,}".replace(",", " ")
+        lines.append(f"🛂 *Є сума від {limit} грн* — візьміть паспорт або майте активний номер телефону.")
+        lines.append("")
+
+    if d.incoming:
+        lines.append(f"📥 *Посилки у відділенні — {len(d.incoming)} шт:*")
+        for w in d.incoming[:_MAX_LINES]:
+            cod = ""
+            if w.cod_amount > 0:
+                flag = "🛂 " if w.cod_amount >= PASSPORT_THRESHOLD else ""
+                cod = f" · {flag}післяплата `{int(w.cod_amount)} грн`"
+            sender = f" · від {w.sender_name}" if w.sender_name and w.sender_name != "N/A" else ""
+            lines.append(f"  • `{w.int_doc_number}`{cod}{sender}")
+        if len(d.incoming) > _MAX_LINES:
+            lines.append(f"  … ще {len(d.incoming) - _MAX_LINES} шт")
+        lines.append("")
+
+    if d.transfers:
+        total = int(sum(t.cod_amount for t in d.transfers))
+        lines.append(f"💸 *Не забрані грошові перекази — {total} грн ({len(d.transfers)} шт):*")
+        for t in d.transfers[:_MAX_LINES]:
+            flag = "🛂 " if t.cod_amount >= PASSPORT_THRESHOLD else ""
+            lines.append(
+                f"  • {flag}`{int(t.cod_amount)} грн` → {t.city_recipient or '—'}, "
+                f"{t.recipient_name or '—'} (ТТН `{t.int_doc_number}`)"
+            )
+        if len(d.transfers) > _MAX_LINES:
+            lines.append(f"  … ще {len(d.transfers) - _MAX_LINES} шт")
+    return "\n".join(lines).strip()
+
+
+async def _send_markdown(bot, chat_id: int, text: str) -> None:
+    """Send Markdown text; if Telegram rejects the markup (odd names), resend it as plain text."""
+    try:
+        await bot.send_message(chat_id, text, parse_mode="Markdown")
+    except Exception:
+        await bot.send_message(chat_id, text.replace("*", "").replace("`", ""))
+
+
+async def send_account_digest(bot, chat_id: int, d: AccountDigest) -> None:
+    """Send one account: client card (name + phone caption), then the lists below it."""
+    header = format_digest_header(d)
+    card = await build_account_card(d.eff)
+    sent_card = False
+    if card:
+        try:
+            await bot.send_photo(
+                chat_id,
+                BufferedInputFile(card, filename="client_card.png"),
+                caption=header,
+                parse_mode="Markdown",
+            )
+            sent_card = True
+        except Exception as e:
+            logger.warning(f"Failed to send client card to {chat_id}: {e}")
+    if not sent_card:
+        await _send_markdown(bot, chat_id, header)
+    await _send_markdown(bot, chat_id, format_digest_body(d))
 
 
 async def run_transfer_check(bot, storage_manager: UserSettingsManager, settings: Settings) -> int:
-    """One pass: remind every bot user about ALL their uncollected cash transfers. Returns users reminded."""
+    """One pass: send every bot user a digest per account that has something to collect. Returns users notified."""
     notified_users = 0
     for uid_str in list(storage_manager.data.keys()):
         try:
@@ -162,27 +321,20 @@ async def run_transfer_check(bot, storage_manager: UserSettingsManager, settings
         except (ValueError, TypeError):
             continue
         try:
-            reports = await gather_profiles_transfers(uid, storage_manager, settings, months=2)
+            digests = await gather_account_digests(uid, storage_manager, settings, months=2)
         except Exception as e:
-            logger.warning(f"Transfer check failed for user {uid_str}: {e}")
+            logger.warning(f"Daily check failed for user {uid_str}: {e}")
             continue
 
-        waiting: List[Tuple[str, CODItemInfo]] = [
-            (name, it) for name, items in reports for it in _waiting_items(items)
-        ]
-        if not waiting:
-            continue
-
-        # Send all uncollected, chunked so a long list never trips Telegram's 4096-char limit.
         sent_any = False
-        for i in range(0, len(waiting), 30):
-            chunk = waiting[i:i + 30]
+        for d in digests:
+            if d.is_empty:
+                continue
             try:
-                await bot.send_message(uid, format_transfers_reminder(chunk), parse_mode="Markdown")
+                await send_account_digest(bot, uid, d)
                 sent_any = True
             except Exception as e:
-                logger.warning(f"Failed to send transfer reminder to {uid}: {e}")
-                break
+                logger.warning(f"Failed to send digest to {uid}: {e}")
         if sent_any:
             notified_users += 1
     return notified_users

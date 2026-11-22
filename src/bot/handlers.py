@@ -2513,6 +2513,33 @@ def register_handlers(
             logger.error(f"Error building money transfers report: {e}", exc_info=True)
             await status_msg.edit_text(f"❌ *Помилка отримання переказів:* {str(e)}", parse_mode="Markdown")
 
+    @router.message(F.text == "📬 Що забрати")
+    async def cmd_to_collect(message: Message):
+        """Per account: client card + phone, arrived incoming parcels and uncollected money transfers."""
+        from src.bot.reminders import gather_account_digests, send_account_digest
+
+        clear_user_active_session(message.from_user.id)
+        if not await ensure_user_configured(message):
+            return
+
+        user_id = message.from_user.id
+        status_msg = await message.answer("⏳ *Перевіряю, що чекає на отримання...*", parse_mode="Markdown")
+        try:
+            digests = await gather_account_digests(user_id, storage_manager, settings, months=2)
+            if not digests:
+                await status_msg.edit_text("📬 Немає налаштованих користувачів з ключем Нової Пошти.")
+                return
+            waiting = [d for d in digests if not d.is_empty]
+            if not waiting:
+                await status_msg.edit_text("📬 *Нічого забирати* ✅\nНемає ні посилок у відділеннях, ні не забраних переказів.", parse_mode="Markdown")
+                return
+            await status_msg.edit_text(f"📬 *Що забрати — акаунтів: {len(waiting)}*", parse_mode="Markdown")
+            for d in waiting:
+                await send_account_digest(message.bot, message.chat.id, d)
+        except Exception as e:
+            logger.error(f"Error building to-collect digest: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ *Помилка:* {str(e)}", parse_mode="Markdown")
+
     @router.message(Command("set_cod_limit"))
     async def cmd_set_cod_limit(message: Message):
         """Set user's custom monthly COD sum limit."""

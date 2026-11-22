@@ -113,6 +113,15 @@ def classify_transfer_status(item: "CODItemInfo") -> str:
     return "pending"
 
 
+def is_arrived_for_pickup(state_id: str, state_name: str) -> bool:
+    """True when an incoming shipment has arrived (branch / postomat) and waits for the recipient.
+
+    NP StateId 7 = "Прибув у відділення" (verified on live data); 8 = arrived at a branch/postomat.
+    In-transit (5), address changed (104), preparing (4) are not "waiting" yet.
+    """
+    return str(state_id) in ("7", "8") or "прибув" in (state_name or "").lower()
+
+
 def _name_matches(user_name: Optional[str], target_name: Optional[str]) -> bool:
     """Check if any word in user_name matches target_name."""
     if not user_name or not target_name:
@@ -1300,6 +1309,56 @@ class NovaPoshtaClient:
                     estimated_delivery_date=doc.get("EstimatedDeliveryDate"),
                     date_created=doc.get("DateTime"),
                     is_light_return=check_is_light_return(doc),
+                )
+            )
+        return items
+
+    async def get_uncollected_incoming(
+        self, user_phone: Optional[str] = None, days_back: int = 30
+    ) -> List[WaybillItemInfo]:
+        """Incoming shipments that already arrived at a branch/postomat and still wait to be picked up.
+
+        Unlike get_incoming_waybills (which also lists in-transit ones), this keeps only
+        "arrived" states and fills cod_amount from the COD sum.
+        ponytail: uses getIncomingDocumentsByPhone only; add the getDocumentList recipient
+        fallback if a recipient-side waybill ever goes missing.
+        """
+        eff_phone = user_phone or getattr(self.settings, "sender_phone", None)
+        if self.api_key and self.api_key.startswith("test_"):
+            return []
+        raw = await self._fetch_raw_incoming_waybills_with_cache(days_back=days_back, user_phone=eff_phone)
+        items: List[WaybillItemInfo] = []
+        seen = set()
+        for doc in raw:
+            num = str(doc.get("IntDocNumber", doc.get("Number", ""))).strip()
+            if not num or num in seen:
+                continue
+            state_id = str(doc.get("StateId", doc.get("StatusCode", "")))
+            state_name = str(doc.get("StateName", doc.get("Status", "")))
+            if not is_arrived_for_pickup(state_id, state_name):
+                continue
+            seen.add(num)
+            cod = max(
+                _extract_float_amount(doc.get("AfterpaymentOnGoodsCost")),
+                _extract_float_amount(doc.get("RedeliverySum")),
+            )
+            items.append(
+                WaybillItemInfo(
+                    int_doc_number=num,
+                    state_name=state_name,
+                    state_id=state_id,
+                    recipient_name=str(doc.get("RecipientContactPerson", "N/A")),
+                    recipient_phone=doc.get("RecipientsPhone"),
+                    sender_name=str(doc.get("SenderContactPerson", "N/A")),
+                    sender_phone=doc.get("SendersPhone"),
+                    city_recipient=str(doc.get("CityRecipientDescription", "N/A")),
+                    address_recipient=str(doc.get("RecipientAddressDescription", "N/A")),
+                    cost=_extract_float_amount(doc.get("Cost")),
+                    cod_amount=cod,
+                    cod_payment_type="card" if doc.get("CardMaskedNumber") else "cash",
+                    description=str(doc.get("Description", "Посилка")),
+                    estimated_delivery_date=doc.get("EstimatedDeliveryDate"),
+                    date_created=doc.get("DateTime"),
                 )
             )
         return items
