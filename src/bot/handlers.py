@@ -2491,6 +2491,28 @@ def register_handlers(
             logger.error(f"Error fetching COD stats: {e}", exc_info=True)
             await status_msg.edit_text(f"❌ *Помилка отримання статистики:* {str(e)}", parse_mode="Markdown")
 
+    @router.message(F.text == "💸 Грошові перекази")
+    async def cmd_money_transfers(message: Message):
+        """Report money transfers (COD payouts) for all sender profiles, emphasizing uncollected cash."""
+        from src.bot.reminders import gather_profiles_transfers, format_transfers_report
+        from src.nova_poshta.client import UKRAINIAN_MONTHS
+
+        clear_user_active_session(message.from_user.id)
+        if not await ensure_user_configured(message):
+            return
+
+        user_id = message.from_user.id
+        status_msg = await message.answer("⏳ *Перевіряю грошові перекази по всіх користувачах...*", parse_mode="Markdown")
+        try:
+            reports = await gather_profiles_transfers(user_id, storage_manager, settings, months=2)
+            now = datetime.datetime.now()
+            title = f"{UKRAINIAN_MONTHS.get(now.month, now.month)} {now.year}"
+            text = format_transfers_report(reports, title)
+            await status_msg.edit_text(text, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Error building money transfers report: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ *Помилка отримання переказів:* {str(e)}", parse_mode="Markdown")
+
     @router.message(Command("set_cod_limit"))
     async def cmd_set_cod_limit(message: Message):
         """Set user's custom monthly COD sum limit."""

@@ -11,6 +11,7 @@ from src.storage import UserSettingsManager
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
 from src.bot.handlers import router, register_handlers
+from src.bot.reminders import daily_transfer_reminder_loop
 
 # Configure logging
 logging.basicConfig(
@@ -40,10 +41,16 @@ async def main():
     # Drop the "Меню" button so the reply keyboard toggle shows on desktop as on mobile
     await setup_bot_commands(bot)
 
+    # Start the once-a-day money-transfer reminder in the background
+    reminder_task = asyncio.create_task(
+        daily_transfer_reminder_loop(bot, storage_manager, settings, hour=settings.transfer_reminder_hour)
+    )
+
     logger.info("Starting Bot Long Polling...")
     try:
         await dp.start_polling(bot)
     finally:
+        reminder_task.cancel()
         await bot.session.close()
 
 

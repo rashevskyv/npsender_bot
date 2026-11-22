@@ -81,6 +81,38 @@ def _extract_float_amount(val: Any) -> float:
 
 
 
+def classify_transfer_status(item: "CODItemInfo") -> str:
+    """Classify a COD shipment by the money transfer back to the sender.
+
+    Returns one of:
+      "waiting"   — готівковий переказ чекає на відправника (НЕ ЗАБРАНО) — головне
+      "collected" — переказ виплачено / забрано відправником
+      "card"      — виплата на картку, забирати нічого
+      "pending"   — посилку ще не отримали, гроші очікуються (переказу ще нема)
+      "refused"   — відмова / повернення
+      "draft"     — чернетка
+    """
+    if item.is_draft:
+        return "draft"
+    if item.is_refused:
+        return "refused"
+
+    state_name = (item.state_name or "").lower()
+
+    if item.cod_payment_type == "card":
+        return "card" if item.is_received else "pending"
+
+    # Cash COD
+    if item.is_received:
+        # ponytail: cash collected-vs-waiting split uses NP StateId 11 (виплачено)
+        # vs 9/10/106 (отримано, переказ ще в касі). If real codes differ, narrow
+        # here; the exact per-transfer signal is tracking RedeliveryNum.
+        if item.state_id == "11" or any(w in state_name for w in ["виплачено", "видано грошовий переказ", "переказ видано"]):
+            return "collected"
+        return "waiting"
+    return "pending"
+
+
 def _name_matches(user_name: Optional[str], target_name: Optional[str]) -> bool:
     """Check if any word in user_name matches target_name."""
     if not user_name or not target_name:

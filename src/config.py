@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     default_weight: float = Field(1.0, alias="DEFAULT_WEIGHT")
     default_declared_value: float = Field(500.0, alias="DEFAULT_DECLARED_VALUE")
 
+    # Daily money-transfer reminder (local server hour, 0-23)
+    transfer_reminder_hour: int = Field(10, alias="TRANSFER_REMINDER_HOUR")
+
 
 # Lazy global instance initialization
 def get_settings() -> Settings:

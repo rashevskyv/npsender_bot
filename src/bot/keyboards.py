@@ -25,6 +25,9 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="🔍 Відстежити ТТН"),
             ],
             [
+                KeyboardButton(text="💸 Грошові перекази"),
+            ],
+            [
                 KeyboardButton(text="👥 Користувачі"),
                 KeyboardButton(text="⚙️ Налаштування"),
             ],
