@@ -18,6 +18,7 @@ from src.storage import (
     SavedDraft,
     SavedScanSheet,
     SenderProfile,
+    PendingCardReminder,
 )
 from src.ai.schemas import ParsedRecipientInfo
 from src.ai.extractor import AIExtractor
@@ -57,6 +58,8 @@ from src.bot.keyboards import (
     format_profile_display_name,
     ClientCardCallback,
     get_client_card_keyboard,
+    CardReminderCallback,
+    get_card_reminder_keyboard,
     get_settings_keyboard,
     get_missing_sender_address_keyboard,
     get_retry_waybill_keyboard,
@@ -1027,7 +1030,10 @@ async def evaluate_all_profiles_cod_limits(
     suggested_profile = None
     if len(profiles) > 1 and active_profile:
         act_stat = profiles_status.get(active_profile.id)
-        other_stats = [st for pid, st in profiles_status.items() if pid != active_profile.id]
+        other_stats = [
+            st for pid, st in profiles_status.items()
+            if pid != active_profile.id and (st["profile"].cod_allowed or not cod_val)
+        ]
 
         if act_stat and other_stats:
             act_rem = act_stat["rem_sum"]
@@ -1240,6 +1246,20 @@ def register_handlers(
     storage_manager: UserSettingsManager,
 ):
     """Factory to inject dependencies into router handlers."""
+
+    def _restore_rotation(user_id: int, session: dict) -> None:
+        """After an edit as the draft's owner: give the COD rotation its account back."""
+        pid = session.pop("restore_profile_id", None)
+        if pid:
+            storage_manager.set_active_profile(user_id, pid)
+
+    def _next_sender_id(profiles, curr_idx: int, cod_amount: float) -> Optional[str]:
+        """Id of the next sender after curr_idx; accounts with COD switched off are skipped for a COD waybill."""
+        for step in range(1, len(profiles)):
+            cand = profiles[(curr_idx + step) % len(profiles)]
+            if cand.cod_allowed or not cod_amount:
+                return cand.id
+        return None
 
     async def _delete_waybill_any_profile(user_id: int, ref: str) -> bool:
         """Delete a waybill with the sender profile that owns it: the active one first, then the others.
@@ -2037,12 +2057,14 @@ def register_handlers(
         )
 
         prof_eff_id = prof.id if prof else "active"
-        kb = get_client_card_keyboard(profile_id=prof_eff_id, current_mode=current_mode)
+        cod_allowed = prof.cod_allowed if prof else True
+        kb = get_client_card_keyboard(profile_id=prof_eff_id, current_mode=current_mode, cod_allowed=cod_allowed)
         barcode_type_desc = "номер телефону" if current_mode == "phone" else "картка лояльності / CID"
         caption = (
             f"💳 *Картка клієнта Нової Пошти*\n\n"
             f"👤 *Власник:* `{full_name or 'Не підтягнуто'}`\n"
             f"📞 *Телефон:* `{phone or 'Не вказано'}`\n"
+            f"💵 *Накладений платіж:* {'дозволено' if cod_allowed else '🚫 вимкнено для цього акаунта'}\n"
         )
         if card_id_str:
             caption += f"🪪 *Номер картки / CID:* `{card_id_str}`\n"
@@ -2098,12 +2120,55 @@ def register_handlers(
             await _send_settings_card(callback, user_id, callback.from_user.full_name)
             return
 
+        if action == "cod_toggle":
+            prof = (
+                storage_manager.get_active_profile(user_id)
+                if profile_id == "active"
+                else storage_manager.get_sender_profile(user_id, profile_id)
+            )
+            if not prof:
+                await callback.answer("⚠️ Акаунт не знайдено", show_alert=True)
+                return
+            new_val = not prof.cod_allowed
+            storage_manager.set_cod_allowed(user_id, prof.id, new_val)
+            note = "✅ Наложку дозволено" if new_val else "🚫 Наложку вимкнено"
+            active = storage_manager.get_active_profile(user_id)
+            # The active account must always be COD-ready: if it was just switched off, move on to the next allowed one.
+            if not new_val and active and active.id == prof.id:
+                nxt = storage_manager.rotate_cod_profile(user_id)
+                note += f". Активний акаунт: {nxt.name}" if nxt else ". ⚠️ Інших акаунтів із наложкою немає"
+            await callback.answer(note, show_alert=True)
+            await _render_client_card(callback, user_id, mode=mode, profile_id=prof.id)
+            return
+
         if action in ("switch_phone", "switch_card", "refresh", "show"):
             await callback.answer("🔄 Оновлення штрих-коду...")
             target_mode = "phone" if action == "switch_phone" else ("card" if action == "switch_card" else mode)
             await _render_client_card(callback, user_id, mode=target_mode, profile_id=profile_id)
             return
 
+
+    @router.callback_query(CardReminderCallback.filter())
+    async def process_card_reminder_done(callback: CallbackQuery, callback_data: CardReminderCallback):
+        """"Що зроблено": the payout card for this COD waybill is set on the website; stop reminding about it."""
+        from src.bot.reminders import format_card_reminder
+
+        left = storage_manager.remove_pending_card_reminder(callback.from_user.id, callback_data.ttn)
+        try:
+            if left:
+                await callback.message.edit_text(
+                    format_card_reminder(left),
+                    parse_mode="Markdown",
+                    reply_markup=get_card_reminder_keyboard([p.int_doc_number for p in left]),
+                )
+            else:
+                await callback.message.edit_text(
+                    "✅ *Усе зроблено* — картки для виплат вказано. Нагадування вимкнено.",
+                    parse_mode="Markdown",
+                )
+        except Exception as e:
+            logger.debug(f"Could not edit card reminder message: {e}")
+        await callback.answer(f"✅ ТТН {callback_data.ttn}: зроблено")
 
     @router.message(Command("set_name"))
     @router.message(Command("set_sender_name"))
@@ -3534,6 +3599,22 @@ def register_handlers(
                     )
                     doc_refs = [d["ref"] for d in matched_drafts]
 
+                    # NP accepts a waybill only into its owner's register. COD rotation moves the active account on,
+                    # so use the owner's key when the selected drafts all belong to one other account.
+                    stored = {d.ref: d.profile_id for d in storage_manager.get_user_drafts(actual_user_id)}
+                    owners = {stored.get(r) for r in doc_refs} - {None}
+                    if len(owners) > 1:
+                        await status_msg.edit_text(
+                            "❌ *Ці накладні створено з різних акаунтів.* Реєстр можна сформувати лише для одного акаунта: "
+                            "перемкніть відправника й оберіть його накладні.",
+                            parse_mode="Markdown",
+                        )
+                        return
+                    if owners:
+                        user_np_client = NovaPoshtaClient(
+                            storage_manager.get_effective_settings(actual_user_id, settings, profile_id=owners.pop())
+                        )
+
                     # A waybill sits in one register only: pull the selected ones out of their old registers first
                     moved_nums, disbanded_regs = await detach_drafts_from_old_registers(
                         actual_user_id, user_np_client, storage_manager, matched_drafts
@@ -4075,6 +4156,7 @@ def register_handlers(
                     editing_ref = existing_session.get("editing_draft_ref")
                     if editing_ref:
                         session_payload["editing_draft_ref"] = editing_ref
+                        session_payload["restore_profile_id"] = existing_session.get("restore_profile_id")
 
                     PENDING_SESSIONS[session_id] = session_payload
                     USER_ACTIVE_SESSIONS[user_id] = session_id
@@ -4174,6 +4256,7 @@ def register_handlers(
                         editing_ref = existing_session.get("editing_draft_ref")
                         if editing_ref:
                             session_payload["editing_draft_ref"] = editing_ref
+                            session_payload["restore_profile_id"] = existing_session.get("restore_profile_id")
                         for k in ["payer_type", "cargo_type", "declared_value", "cargo_description", "cod_amount", "cod_payment_type"]:
                             if k in existing_session:
                                 session_payload[k] = existing_session[k]
@@ -4284,6 +4367,7 @@ def register_handlers(
         }
         if editing_ref:
             session_payload["editing_draft_ref"] = editing_ref
+            session_payload["restore_profile_id"] = existing_session.get("restore_profile_id")
 
         PENDING_SESSIONS[session_id] = session_payload
         USER_ACTIVE_SESSIONS[user_id] = session_id
@@ -4561,6 +4645,7 @@ def register_handlers(
         user_np_client = NovaPoshtaClient(eff_settings)
 
         if action == "cancel":
+            _restore_rotation(user_id, session)
             clear_user_active_session(user_id)
             await callback.message.edit_text("❌ *Створення накладної скасовано.*", parse_mode="Markdown")
             await callback.answer()
@@ -4638,7 +4723,7 @@ def register_handlers(
             active_p = storage_manager.get_active_profile(user_id)
             if not target_pid and len(profiles) > 1 and active_p:
                 curr_idx = next((i for i, p in enumerate(profiles) if p.id == active_p.id), 0)
-                target_pid = profiles[(curr_idx + 1) % len(profiles)].id
+                target_pid = _next_sender_id(profiles, curr_idx, session.get("cod_amount", 0.0))
 
             if target_pid:
                 switched = storage_manager.set_active_profile(user_id, target_pid)
@@ -4657,9 +4742,9 @@ def register_handlers(
             active_p = storage_manager.get_active_profile(user_id)
             if len(profiles) > 1 and active_p:
                 curr_idx = next((i for i, p in enumerate(profiles) if p.id == active_p.id), 0)
-                next_p = profiles[(curr_idx + 1) % len(profiles)]
-                storage_manager.set_active_profile(user_id, next_p.id)
-                ans_text = f"👤 Обрано відправника: «{next_p.name}»"
+                next_id = _next_sender_id(profiles, curr_idx, session.get("cod_amount", 0.0))
+                next_p = storage_manager.set_active_profile(user_id, next_id) if next_id else None
+                ans_text = f"👤 Обрано відправника: «{next_p.name}»" if next_p else "⚠️ Немає інших акаунтів із наложкою"
             else:
                 ans_text = "⚠️ Лише один користувач"
 
@@ -4677,6 +4762,16 @@ def register_handlers(
         if action in ("confirm", "force_confirm"):
             editing_ref = session.get("editing_draft_ref")
             cod_amount = session.get("cod_amount", 0.0)
+
+            # COD is switched off for this account in its client card: do not create it here.
+            if cod_amount and cod_amount > 0 and not editing_ref:
+                cod_prof = storage_manager.get_active_profile(user_id)
+                if cod_prof and not cod_prof.cod_allowed:
+                    await callback.answer(
+                        "🚫 Для цього акаунта наложку вимкнено. Перемкніть відправника або дозвольте її в картці клієнта.",
+                        show_alert=True,
+                    )
+                    return
 
             # Check for COD limit exceeded unless user already force-confirmed
             if action == "confirm" and cod_amount and cod_amount > 0:
@@ -4800,7 +4895,11 @@ def register_handlers(
                     service_type=service_type,
                 )
                 recreated_note = ""
+                old_cod = 0.0
                 if editing_ref:
+                    old_cod = next(
+                        (d.cod_amount or 0.0 for d in storage_manager.get_user_drafts(user_id) if d.ref == editing_ref), 0.0
+                    )
                     try:
                         wb_res = await user_np_client.update_waybill(document_ref=editing_ref, **wb_kwargs)
                     except RuntimeError as upd_err:
@@ -4823,6 +4922,7 @@ def register_handlers(
                         except Exception as del_err:
                             logger.warning(f"Old waybill {old_num} kept after sender change: {del_err}")
                             old_deleted = False
+                        storage_manager.remove_pending_card_reminder(user_id, old_num)   # the old TTN is gone
                         recreated_note = (
                             f"🔁 *Відправник змінився:* стару ТТН `{old_num}` видалено, створено нову.\n"
                             if old_deleted
@@ -4835,7 +4935,8 @@ def register_handlers(
                 PENDING_SESSIONS.pop(session_id, None)
                 USER_ACTIVE_SESSIONS.pop(user_id, None)
 
-                # Save created/updated draft locally for user
+                # Save created/updated draft locally for user (remember which account owns it in NP)
+                owner_prof = storage_manager.get_active_profile(user_id)
                 draft_item = SavedDraft(
                     ref=wb_res.ref,
                     int_doc_number=wb_res.int_doc_number,
@@ -4850,6 +4951,7 @@ def register_handlers(
                     cod_payment_type=cod_payment_type,
                     cost=wb_res.cost,
                     created_at=datetime.date.today().strftime("%d.%m.%Y"),
+                    profile_id=owner_prof.id if owner_prof else None,
                 )
                 storage_manager.add_user_draft(user_id, draft_item)
 
@@ -4863,8 +4965,9 @@ def register_handlers(
                     success_title = " успішно оновлено" if editing_ref else " успішно створено"
                 cod_str = "❌ Немає" if not cod_amount or cod_amount <= 0 else f"{int(cod_amount)} грн"
                 card_notice = ""
-                if cod_amount and cod_amount > 0:
-                    card_notice = "💳 Виплату на картку вмикайте в додатку Нової Пошти.\n"
+                register_card_reminder = bool(cod_amount and cod_amount > 0) and (not editing_ref or bool(recreated_note) or not old_cod)
+                if register_card_reminder:
+                    card_notice ="💳 Картку для виплати вкажіть на сайті Нової Пошти (не в додатку) — я нагадуватиму щогодини.\n"
 
                 cod_limit_line = ""
                 if cod_amount and cod_amount > 0:
@@ -4882,6 +4985,27 @@ def register_handlers(
                         rem_val = max(0, int(safe_l - new_tot))
                         cod_limit_line = f"📊 *Місячний обсяг післяплати:* `{new_tot} грн` із {int(safe_l)} грн (залишок ліміту: `{rem_val} грн`)\n"
 
+                # A new COD waybill: remember it for the hourly "set the payout card" reminder and
+                # move the active account to the next COD-allowed one (done after the limit check above).
+                rotate_line = ""
+                if register_card_reminder:
+                    all_profiles = storage_manager.get_sender_profiles(user_id)
+                    used_prof = storage_manager.get_active_profile(user_id)
+                    storage_manager.add_pending_card_reminder(
+                        user_id,
+                        PendingCardReminder(
+                            int_doc_number=wb_res.int_doc_number,
+                            account=format_profile_display_name(used_prof, all_profiles) if used_prof else "",
+                            cod_amount=cod_amount,
+                        ),
+                    )
+                    next_prof = storage_manager.rotate_cod_profile(user_id)
+                    if next_prof:
+                        rotate_line = (
+                            f"🔄 *Наступна наложка піде з акаунта:* "
+                            f"{format_profile_display_name(next_prof, all_profiles)}\n"
+                        )
+
                 success_card = (
                     f"✅ *Express-накладну{success_title}!*\n\n"
                     f"{recreated_note}"
@@ -4896,10 +5020,15 @@ def register_handlers(
                     f"💵 *Накладений платіж:* {cod_str}\n"
                     f"{cod_limit_line}"
                     f"{card_notice}"
+                    f"{rotate_line}"
                     f"📅 *Очікувана дата доставки:* {wb_res.estimated_delivery_date or 'Не вказано'}\n\n"
                     f"🔗 [Відстежити ТТН на сайті Нової Пошти]({tracking_url})"
                 )
 
+                if editing_ref and not cod_amount:
+                    storage_manager.remove_pending_card_reminder(user_id, wb_res.int_doc_number)   # COD removed
+                if not recreated_note and not register_card_reminder:
+                    _restore_rotation(user_id, session)
                 clear_user_active_session(user_id)
                 await callback.message.edit_text(
                     success_card,
@@ -4907,6 +5036,10 @@ def register_handlers(
                     disable_web_page_preview=True,
                     reply_markup=get_draft_keyboard(ref=wb_res.ref),
                 )
+                if register_card_reminder:
+                    # First reminder right away (it carries the "Що зроблено" button); then hourly.
+                    from src.bot.reminders import send_card_reminder
+                    await send_card_reminder(callback.bot, storage_manager, user_id)
             except Exception as err:
                 logger.error(f"Failed to create/update waybill: {err}", exc_info=True)
                 err_text = str(err).strip() or f"{type(err).__name__} (Помилка таймауту або зв'язку)"
@@ -4952,6 +5085,8 @@ def register_handlers(
                             return
 
                 deleted = await _delete_waybill_any_profile(user_id, ref)
+                for num in {ref, current_draft.int_doc_number if current_draft else ref}:
+                    storage_manager.remove_pending_card_reminder(user_id, num)   # nothing left to remind about
                 storage_manager.delete_user_draft(user_id, ref)
                 if current_draft:
                     storage_manager.delete_user_draft(user_id, current_draft.ref)
@@ -5042,8 +5177,19 @@ def register_handlers(
             if parsed_info is None:
                 parsed_info = await AIExtractor(eff_settings).parse_text(dummy_text)
 
+            # NP lets only the owner edit a waybill, and COD rotation may have moved the active account on:
+            # edit as the owner, then put the rotation back (see _restore_rotation).
+            prev_session = PENDING_SESSIONS.get(USER_ACTIVE_SESSIONS.get(user_id), {})
+            restore_pid = prev_session.get("restore_profile_id")   # a second "edit" keeps the first one's restore point
+            active_before = storage_manager.get_active_profile(user_id)
+            owner_pid = getattr(target, "profile_id", None) if target else None
+            if owner_pid and active_before and owner_pid != active_before.id:
+                if storage_manager.set_active_profile(user_id, owner_pid):
+                    restore_pid = restore_pid or active_before.id
+
             session_id = str(uuid.uuid4())[:8]
             PENDING_SESSIONS[session_id] = {
+                "restore_profile_id": restore_pid,
                 "parsed_info": parsed_info,
                 "editing_draft_ref": target_dict["ref"],
                 "user_id": user_id,

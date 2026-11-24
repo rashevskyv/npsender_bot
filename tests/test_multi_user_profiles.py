@@ -525,3 +525,80 @@ async def test_edit_confirm_after_sender_switch_recreates_waybill(multi_user_man
     assert "створено заново від нового відправника" in card
     assert "стару ТТН `20451562800000` видалено" in card
     assert [d.ref for d in multi_user_manager.get_user_drafts(1)] == ["new-ref"]
+
+
+def _confirm_session(manager, **extra):
+    session = {
+        "user_id": 1,
+        "parsed_info": ParsedRecipientInfo(full_name="Іван Тест", phone="0991112233", city_name="Київ", warehouse_number="1"),
+        "city": CityInfo(Ref="city-ref-1", Description="Київ"),
+        "warehouse": WarehouseInfo(Ref="wh-ref-1", Description="Відділення №1", Number="1",
+                                   TypeOfWarehouse="Warehouse", CityRef="city-ref-1"),
+        "destination_description": "Відділення №1",
+        "declared_value": 1500.0, "cargo_type": "Parcel", "cargo_description": "Тест",
+        "cod_amount": 1500.0, "cod_payment_type": "cash", "payer_type": "Recipient",
+    }
+    session.update(extra)
+    PENDING_SESSIONS["cod-session"] = session
+    for p in manager.get_sender_profiles(1):
+        manager.update_sender_profile(1, p.id, sender_city_ref="city-s", sender_address_ref="addr-s")
+    callback = AsyncMock(spec=CallbackQuery)
+    callback.from_user = User(id=1, is_bot=False, first_name="Test")
+    callback.message = AsyncMock()
+    callback.answer = AsyncMock()
+    callback.bot = AsyncMock()
+    return callback
+
+
+def _np_patches(**create_kw):
+    from src.nova_poshta.models import CounterpartyRecipientResult, WaybillCreateResult
+    stats = MagicMock(total_sum=0.0, total_count=0, items=[])
+    return (
+        patch.object(NovaPoshtaClient, "create_recipient_counterparty", new_callable=AsyncMock,
+                     return_value=CounterpartyRecipientResult(counterparty_ref="rcp", contact_person_ref="rcc")),
+        patch.object(NovaPoshtaClient, "get_monthly_cod_stats", new_callable=AsyncMock, return_value=stats),
+        patch.object(NovaPoshtaClient, "create_waybill", new_callable=AsyncMock, return_value=WaybillCreateResult(
+            int_doc_number="20451562811111", ref="new-ref", cost=90.0)),
+        patch.object(NovaPoshtaClient, "update_waybill", new_callable=AsyncMock, return_value=WaybillCreateResult(
+            int_doc_number="20451562800000", ref="old-ref", cost=90.0)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_cod_create_remembers_owner_rotates_and_registers_reminder(multi_user_manager):
+    first = multi_user_manager.get_active_profile(1).id
+    other = next(p.id for p in multi_user_manager.get_sender_profiles(1) if p.id != first)
+    callback = _confirm_session(multi_user_manager)
+    a, b, c, d = _np_patches()
+    with a, b, c, d:
+        await _get_callback_handler("process_waybill_callback")(
+            callback, WaybillActionCallback(action="confirm", session_id="cod-session"))
+
+    assert multi_user_manager.get_user_drafts(1)[0].profile_id == first      # owner = account used for creating
+    assert multi_user_manager.get_active_profile(1).id == other              # rotated on
+    assert [p.int_doc_number for p in multi_user_manager.get_user_settings(1).pending_card_reminders] == ["20451562811111"]
+    callback.bot.send_message.assert_called_once()                            # first reminder sent at once
+
+
+@pytest.mark.asyncio
+async def test_edit_after_rotation_updates_in_place_and_restores_rotation(multi_user_manager):
+    from src.storage import SavedDraft
+    owner = multi_user_manager.get_active_profile(1).id
+    rotated = next(p.id for p in multi_user_manager.get_sender_profiles(1) if p.id != owner)
+    multi_user_manager.add_user_draft(1, SavedDraft(
+        ref="old-ref", int_doc_number="20451562800000", recipient_name="Іван Тест", recipient_phone="0991112233",
+        city_description="Київ", warehouse_description="Відділення №1", payer_type="Recipient",
+        cargo_description="Тест", declared_value=1500.0, cod_amount=1500.0, cost=80.0,
+        created_at="16.10.2026", profile_id=owner))
+    # the edit handler has switched to the owner; rotation pointed at `rotated` before that
+    callback = _confirm_session(multi_user_manager, editing_draft_ref="old-ref", restore_profile_id=rotated)
+    a, b, c, d = _np_patches()
+    with a, b, c as mock_create, d as mock_update:
+        await _get_callback_handler("process_waybill_callback")(
+            callback, WaybillActionCallback(action="confirm", session_id="cod-session"))
+
+    mock_update.assert_called_once()
+    mock_create.assert_not_called()                                           # no recreate, so no double rotation
+    assert multi_user_manager.get_active_profile(1).id == rotated             # rotation restored
+    assert multi_user_manager.get_user_settings(1).pending_card_reminders == []
+    callback.bot.send_message.assert_not_called()

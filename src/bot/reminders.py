@@ -12,16 +12,17 @@ import asyncio
 import datetime
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
 from aiogram.types import BufferedInputFile
 
 from src.config import Settings
-from src.storage import UserSettingsManager
+from src.storage import UserSettingsManager, PendingCardReminder
 from src.nova_poshta.client import NovaPoshtaClient, classify_transfer_status
 from src.nova_poshta.models import CODItemInfo, WaybillItemInfo
-from src.bot.keyboards import format_profile_display_name
+from src.bot.keyboards import format_profile_display_name, get_card_reminder_keyboard
 from src.utils.barcode_gen import generate_client_card_image
 
 logger = logging.getLogger(__name__)
@@ -317,12 +318,12 @@ def format_digest_body(d: AccountDigest) -> str:
     return "\n".join(lines).strip()
 
 
-async def _send_markdown(bot, chat_id: int, text: str) -> None:
+async def _send_markdown(bot, chat_id: int, text: str, reply_markup=None) -> None:
     """Send Markdown text; if Telegram rejects the markup (odd names), resend it as plain text."""
     try:
-        await bot.send_message(chat_id, text, parse_mode="Markdown")
+        await bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=reply_markup)
     except Exception:
-        await bot.send_message(chat_id, text.replace("*", "").replace("`", ""))
+        await bot.send_message(chat_id, text.replace("*", "").replace("`", ""), reply_markup=reply_markup)
 
 
 async def send_account_digest(bot, chat_id: int, d: AccountDigest) -> None:
@@ -387,6 +388,65 @@ async def run_transfer_check(bot, storage_manager: UserSettingsManager, settings
         if sent_any:
             notified_users += 1
     return notified_users
+
+
+CARD_REMINDER_INTERVAL = 3600  # seconds between "set the payout card" reminders
+
+
+def format_card_reminder(pending: List[PendingCardReminder]) -> str:
+    """Hourly reminder: the payout card of each new COD waybill is set on the website, not in the app."""
+    lines = ["🔔 *Вкажіть картку для виплати наложки на сайті Нової Пошти* (не в додатку):", ""]
+    for p in pending:
+        who = f" · {p.account}" if p.account else ""
+        lines.append(f"  • `{p.int_doc_number}` · {int(p.cod_amount)} грн{who}")
+    lines += ["", "Коли зробите — натисніть «Що зроблено». Інакше нагадуватиму щогодини."]
+    return "\n".join(lines)
+
+
+async def send_card_reminder(bot, storage_manager: UserSettingsManager, user_id: int, now: Optional[float] = None) -> bool:
+    """Send one reminder listing ALL pending waybills; never raises (a failure retries on the next tick)."""
+    try:
+        pending = storage_manager.get_user_settings(user_id).pending_card_reminders
+        if not pending:
+            return False
+        await _send_markdown(
+            bot,
+            user_id,
+            format_card_reminder(pending),
+            reply_markup=get_card_reminder_keyboard([p.int_doc_number for p in pending]),
+        )
+        storage_manager.mark_card_reminder_sent(user_id, now if now is not None else time.time())
+        return True
+    except Exception as e:
+        logger.warning(f"Card reminder to {user_id} failed: {e}")
+        return False
+
+
+async def run_card_reminders(bot, storage_manager: UserSettingsManager, now: Optional[float] = None) -> int:
+    """Remind every user whose last reminder is an hour old (or never sent). Returns reminders sent."""
+    now = now if now is not None else time.time()
+    sent = 0
+    for uid_str, us in list(storage_manager.data.items()):
+        if not us.pending_card_reminders or now - us.card_reminder_last_sent < CARD_REMINDER_INTERVAL:
+            continue
+        try:
+            uid = int(uid_str)
+        except (ValueError, TypeError):
+            continue
+        if await send_card_reminder(bot, storage_manager, uid, now):
+            sent += 1
+    return sent
+
+
+async def card_reminder_loop(bot, storage_manager: UserSettingsManager, interval: int = 60) -> None:
+    """Check every minute which users are due for a payout-card reminder (state is persisted in storage)."""
+    logger.info("Payout-card reminder loop started (hourly until 'Що зроблено').")
+    while True:
+        try:
+            await run_card_reminders(bot, storage_manager)
+        except Exception as e:
+            logger.error(f"Card reminder loop error: {e}", exc_info=True)
+        await asyncio.sleep(interval)
 
 
 async def daily_transfer_reminder_loop(

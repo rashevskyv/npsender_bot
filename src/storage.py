@@ -40,6 +40,16 @@ class SenderProfile(BaseModel):
     cod_monthly_limit_sum: Optional[float] = 30000.0
     cod_monthly_limit_count: Optional[int] = 10
     cod_warning_enabled: bool = True
+    # False = no new cash-on-delivery waybills from this account (it is skipped by the COD rotation)
+    cod_allowed: bool = True
+
+
+class PendingCardReminder(BaseModel):
+    """A COD waybill whose payout card the user must still set on the Nova Poshta website."""
+
+    int_doc_number: str
+    account: str = ""
+    cod_amount: float = 0.0
 
 
 class UserCustomSettings(BaseModel):
@@ -53,6 +63,10 @@ class UserCustomSettings(BaseModel):
     # Multi-sender profiles
     profiles: List[SenderProfile] = Field(default_factory=list)
     active_profile_id: Optional[str] = None
+
+    # Hourly "set the payout card on the website" reminders, until the user presses "Що зроблено"
+    pending_card_reminders: List[PendingCardReminder] = Field(default_factory=list)
+    card_reminder_last_sent: float = 0.0  # unix time of the last reminder message
 
     # Mirrored active profile fields for 100% backward compatibility
     nova_poshta_api_key: Optional[str] = None
@@ -93,6 +107,7 @@ class SavedDraft(BaseModel):
     created_at: str
     is_light_return: bool = False
     scan_sheet_number: Optional[str] = None
+    profile_id: Optional[str] = None  # sender account that owns this waybill in NP
 
 
 class SavedScanSheet(BaseModel):
@@ -401,6 +416,44 @@ class UserSettingsManager:
             if p.id == profile_id:
                 return p
         return None
+
+    def set_cod_allowed(self, user_id: int, profile_id: str, allowed: bool) -> Optional[SenderProfile]:
+        """Allow or forbid creating cash-on-delivery waybills from one account."""
+        return self.update_sender_profile(user_id, profile_id, cod_allowed=allowed)
+
+    def rotate_cod_profile(self, user_id: int) -> Optional[SenderProfile]:
+        """Make the next COD-allowed account active (round-robin, skipping the active one).
+
+        Returns the new active profile, or None when there is no other allowed account
+        (the active account then stays as it is).
+        """
+        profiles = self.get_sender_profiles(user_id)
+        active = self.get_active_profile(user_id)
+        if len(profiles) < 2 or not active:
+            return None
+        start = next((i for i, p in enumerate(profiles) if p.id == active.id), 0)
+        for step in range(1, len(profiles)):
+            cand = profiles[(start + step) % len(profiles)]
+            # (the sender address falls back to other profiles, so only the API key is required)
+            if cand.cod_allowed and (cand.nova_poshta_api_key or "").strip():
+                return self.set_active_profile(user_id, cand.id)
+        return None
+
+    def add_pending_card_reminder(self, user_id: int, item: PendingCardReminder) -> None:
+        """Remember a COD waybill that still needs its payout card set on the website."""
+        pending = [p for p in self.get_user_settings(user_id).pending_card_reminders
+                   if p.int_doc_number != item.int_doc_number]
+        self.update_user_settings(user_id, pending_card_reminders=pending + [item])
+
+    def remove_pending_card_reminder(self, user_id: int, int_doc_number: str) -> List[PendingCardReminder]:
+        """Mark one waybill as done ("Що зроблено"); returns what is still pending."""
+        pending = [p for p in self.get_user_settings(user_id).pending_card_reminders
+                   if p.int_doc_number != int_doc_number]
+        self.update_user_settings(user_id, pending_card_reminders=pending)
+        return pending
+
+    def mark_card_reminder_sent(self, user_id: int, when: float) -> None:
+        self.update_user_settings(user_id, card_reminder_last_sent=when)
 
     def rename_sender_profile(
         self, user_id: int, profile_id: str, new_name: Optional[str]

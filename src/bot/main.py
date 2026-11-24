@@ -11,7 +11,7 @@ from src.storage import UserSettingsManager
 from src.ai.extractor import AIExtractor
 from src.nova_poshta.client import NovaPoshtaClient
 from src.bot.handlers import router, register_handlers
-from src.bot.reminders import daily_transfer_reminder_loop
+from src.bot.reminders import daily_transfer_reminder_loop, card_reminder_loop
 
 # Configure logging
 logging.basicConfig(
@@ -46,11 +46,15 @@ async def main():
         daily_transfer_reminder_loop(bot, storage_manager, settings, hour=settings.transfer_reminder_hour)
     )
 
+    # Hourly "set the payout card on the website" reminder, until the user presses "Що зроблено"
+    card_task = asyncio.create_task(card_reminder_loop(bot, storage_manager))
+
     logger.info("Starting Bot Long Polling...")
     try:
         await dp.start_polling(bot)
     finally:
         reminder_task.cancel()
+        card_task.cancel()
         await bot.session.close()
 
 

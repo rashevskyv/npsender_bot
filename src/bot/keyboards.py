@@ -51,9 +51,30 @@ class UserProfileCallback(CallbackData, prefix="uprof"):
 class ClientCardCallback(CallbackData, prefix="npcard"):
     """Callback data schema for Nova Poshta client loyalty card actions."""
 
-    action: str  # "show", "switch_phone", "switch_card", "refresh"
+    action: str  # "show", "switch_phone", "switch_card", "refresh", "cod_toggle"
     profile_id: str  # profile ID or "active"
     mode: str  # "card" or "phone"
+
+
+class CardReminderCallback(CallbackData, prefix="cardrem"):
+    """"Що зроблено": the payout card for this COD waybill was set on the website."""
+
+    ttn: str
+
+
+def get_card_reminder_keyboard(ttns: List[str]) -> InlineKeyboardMarkup:
+    """One "Що зроблено" button per waybill that still waits for its payout card."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"✅ Що зроблено — {t}",
+                    callback_data=CardReminderCallback(ttn=t).pack(),
+                )
+            ]
+            for t in ttns
+        ]
+    )
 
 
 def format_profile_display_name(p: Any, all_profiles: Optional[List[Any]] = None) -> str:
@@ -201,7 +222,7 @@ def get_settings_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_client_card_keyboard(
-    profile_id: str = "active", current_mode: str = "card"
+    profile_id: str = "active", current_mode: str = "card", cod_allowed: bool = True
 ) -> InlineKeyboardMarkup:
     """Build action buttons below Nova Poshta client card image."""
     rows = []
@@ -222,6 +243,12 @@ def get_client_card_keyboard(
             text="🔄 Оновити",
             callback_data=ClientCardCallback(action="refresh", profile_id=profile_id, mode=current_mode).pack(),
         ),
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            text="🚫 Вимкнути наложку для акаунта" if cod_allowed else "✅ Дозволити наложку для акаунта",
+            callback_data=ClientCardCallback(action="cod_toggle", profile_id=profile_id, mode=current_mode).pack(),
+        )
     ])
     rows.append([
         InlineKeyboardButton(

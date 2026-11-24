@@ -147,7 +147,7 @@ class _FakeBot:
     def __init__(self):
         self.sent = []   # (kind, chat_id, text)
 
-    async def send_message(self, uid, text, parse_mode=None):
+    async def send_message(self, uid, text, parse_mode=None, reply_markup=None):
         self.sent.append(("text", uid, text))
 
     async def send_photo(self, uid, photo, caption=None, parse_mode=None):

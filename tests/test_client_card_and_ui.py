@@ -134,8 +134,9 @@ def test_pseudonym_rename_and_disambiguation(tmp_path):
 def test_client_card_keyboard_structure():
     """Verify client card action buttons and callback data."""
     kb_card = get_client_card_keyboard(profile_id="prof_123", current_mode="card")
-    assert len(kb_card.inline_keyboard) == 2
+    assert len(kb_card.inline_keyboard) == 3  # barcode/refresh, COD toggle, settings
     assert "📱 Штрихкод телефону" in kb_card.inline_keyboard[0][0].text
+    assert "наложку" in kb_card.inline_keyboard[1][0].text
 
     kb_phone = get_client_card_keyboard(profile_id="prof_123", current_mode="phone")
     assert "💳 Штрихкод картки (CID)" in kb_phone.inline_keyboard[0][0].text
