@@ -56,7 +56,6 @@ from src.bot.keyboards import (
     get_profile_delete_keyboard,
     get_rename_profile_selection_keyboard,
     format_profile_display_name,
-    name_with_phone_tail,
     ClientCardCallback,
     get_client_card_keyboard,
     CardReminderCallback,
@@ -2076,9 +2075,8 @@ def register_handlers(
             barcode_lbl = card_id_str
             current_mode = "card"
 
-        shown_name = name_with_phone_tail(full_name, phone)
         card_bytes = generate_client_card_image(
-            full_name=shown_name or "Клієнт Нової Пошти",
+            full_name=full_name or "Клієнт Нової Пошти",
             phone=phone,
             card_number=card_id_str,
             barcode_data=barcode_val,
@@ -2091,7 +2089,7 @@ def register_handlers(
         barcode_type_desc = "номер телефону" if current_mode == "phone" else "картка лояльності / CID"
         caption = (
             f"💳 *Картка клієнта Нової Пошти*\n\n"
-            f"👤 *Власник:* `{shown_name or 'Не підтягнуто'}`\n"
+            f"👤 *Власник:* `{full_name or 'Не підтягнуто'}`\n"
             f"📞 *Телефон:* `{phone or 'Не вказано'}`\n"
             f"💵 *Накладений платіж:* {'дозволено' if cod_allowed else '🚫 вимкнено для цього акаунта'}\n"
         )

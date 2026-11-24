@@ -23,7 +23,7 @@ from src.config import Settings
 from src.storage import UserSettingsManager, PendingCardReminder
 from src.nova_poshta.client import NovaPoshtaClient, classify_transfer_status
 from src.nova_poshta.models import CODItemInfo, WaybillItemInfo
-from src.bot.keyboards import format_profile_display_name, get_card_reminder_keyboard, name_with_phone_tail
+from src.bot.keyboards import format_profile_display_name, get_card_reminder_keyboard
 from src.utils.barcode_gen import generate_client_card_image
 
 logger = logging.getLogger(__name__)
@@ -238,7 +238,7 @@ async def build_account_card(eff: Settings) -> Optional[bytes]:
             barcode_val = clean_phone or "0000000000"
             barcode_lbl = f"+{clean_phone}" if clean_phone else barcode_val
         return generate_client_card_image(
-            full_name=name_with_phone_tail(full_name, phone) or "Клієнт Нової Пошти",
+            full_name=full_name or "Клієнт Нової Пошти",
             phone=phone,
             card_number=card_id,
             barcode_data=barcode_val,

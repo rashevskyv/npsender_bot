@@ -77,25 +77,21 @@ def get_card_reminder_keyboard(ttns: List[str]) -> InlineKeyboardMarkup:
     )
 
 
-def name_with_phone_tail(full_name: str, phone: str) -> str:
-    """Client-card name with the last 4 phone digits in brackets right after the surname: 'Іванов (..9301) Іван'."""
-    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
-    name = (full_name or "").strip()
-    if len(digits) < 4 or not name:
-        return name
-    head, _, rest = name.partition(" ")
-    return f"{head} (..{digits[-4:]})" + (f" {rest}" if rest else "")
+def format_profile_display_name(
+    p: Any, all_profiles: Optional[List[Any]] = None, with_phone: bool = False
+) -> str:
+    """Format profile name cleanly, preferring alias or shortened name with phone disambiguation.
 
-
-def format_profile_display_name(p: Any, all_profiles: Optional[List[Any]] = None) -> str:
-    """Format profile name cleanly, preferring alias or shortened name with phone disambiguation."""
-    alias = getattr(p, "alias", None)
-    if alias and str(alias).strip():
-        return str(alias).strip()
-
-    name = str(getattr(p, "name", "Користувач") or "Користувач").strip()
+    with_phone=True always appends the last 4 phone digits (the Users screen); otherwise only for duplicate names.
+    """
     phone = str(getattr(p, "sender_phone", "") or "").strip()
     phone_suffix = f" (..{phone[-4:]})" if len(phone) >= 4 else ""
+
+    alias = getattr(p, "alias", None)
+    if alias and str(alias).strip():
+        return str(alias).strip() + (phone_suffix if with_phone else "")
+
+    name = str(getattr(p, "name", "Користувач") or "Користувач").strip()
 
     # Check if multiple profiles share the same name
     has_duplicates = False
@@ -113,7 +109,7 @@ def format_profile_display_name(p: Any, all_profiles: Optional[List[Any]] = None
     else:
         short_name = name
 
-    if has_duplicates:
+    if has_duplicates or with_phone:
         return f"{short_name}{phone_suffix}"
     return short_name
 
@@ -152,7 +148,7 @@ def get_users_management_keyboard(
         bal = balances_map.get(p.id, {})
         rem_sum = bal.get("rem_sum")
 
-        display_name = format_profile_display_name(p, profiles)
+        display_name = format_profile_display_name(p, profiles, with_phone=True)
         icon = "✅" if is_active else "🔄"
 
         # Row 1: Profile Name / Selection

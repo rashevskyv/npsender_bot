@@ -225,10 +225,3 @@ def test_users_keyboard_shows_cod_off_and_toggle_for_current_user(tmp_path):
     assert (cb.action, cb.profile_id) == ("cod_toggle", "a")
 
     assert next(b for b in texts("b") if "наложку для поточного" in b.text).text.startswith("✅ Увімкнути")
-
-
-def test_name_with_phone_tail_goes_right_after_surname():
-    from src.bot.keyboards import name_with_phone_tail
-    assert name_with_phone_tail("Рашевський Владислав Сергійович", "380502559301") == "Рашевський (..9301) Владислав Сергійович"
-    assert name_with_phone_tail("Іванов", "+38 (050) 111-22-33") == "Іванов (..2233)"
-    assert name_with_phone_tail("Іванов Іван", "") == "Іванов Іван"

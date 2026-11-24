@@ -77,7 +77,7 @@ def test_users_management_keyboard_formatting():
     p1.alias = "Мій Основний"
     kb_alias = get_users_management_keyboard([p1, p2], active_profile_id="p1", balances_map=balances)
     buttons_alias = [btn for row in kb_alias.inline_keyboard for btn in row]
-    assert buttons_alias[0].text == "✅ Мій Основний"
+    assert buttons_alias[0].text == "✅ Мій Основний (..9301)"   # the last 4 phone digits always follow the name
     assert buttons_alias[1].text == "💰 Залишок: 29999 грн"
 
 
