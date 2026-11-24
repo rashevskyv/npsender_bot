@@ -44,7 +44,7 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
 class UserProfileCallback(CallbackData, prefix="uprof"):
     """Callback data schema for sender user profiles management."""
 
-    action: str  # "select", "add", "delete_prompt", "delete", "refresh"
+    action: str  # "select", "add", "delete_prompt", "delete", "refresh", "cod_toggle"
     profile_id: str  # profile ID or "none"
 
 
@@ -75,6 +75,16 @@ def get_card_reminder_keyboard(ttns: List[str]) -> InlineKeyboardMarkup:
             for t in ttns
         ]
     )
+
+
+def name_with_phone_tail(full_name: str, phone: str) -> str:
+    """Client-card name with the last 4 phone digits in brackets right after the surname: 'Іванов (..9301) Іван'."""
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    name = (full_name or "").strip()
+    if len(digits) < 4 or not name:
+        return name
+    head, _, rest = name.partition(" ")
+    return f"{head} (..{digits[-4:]})" + (f" {rest}" if rest else "")
 
 
 def format_profile_display_name(p: Any, all_profiles: Optional[List[Any]] = None) -> str:
@@ -154,9 +164,11 @@ def get_users_management_keyboard(
         ])
 
         # Row 2: Balance on its own separate line (row) to prevent mobile truncation
-        if rem_sum is not None:
-            rem_val = int(rem_sum)
-            if rem_val > 0:
+        if not p.cod_allowed or rem_sum is not None:
+            rem_val = int(rem_sum or 0)
+            if not p.cod_allowed:
+                bal_text = "🚫 Наложка відключена"
+            elif rem_val > 0:
                 bal_text = f"💰 Залишок: {rem_val} грн"
             else:
                 bal_text = "🚨 Ліміт 30 000 грн вичерпано (0 грн)"
@@ -189,6 +201,19 @@ def get_users_management_keyboard(
             callback_data=UserProfileCallback(action="sync_address", profile_id="none").pack(),
         ),
     ])
+
+    active = next((p for p in profiles if p.id == active_profile_id), None)
+    if active:
+        rows.append([
+            InlineKeyboardButton(
+                text=(
+                    "🚫 Виключити наложку для поточного користувача"
+                    if active.cod_allowed
+                    else "✅ Увімкнути наложку для поточного користувача"
+                ),
+                callback_data=UserProfileCallback(action="cod_toggle", profile_id=active.id).pack(),
+            )
+        ])
 
     if len(profiles) > 1:
         rows.append([

@@ -203,3 +203,32 @@ async def test_no_hourly_reminders_outside_branch_hours(tmp_path):
     assert await run_card_reminders(bot, sm, now=T0 + 11 * HOUR) == 0        # 20:00 -> quiet
     assert await run_card_reminders(bot, sm, now=T0 + 22 * HOUR) == 0        # 07:00 next day -> quiet
     assert await run_card_reminders(bot, sm, now=T0 + 23 * HOUR) == 1        # 08:00 -> overdue one goes out
+
+
+def test_users_keyboard_shows_cod_off_and_toggle_for_current_user(tmp_path):
+    from src.bot.keyboards import get_users_management_keyboard, UserProfileCallback
+    sm = _with_profiles(tmp_path)
+    sm.set_cod_allowed(UID, "b", False)
+    profs = sm.get_sender_profiles(UID)
+    bal = {p.id: {"rem_sum": 5000.0} for p in profs}
+
+    def texts(active):
+        kb = get_users_management_keyboard(profs, active_profile_id=active, balances_map=bal)
+        return [b for row in kb.inline_keyboard for b in row]
+
+    btns = texts("a")
+    assert [b.text for b in btns].count("🚫 Наложка відключена") == 1           # only b: no balance line for it
+    assert sum("Залишок" in b.text for b in btns) == 2                          # a and c keep the balance
+    toggle = next(b for b in btns if "наложку для поточного" in b.text)
+    assert toggle.text.startswith("🚫 Виключити")
+    cb = UserProfileCallback.unpack(toggle.callback_data)
+    assert (cb.action, cb.profile_id) == ("cod_toggle", "a")
+
+    assert next(b for b in texts("b") if "наложку для поточного" in b.text).text.startswith("✅ Увімкнути")
+
+
+def test_name_with_phone_tail_goes_right_after_surname():
+    from src.bot.keyboards import name_with_phone_tail
+    assert name_with_phone_tail("Рашевський Владислав Сергійович", "380502559301") == "Рашевський (..9301) Владислав Сергійович"
+    assert name_with_phone_tail("Іванов", "+38 (050) 111-22-33") == "Іванов (..2233)"
+    assert name_with_phone_tail("Іванов Іван", "") == "Іванов Іван"

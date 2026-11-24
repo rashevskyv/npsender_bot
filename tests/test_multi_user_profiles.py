@@ -602,3 +602,21 @@ async def test_edit_after_rotation_updates_in_place_and_restores_rotation(multi_
     assert multi_user_manager.get_active_profile(1).id == rotated             # rotation restored
     assert multi_user_manager.get_user_settings(1).pending_card_reminders == []
     callback.bot.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_users_screen_cod_toggle_disables_active_and_hands_over(multi_user_manager):
+    first = multi_user_manager.get_active_profile(1).id
+    other = next(p.id for p in multi_user_manager.get_sender_profiles(1) if p.id != first)
+    callback = AsyncMock(spec=CallbackQuery)
+    callback.from_user = User(id=1, is_bot=False, first_name="Test")
+    callback.message = AsyncMock()
+    callback.answer = AsyncMock()
+    with patch("src.bot.handlers.evaluate_all_profiles_cod_limits", AsyncMock(return_value={"profiles_status": {}})):
+        await _get_callback_handler("process_user_profile_callback")(
+            callback, UserProfileCallback(action="cod_toggle", profile_id=first))
+
+    assert multi_user_manager.get_sender_profile(1, first).cod_allowed is False
+    assert multi_user_manager.get_active_profile(1).id == other               # active moved to a COD-ready account
+    text = callback.message.edit_text.call_args[0][0]
+    assert "Наложка відключена" in text

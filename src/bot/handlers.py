@@ -56,6 +56,7 @@ from src.bot.keyboards import (
     get_profile_delete_keyboard,
     get_rename_profile_selection_keyboard,
     format_profile_display_name,
+    name_with_phone_tail,
     ClientCardCallback,
     get_client_card_keyboard,
     CardReminderCallback,
@@ -1247,6 +1248,18 @@ def register_handlers(
 ):
     """Factory to inject dependencies into router handlers."""
 
+    def _toggle_cod(user_id: int, prof) -> str:
+        """Flip COD for one account; returns the note to show. A just-disabled active account hands over to the next one."""
+        new_val = not prof.cod_allowed
+        storage_manager.set_cod_allowed(user_id, prof.id, new_val)
+        note = "✅ Наложку дозволено" if new_val else "🚫 Наложку вимкнено"
+        active = storage_manager.get_active_profile(user_id)
+        # The active account must always be COD-ready: if it was just switched off, move on to the next allowed one.
+        if not new_val and active and active.id == prof.id:
+            nxt = storage_manager.rotate_cod_profile(user_id)
+            note += f". Активний акаунт: {nxt.name}" if nxt else ". ⚠️ Інших акаунтів із наложкою немає"
+        return note
+
     def _restore_rotation(user_id: int, session: dict) -> None:
         """After an edit as the draft's owner: give the COD rotation its account back."""
         pid = session.pop("restore_profile_id", None)
@@ -1561,7 +1574,10 @@ def register_handlers(
 
             card_lines.append("📌 *Поточний активний відправник:*")
             card_lines.append(f"✅ {act_name_str} (`{active_profile.sender_phone or 'тел. не вказано'}`)")
-            card_lines.append(f"   📊 *Післяплата:* `{used_s} грн` із {safe_l} грн (вільно: `{rem_s} грн`) | {used_c} ТТН")
+            if active_profile.cod_allowed:
+                card_lines.append(f"   📊 *Післяплата:* `{used_s} грн` із {safe_l} грн (вільно: `{rem_s} грн`) | {used_c} ТТН")
+            else:
+                card_lines.append("   🚫 *Наложка відключена*")
             card_lines.append(f"   🏙 *Відправка:* {act_city}, {act_wh}{act_source}\n")
 
         other_profs = [p for p in profiles if p.id != active_id]
@@ -1586,7 +1602,10 @@ def register_handlers(
                     p_name_str = f"*{p.name}*"
 
                 card_lines.append(f"▫️ {p_name_str} (`{p.sender_phone or 'тел. не вказано'}`)")
-                card_lines.append(f"   📊 *Післяплата:* `{p_used} грн` із {p_safe} грн (вільно: `{p_rem} грн`) | {p_cnt} ТТН")
+                if p.cod_allowed:
+                    card_lines.append(f"   📊 *Післяплата:* `{p_used} грн` із {p_safe} грн (вільно: `{p_rem} грн`) | {p_cnt} ТТН")
+                else:
+                    card_lines.append("   🚫 *Наложка відключена*")
                 card_lines.append(f"   🏙 *Відправка:* {o_city}, {o_wh}{o_source}\n")
 
         card_lines.append("💡 *Адреса відправлення та пріоритет:*")
@@ -1782,6 +1801,15 @@ def register_handlers(
                 await callback.answer(f"✅ Активним обрано «{switched.name}»!")
             else:
                 await callback.answer("❌ Профіль не знайдено", show_alert=True)
+            await _render_users_dashboard(callback, user_id)
+            return
+
+        if action == "cod_toggle":
+            prof = storage_manager.get_sender_profile(user_id, profile_id)
+            if not prof:
+                await callback.answer("⚠️ Акаунт не знайдено", show_alert=True)
+                return
+            await callback.answer(_toggle_cod(user_id, prof), show_alert=True)
             await _render_users_dashboard(callback, user_id)
             return
 
@@ -2048,8 +2076,9 @@ def register_handlers(
             barcode_lbl = card_id_str
             current_mode = "card"
 
+        shown_name = name_with_phone_tail(full_name, phone)
         card_bytes = generate_client_card_image(
-            full_name=full_name or "Клієнт Нової Пошти",
+            full_name=shown_name or "Клієнт Нової Пошти",
             phone=phone,
             card_number=card_id_str,
             barcode_data=barcode_val,
@@ -2062,7 +2091,7 @@ def register_handlers(
         barcode_type_desc = "номер телефону" if current_mode == "phone" else "картка лояльності / CID"
         caption = (
             f"💳 *Картка клієнта Нової Пошти*\n\n"
-            f"👤 *Власник:* `{full_name or 'Не підтягнуто'}`\n"
+            f"👤 *Власник:* `{shown_name or 'Не підтягнуто'}`\n"
             f"📞 *Телефон:* `{phone or 'Не вказано'}`\n"
             f"💵 *Накладений платіж:* {'дозволено' if cod_allowed else '🚫 вимкнено для цього акаунта'}\n"
         )
@@ -2129,15 +2158,7 @@ def register_handlers(
             if not prof:
                 await callback.answer("⚠️ Акаунт не знайдено", show_alert=True)
                 return
-            new_val = not prof.cod_allowed
-            storage_manager.set_cod_allowed(user_id, prof.id, new_val)
-            note = "✅ Наложку дозволено" if new_val else "🚫 Наложку вимкнено"
-            active = storage_manager.get_active_profile(user_id)
-            # The active account must always be COD-ready: if it was just switched off, move on to the next allowed one.
-            if not new_val and active and active.id == prof.id:
-                nxt = storage_manager.rotate_cod_profile(user_id)
-                note += f". Активний акаунт: {nxt.name}" if nxt else ". ⚠️ Інших акаунтів із наложкою немає"
-            await callback.answer(note, show_alert=True)
+            await callback.answer(_toggle_cod(user_id, prof), show_alert=True)
             await _render_client_card(callback, user_id, mode=mode, profile_id=prof.id)
             return
 

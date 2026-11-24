@@ -92,8 +92,8 @@ def generate_client_card_image(
     # Client Name
     font_name = _get_font(26, bold=True)
     name_display = full_name.strip() if full_name else "Клієнт Нової Пошти"
-    if len(name_display) > 36:
-        name_display = name_display[:34] + "..."
+    if len(name_display) > 44:
+        name_display = name_display[:42] + "..."
     draw.text((40, 115), name_display, fill="#1A1A1A", font=font_name)
 
     # Phone & Card Info
