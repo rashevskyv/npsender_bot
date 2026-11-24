@@ -136,7 +136,8 @@ def test_format_digest_lists_numbers_and_passport_note():
     assert "Користувач 1" in header and "380991112233" in header      # phone as text
     body = format_digest_body(d)
     assert "I100" in body and "I101" in body and "T900" in body       # waybill numbers
-    assert "до сплати `1500 грн` (післяплата 1500)" in body
+    assert "`I100` — до сплати 1500 грн" in body
+    assert "`I101`\n" in body + "\n" and "`I101` —" not in body            # nothing due -> only the number
     assert "30 000" in body and "паспорт" in body                     # passport reminder
     # no passport note below the threshold
     low = AccountDigest("A", _eff(), incoming=[_incoming("I1", cod=500)])
@@ -209,22 +210,21 @@ def test_format_digest_groups_incoming_by_branch_with_amounts():
     b1 = "м. Київ, Відділення №1 (до 30 кг): вул. А, 1"
     b2 = "м. Львів, Відділення №7 (до 30 кг на одне місце): вул. Б, 2"
     d = AccountDigest("Користувач 1", _eff(), incoming=[
-        _incoming("I1", delivery=180, addr=b1),
+        _incoming("I1", delivery=180, addr=b1, storage=35, sender="Олег"),
         _incoming("I2", cod=1000, delivery=100, addr=b1),
         _incoming("I3", addr=b2),                       # paid -> nothing to pay
         _incoming("I4", addr=""),                       # branch unknown
     ])
     body = format_digest_body(d)
     assert "4 шт, до сплати 1280 грн" in body           # total over all parcels
-    assert "📍 *м. Київ, Відділення №1: вул. А, 1* — 2 шт, до сплати 1280 грн" in body
-    assert "(до 30 кг" not in body                       # weight limit stripped from the branch
-    assert "📍 *м. Львів, Відділення №7: вул. Б, 2* — 1 шт, до сплати 0 грн" in body
+    assert "📍 *Відділення №1*\n`I2` — до сплати 1100 грн\n`I1` — до сплати 180 грн" in body   # actual sum, not the breakdown
+    assert "📍 *Відділення №7*\n`I3`" in body
     assert "Відділення не вказано" in body
-    assert body.index("I2") > body.index("№1") and body.index("I3") > body.index("№7")  # under its branch
-    assert "до сплати `1100 грн` (післяплата 1000 + доставка 100)" in body
-    assert "сплачено" in body                            # I3
-    # storage is shown but not summed
-    assert "зберігання 35 грн" in format_digest_body(AccountDigest("A", _eff(), incoming=[_incoming("I5", delivery=180, storage=35)]))
+    assert "\n\n📍 *Відділення №7*" in body             # a blank line between branches
+    for noise in ("вул.", "Київ", "Олег", "зберігання", "доставка", "післяплата", "сплачено", "(до 30 кг"):
+        assert noise not in body                          # no address, sender, breakdown or "paid" noise
+    # nothing due anywhere -> the header has no amount either
+    assert "до сплати" not in format_digest_body(AccountDigest("A", _eff(), incoming=[_incoming("I9", addr=b2)]))
 
 
 def test_split_message_respects_limit():

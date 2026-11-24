@@ -255,23 +255,22 @@ def format_digest_header(d: AccountDigest) -> str:
 
 
 def _branch_label(address: Optional[str]) -> str:
-    """Branch for grouping: NP address without the weight limit, e.g. 'м. Київ, Відділення №5: вул. X, 1'."""
-    addr = re.sub(r"\s*\(до [^)]*\)", "", address or "").strip()
+    """Short branch name for grouping, e.g. 'Відділення №15' (city, street and weight limit are left out)."""
+    addr = address or ""
+    m = re.search(r"(Відділення|Поштомат)\s*№\s*([\w/-]+)", addr)
+    if m:
+        return f"{m.group(1)} №{m.group(2)}"
+    addr = re.sub(r"\s*\(до [^)]*\)", "", addr).strip()
     return addr if addr and addr != "N/A" else "Відділення не вказано"
 
 
 def _parcel_line(w: WaybillItemInfo) -> str:
-    """One parcel: number, what to pay (COD + unpaid delivery), storage fee, sender."""
-    flag = "🛂 " if w.amount_due >= PASSPORT_THRESHOLD else ""
-    parts = []
-    if w.cod_amount > 0:
-        parts.append(f"післяплата {int(w.cod_amount)}")
-    if w.delivery_due > 0:
-        parts.append(f"доставка {int(w.delivery_due)}")
-    due = f"{flag}до сплати `{int(w.amount_due)} грн` ({' + '.join(parts)})" if parts else "сплачено"
-    storage = f" · зберігання {int(w.storage_fee)} грн" if w.storage_fee > 0 else ""
-    sender = f" · від {w.sender_name}" if w.sender_name and w.sender_name != "N/A" else ""
-    return f"  • `{w.int_doc_number}` · {due}{storage}{sender}"
+    """One parcel: its number, plus what to pay in fact (COD + unpaid delivery) only when something is due."""
+    line = f"`{w.int_doc_number}`"
+    if w.amount_due > 0:
+        flag = "🛂 " if w.amount_due >= PASSPORT_THRESHOLD else ""
+        line += f" — {flag}до сплати {int(w.amount_due)} грн"
+    return line
 
 
 def format_digest_body(d: AccountDigest) -> str:
@@ -284,25 +283,26 @@ def format_digest_body(d: AccountDigest) -> str:
 
     if d.incoming:
         total_due = int(sum(w.amount_due for w in d.incoming))
-        lines.append(f"📥 *Посилки до отримання — {len(d.incoming)} шт, до сплати {total_due} грн*")
+        due_part = f", до сплати {total_due} грн" if total_due > 0 else ""
+        lines.append(f"📥 *Посилки до отримання — {len(d.incoming)} шт{due_part}*")
         groups: dict = {}
         for w in d.incoming:
             groups.setdefault(_branch_label(w.address_recipient), []).append(w)
-        # Branches with the most money first, then by name.
+        # Branches with the most money first, then by name; a blank line between branches.
         ordered = sorted(groups.items(), key=lambda kv: (-sum(w.amount_due for w in kv[1]), kv[0]))
         shown = 0
         for branch, parcels in ordered:
             if shown >= _MAX_PARCELS:
                 break
-            due = int(sum(w.amount_due for w in parcels))
-            lines.append(f"📍 *{branch}* — {len(parcels)} шт, до сплати {due} грн")
+            lines.append("")
+            lines.append(f"📍 *{branch}*")
             for w in sorted(parcels, key=lambda x: -x.amount_due):
                 if shown >= _MAX_PARCELS:
                     break
                 lines.append(_parcel_line(w))
                 shown += 1
         if len(d.incoming) > shown:
-            lines.append(f"  … ще {len(d.incoming) - shown} шт")
+            lines.append(f"… ще {len(d.incoming) - shown} шт")
         lines.append("")
 
     if d.transfers:
