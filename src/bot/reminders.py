@@ -13,6 +13,7 @@ import datetime
 import logging
 import re
 import time
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
@@ -391,6 +392,14 @@ async def run_transfer_check(bot, storage_manager: UserSettingsManager, settings
 
 
 CARD_REMINDER_INTERVAL = 3600  # seconds between "set the payout card" reminders
+REMINDER_HOURS = (8, 20)  # hourly reminders only while the branches work: 08:00 <= time < 20:00 Kyiv
+REMINDER_TZ = "Europe/Kyiv"
+
+
+def in_reminder_hours(now: float) -> bool:
+    """True when `now` (epoch seconds) falls inside the working hours of the branches."""
+    hour = datetime.datetime.fromtimestamp(now, ZoneInfo(REMINDER_TZ)).hour
+    return REMINDER_HOURS[0] <= hour < REMINDER_HOURS[1]
 
 
 def format_card_reminder(pending: List[PendingCardReminder]) -> str:
@@ -399,7 +408,7 @@ def format_card_reminder(pending: List[PendingCardReminder]) -> str:
     for p in pending:
         who = f" · {p.account}" if p.account else ""
         lines.append(f"  • `{p.int_doc_number}` · {int(p.cod_amount)} грн{who}")
-    lines += ["", "Коли зробите — натисніть «Що зроблено». Інакше нагадуватиму щогодини."]
+    lines += ["", "Коли зробите — натисніть «Що зроблено». Інакше нагадуватиму щогодини (з 8:00 до 20:00)."]
     return "\n".join(lines)
 
 
@@ -423,8 +432,10 @@ async def send_card_reminder(bot, storage_manager: UserSettingsManager, user_id:
 
 
 async def run_card_reminders(bot, storage_manager: UserSettingsManager, now: Optional[float] = None) -> int:
-    """Remind every user whose last reminder is an hour old (or never sent). Returns reminders sent."""
+    """Remind every user whose last reminder is an hour old (or never sent), only 08:00-20:00. Returns reminders sent."""
     now = now if now is not None else time.time()
+    if not in_reminder_hours(now):
+        return 0   # quiet hours: the first reminder after 08:00 is already overdue, so it goes out then
     sent = 0
     for uid_str, us in list(storage_manager.data.items()):
         if not us.pending_card_reminders or now - us.card_reminder_last_sent < CARD_REMINDER_INTERVAL:

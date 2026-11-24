@@ -1,5 +1,8 @@
 """Tests for per-account COD switch, COD account rotation and the hourly payout-card reminder."""
 
+import datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 
 from src.storage import UserSettingsManager, SenderProfile, UserCustomSettings, PendingCardReminder
@@ -13,6 +16,9 @@ from src.bot.keyboards import (
 )
 
 UID = 555
+# 2026-11-24 09:00 Kyiv: inside the 08:00-20:00 reminder window
+T0 = datetime.datetime(2026, 11, 24, 9, 0, tzinfo=ZoneInfo("Europe/Kyiv")).timestamp()
+HOUR = 3600
 
 
 def _manager(tmp_path):
@@ -91,7 +97,7 @@ async def test_reminders_work_on_a_reloaded_manager(tmp_path):
     sm.add_pending_card_reminder(UID, PendingCardReminder(int_doc_number="T1", cod_amount=1500))
     reloaded = _manager(tmp_path)          # settings come from JSON: values must be models, not dicts
     bot = _Bot()
-    assert await run_card_reminders(bot, reloaded, now=1_000_000.0) == 1
+    assert await run_card_reminders(bot, reloaded, now=T0) == 1
     assert "T1" in bot.sent[0][1]
 
 
@@ -135,7 +141,7 @@ async def test_reminder_repeats_hourly_until_done(tmp_path):
     sm = _with_profiles(tmp_path)
     sm.add_pending_card_reminder(UID, PendingCardReminder(int_doc_number="T1", cod_amount=1500))
     bot = _Bot()
-    t0 = 1_000_000.0
+    t0 = T0
 
     assert await run_card_reminders(bot, sm, now=t0) == 1                                 # never sent -> sent now
     assert await run_card_reminders(bot, sm, now=t0 + CARD_REMINDER_INTERVAL - 1) == 0    # not an hour yet
@@ -144,7 +150,7 @@ async def test_reminder_repeats_hourly_until_done(tmp_path):
     assert len(bot.sent) == 3
 
     sm.remove_pending_card_reminder(UID, "T1")                                            # "Що зроблено"
-    assert await run_card_reminders(bot, sm, now=t0 + 10 * CARD_REMINDER_INTERVAL) == 0   # stops for good
+    assert await run_card_reminders(bot, sm, now=t0 + 5 * CARD_REMINDER_INTERVAL) == 0    # stops for good
     assert len(bot.sent) == 3
 
 
@@ -165,9 +171,9 @@ async def test_one_message_lists_all_pending_with_a_button_each(tmp_path):
 async def test_failed_send_is_retried_and_never_raises(tmp_path):
     sm = _with_profiles(tmp_path)
     sm.add_pending_card_reminder(UID, PendingCardReminder(int_doc_number="T1", cod_amount=1500))
-    assert await run_card_reminders(_Bot(fail=True), sm, now=5_000.0) == 0       # no exception escapes
+    assert await run_card_reminders(_Bot(fail=True), sm, now=T0) == 0       # no exception escapes
     assert sm.get_user_settings(UID).card_reminder_last_sent == 0.0               # not marked as sent
-    assert await run_card_reminders(_Bot(), sm, now=5_001.0) == 1                 # next tick retries
+    assert await run_card_reminders(_Bot(), sm, now=T0 + 1) == 1                 # next tick retries
 
 
 def test_format_card_reminder_mentions_website_not_app():
@@ -186,3 +192,14 @@ def test_client_card_keyboard_toggle_label_follows_state():
     assert "Вимкнути" in text_on and "Дозволити" in text_off
     assert cb_on.action == cb_off.action == "cod_toggle" and cb_on.profile_id == "a"
     assert len(get_card_reminder_keyboard(["1" * 14]).inline_keyboard[0][0].callback_data.encode()) <= 64
+
+
+@pytest.mark.asyncio
+async def test_no_hourly_reminders_outside_branch_hours(tmp_path):
+    sm = _with_profiles(tmp_path)
+    sm.add_pending_card_reminder(UID, PendingCardReminder(int_doc_number="T1", cod_amount=1500))
+    bot = _Bot()
+    assert await run_card_reminders(bot, sm, now=T0 + 10.9 * HOUR) == 1      # 19:54 -> still sends
+    assert await run_card_reminders(bot, sm, now=T0 + 11 * HOUR) == 0        # 20:00 -> quiet
+    assert await run_card_reminders(bot, sm, now=T0 + 22 * HOUR) == 0        # 07:00 next day -> quiet
+    assert await run_card_reminders(bot, sm, now=T0 + 23 * HOUR) == 1        # 08:00 -> overdue one goes out
