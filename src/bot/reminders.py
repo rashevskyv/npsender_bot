@@ -11,6 +11,7 @@ not picked up, and uncollected transfers; it adds a passport reminder from 30 00
 import asyncio
 import datetime
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
@@ -29,6 +30,8 @@ logger = logging.getLogger(__name__)
 PASSPORT_THRESHOLD = 30000.0
 # Max lines per list in one message (keeps the text under Telegram's 4096-char limit).
 _MAX_LINES = 15
+_MAX_PARCELS = 30
+_MSG_LIMIT = 3800  # a body longer than this is sent as several messages
 
 # (profile display name, its COD shipments for the period)
 ProfileReport = Tuple[str, List[CODItemInfo]]
@@ -171,9 +174,9 @@ class AccountDigest:
 
     @property
     def needs_passport(self) -> bool:
-        """Any waiting transfer or incoming COD of PASSPORT_THRESHOLD or more."""
+        """Any waiting transfer or incoming amount due of PASSPORT_THRESHOLD or more."""
         return any(t.cod_amount >= PASSPORT_THRESHOLD for t in self.transfers) or any(
-            w.cod_amount >= PASSPORT_THRESHOLD for w in self.incoming
+            w.amount_due >= PASSPORT_THRESHOLD for w in self.incoming
         )
 
 
@@ -207,7 +210,7 @@ async def gather_account_digests(
             name=format_profile_display_name(p, profiles),
             eff=eff,
             transfers=_waiting_items(transfers),
-            incoming=sorted(incoming, key=lambda w: w.cod_amount, reverse=True),
+            incoming=incoming,
         )
 
     # One profile at a time: parallel profiles trip NP's "To many requests" limit and could drop data.
@@ -249,6 +252,26 @@ def format_digest_header(d: AccountDigest) -> str:
     return f"👤 *{d.name}*\n📞 `{d.eff.sender_phone}`"
 
 
+def _branch_label(address: Optional[str]) -> str:
+    """Branch for grouping: NP address without the weight limit, e.g. 'м. Київ, Відділення №5: вул. X, 1'."""
+    addr = re.sub(r"\s*\(до [^)]*\)", "", address or "").strip()
+    return addr if addr and addr != "N/A" else "Відділення не вказано"
+
+
+def _parcel_line(w: WaybillItemInfo) -> str:
+    """One parcel: number, what to pay (COD + unpaid delivery), storage fee, sender."""
+    flag = "🛂 " if w.amount_due >= PASSPORT_THRESHOLD else ""
+    parts = []
+    if w.cod_amount > 0:
+        parts.append(f"післяплата {int(w.cod_amount)}")
+    if w.delivery_due > 0:
+        parts.append(f"доставка {int(w.delivery_due)}")
+    due = f"{flag}до сплати `{int(w.amount_due)} грн` ({' + '.join(parts)})" if parts else "сплачено"
+    storage = f" · зберігання {int(w.storage_fee)} грн" if w.storage_fee > 0 else ""
+    sender = f" · від {w.sender_name}" if w.sender_name and w.sender_name != "N/A" else ""
+    return f"  • `{w.int_doc_number}` · {due}{storage}{sender}"
+
+
 def format_digest_body(d: AccountDigest) -> str:
     """Text under the card: passport reminder, waybill numbers to pick up, uncollected money transfers."""
     lines: List[str] = []
@@ -258,16 +281,26 @@ def format_digest_body(d: AccountDigest) -> str:
         lines.append("")
 
     if d.incoming:
-        lines.append(f"📥 *Посилки у відділенні — {len(d.incoming)} шт:*")
-        for w in d.incoming[:_MAX_LINES]:
-            cod = ""
-            if w.cod_amount > 0:
-                flag = "🛂 " if w.cod_amount >= PASSPORT_THRESHOLD else ""
-                cod = f" · {flag}післяплата `{int(w.cod_amount)} грн`"
-            sender = f" · від {w.sender_name}" if w.sender_name and w.sender_name != "N/A" else ""
-            lines.append(f"  • `{w.int_doc_number}`{cod}{sender}")
-        if len(d.incoming) > _MAX_LINES:
-            lines.append(f"  … ще {len(d.incoming) - _MAX_LINES} шт")
+        total_due = int(sum(w.amount_due for w in d.incoming))
+        lines.append(f"📥 *Посилки до отримання — {len(d.incoming)} шт, до сплати {total_due} грн*")
+        groups: dict = {}
+        for w in d.incoming:
+            groups.setdefault(_branch_label(w.address_recipient), []).append(w)
+        # Branches with the most money first, then by name.
+        ordered = sorted(groups.items(), key=lambda kv: (-sum(w.amount_due for w in kv[1]), kv[0]))
+        shown = 0
+        for branch, parcels in ordered:
+            if shown >= _MAX_PARCELS:
+                break
+            due = int(sum(w.amount_due for w in parcels))
+            lines.append(f"📍 *{branch}* — {len(parcels)} шт, до сплати {due} грн")
+            for w in sorted(parcels, key=lambda x: -x.amount_due):
+                if shown >= _MAX_PARCELS:
+                    break
+                lines.append(_parcel_line(w))
+                shown += 1
+        if len(d.incoming) > shown:
+            lines.append(f"  … ще {len(d.incoming) - shown} шт")
         lines.append("")
 
     if d.transfers:
@@ -310,7 +343,22 @@ async def send_account_digest(bot, chat_id: int, d: AccountDigest) -> None:
             logger.warning(f"Failed to send client card to {chat_id}: {e}")
     if not sent_card:
         await _send_markdown(bot, chat_id, header)
-    await _send_markdown(bot, chat_id, format_digest_body(d))
+    for part in _split_message(format_digest_body(d)):
+        await _send_markdown(bot, chat_id, part)
+
+
+def _split_message(text: str, limit: int = _MSG_LIMIT) -> List[str]:
+    """Split text on line boundaries so each part fits Telegram's message limit."""
+    parts: List[str] = []
+    cur = ""
+    for line in text.split("\n"):
+        if cur and len(cur) + len(line) + 1 > limit:
+            parts.append(cur.strip())
+            cur = ""
+        cur += line + "\n"
+    if cur.strip():
+        parts.append(cur.strip())
+    return parts or [text]
 
 
 async def run_transfer_check(bot, storage_manager: UserSettingsManager, settings: Settings) -> int:

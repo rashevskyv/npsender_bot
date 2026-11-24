@@ -67,11 +67,13 @@ def test_format_transfers_report_empty():
     assert "Немає налаштованих користувачів" in format_transfers_report([], "Листопад 2026")
 
 
-def _incoming(num, cod=0.0, state_id="7", sender="Олег"):
+def _incoming(num, cod=0.0, state_id="7", sender="Олег", addr="м. Київ, Відділення №1 (до 30 кг): вул. А, 1",
+              delivery=0.0, storage=0.0):
     return WaybillItemInfo(
         int_doc_number=num, state_name="Прибув у відділення", state_id=state_id,
         recipient_name="Я", sender_name=sender, city_recipient="Київ",
-        address_recipient="Відділення 1", cost=0.0, cod_amount=cod, description="Посилка",
+        address_recipient=addr, cost=0.0, cod_amount=cod, delivery_due=delivery,
+        storage_fee=storage, description="Посилка",
     )
 
 
@@ -96,15 +98,23 @@ async def test_get_uncollected_incoming_keeps_only_arrived_and_parses_cod(monkey
          "SenderContactPerson": "Олег", "CityRecipientDescription": "Київ"},
         {"IntDocNumber": "A2", "StateId": "7", "StateName": "Прибув у відділення",
          "AfterpaymentOnGoodsCost": "", "RedeliverySum": "0"},   # "0" string must not become COD
+        {"IntDocNumber": "A5", "StateId": "7", "StateName": "Прибув у відділення",
+         "DocumentCost": 180, "ExpressWaybillPaymentStatus": "NeedPayment", "StoragePrice": 35},
+        {"IntDocNumber": "A6", "StateId": "7", "StateName": "Прибув у відділення",
+         "DocumentCost": 145, "ExpressWaybillPaymentStatus": "Payed"},     # sender already paid
         {"IntDocNumber": "A3", "StateId": "5", "StateName": "У дорозі", "RedeliverySum": "999"},
         {"IntDocNumber": "A4", "StateId": "9", "StateName": "Отримано", "RedeliverySum": "999"},
     ]
     client = NovaPoshtaClient(_eff())
     monkeypatch.setattr(client, "_fetch_raw_incoming_waybills_with_cache", AsyncMock(return_value=raw))
     items = await client.get_uncollected_incoming(user_phone="380991112233")
-    assert [i.int_doc_number for i in items] == ["A1", "A2"]
-    assert items[0].cod_amount == 1500.0
-    assert items[1].cod_amount == 0.0
+    assert [i.int_doc_number for i in items] == ["A1", "A2", "A5", "A6"]
+    by = {i.int_doc_number: i for i in items}
+    assert by["A1"].cod_amount == 1500.0 and by["A1"].amount_due == 1500.0
+    assert by["A2"].cod_amount == 0.0
+    assert by["A5"].delivery_due == 180.0 and by["A5"].amount_due == 180.0   # unpaid delivery is due
+    assert by["A5"].storage_fee == 35.0 and by["A5"].amount_due == 180.0     # storage not in the sum
+    assert by["A6"].delivery_due == 0.0 and by["A6"].amount_due == 0.0       # already paid
 
 
 def test_needs_passport_threshold_is_inclusive():
@@ -126,7 +136,7 @@ def test_format_digest_lists_numbers_and_passport_note():
     assert "Користувач 1" in header and "380991112233" in header      # phone as text
     body = format_digest_body(d)
     assert "I100" in body and "I101" in body and "T900" in body       # waybill numbers
-    assert "післяплата `1500 грн`" in body
+    assert "до сплати `1500 грн` (післяплата 1500)" in body
     assert "30 000" in body and "паспорт" in body                     # passport reminder
     # no passport note below the threshold
     low = AccountDigest("A", _eff(), incoming=[_incoming("I1", cod=500)])
@@ -193,3 +203,32 @@ async def test_run_transfer_check_silent_when_nothing_waiting(tmp_path, monkeypa
     bot = _FakeBot()
     assert await run_transfer_check(bot, _storage(tmp_path), _eff()) == 0
     assert bot.sent == []
+
+
+def test_format_digest_groups_incoming_by_branch_with_amounts():
+    b1 = "м. Київ, Відділення №1 (до 30 кг): вул. А, 1"
+    b2 = "м. Львів, Відділення №7 (до 30 кг на одне місце): вул. Б, 2"
+    d = AccountDigest("Користувач 1", _eff(), incoming=[
+        _incoming("I1", delivery=180, addr=b1),
+        _incoming("I2", cod=1000, delivery=100, addr=b1),
+        _incoming("I3", addr=b2),                       # paid -> nothing to pay
+        _incoming("I4", addr=""),                       # branch unknown
+    ])
+    body = format_digest_body(d)
+    assert "4 шт, до сплати 1280 грн" in body           # total over all parcels
+    assert "📍 *м. Київ, Відділення №1: вул. А, 1* — 2 шт, до сплати 1280 грн" in body
+    assert "(до 30 кг" not in body                       # weight limit stripped from the branch
+    assert "📍 *м. Львів, Відділення №7: вул. Б, 2* — 1 шт, до сплати 0 грн" in body
+    assert "Відділення не вказано" in body
+    assert body.index("I2") > body.index("№1") and body.index("I3") > body.index("№7")  # under its branch
+    assert "до сплати `1100 грн` (післяплата 1000 + доставка 100)" in body
+    assert "сплачено" in body                            # I3
+    # storage is shown but not summed
+    assert "зберігання 35 грн" in format_digest_body(AccountDigest("A", _eff(), incoming=[_incoming("I5", delivery=180, storage=35)]))
+
+
+def test_split_message_respects_limit():
+    text = chr(10).join(f"line {i} " + "x" * 90 for i in range(100))
+    parts = reminders._split_message(text, limit=1000)
+    assert len(parts) > 1 and all(len(p) <= 1000 for p in parts)
+    assert chr(10).join(parts) == text

@@ -277,6 +277,10 @@ def _normalize_phone_doc(doc: Dict[str, Any], source: str = "phone") -> Dict[str
         "Description": str(doc.get("CargoDescription", "Посилка")),
         "EstimatedDeliveryDate": est_date,
         "AfterpaymentOnGoodsCost": ap_cost,
+        # Payment-at-pickup fields (incoming): delivery cost, who still owes it, storage fee.
+        "DocumentCost": doc.get("DocumentCost"),
+        "ExpressWaybillPaymentStatus": doc.get("ExpressWaybillPaymentStatus"),
+        "StoragePrice": doc.get("StoragePrice"),
         "RedeliverySum": str(doc.get("RedeliverySum", "")),
         "CardMaskedNumber": card_mask,
         "RedeliveryPaymentCard": card_mask,
@@ -1355,6 +1359,13 @@ class NovaPoshtaClient:
                     address_recipient=str(doc.get("RecipientAddressDescription", "N/A")),
                     cost=_extract_float_amount(doc.get("Cost")),
                     cod_amount=cod,
+                    # NeedPayment = the recipient still owes the delivery; Payed / PaymentNotAvailable = nothing.
+                    delivery_due=(
+                        _extract_float_amount(doc.get("DocumentCost"))
+                        if doc.get("ExpressWaybillPaymentStatus") == "NeedPayment"
+                        else 0.0
+                    ),
+                    storage_fee=_extract_float_amount(doc.get("StoragePrice")),
                     cod_payment_type="card" if doc.get("CardMaskedNumber") else "cash",
                     description=str(doc.get("Description", "Посилка")),
                     estimated_delivery_date=doc.get("EstimatedDeliveryDate"),

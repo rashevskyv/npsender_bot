@@ -77,11 +77,18 @@ class WaybillItemInfo(BaseModel):
     cod_amount: float = 0.0
     cod_payment_type: str = "cash"
     payer_type: str = "Recipient"
+    delivery_due: float = 0.0  # delivery the recipient still has to pay at pickup (incoming)
+    storage_fee: float = 0.0  # storage price as reported by NP; not included in amount_due
     description: str
     estimated_delivery_date: Optional[str] = None
     date_created: Optional[str] = None
     is_light_return: bool = False
     scan_sheet_number: Optional[str] = None
+
+    @property
+    def amount_due(self) -> float:
+        """Money the recipient pays at pickup: COD plus unpaid delivery."""
+        return self.cod_amount + self.delivery_due
 
 
 class ScanSheetInfo(BaseModel):
